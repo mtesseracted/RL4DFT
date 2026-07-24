@@ -1,0 +1,8 @@
+# editor files
+*~
+*.swp
+.vscode/
+
+# build files
+__pycache__
+*.egg-info
