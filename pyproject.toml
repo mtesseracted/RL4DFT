@@ -22,3 +22,6 @@ packages = ["xcsearch"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: reference solves / full search (deselect with '-m \"not slow\"')",
+]
