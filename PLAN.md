@@ -64,7 +64,9 @@ assume Optuna, an RL library, or any specific framework. Concretely:
   per-regime error vector, condition violations) emitted by evaluators,
   consumed by ranking policies and `tell()`, indexed by the feature-1 LSH
   store. This data shape matters more than any class diagram; components
-  can be rewritten freely as long as the record format holds.
+  can be rewritten freely as long as the record format holds. The record
+  store is **SQLite from the start**: the feature-4 dashboard live-tails
+  it, and append-only rows make history replay free.
 - **No plugin registry, config-file composition, or event bus for now**:
   components are constructed explicitly in a script and passed to the
   driver (constructor injection). Any of those can be added later without
@@ -91,6 +93,13 @@ feature (definitions under Features below):
   exact-condition self-tests, nearly free once feature 2 exists) and
   rung 1 (Stage 1's frozen-density evaluation). Higher rungs and the
   escalation policy wait for Stage 3.
+- **Feature 4 — visualization.** Both endpoints in first-version form:
+  the observer dashboard over the SQLite record store (formula panel,
+  heatmap with baseline dropdown, drill-down, 1D detail curves, history
+  scrubber), and the human-optimizer endpoint in its minimal parametric
+  form — coefficient sliders/boxes over θ wired through a
+  `HumanOptimizer(Optimizer)` ask–tell adapter. Candidate framework:
+  Plotly Dash behind a thin adapter of our own (@TODO confirm framework).
 - **Better optimizer.** Replace TPE with a stronger non-ML optimizer once
   the optimizer interface exists — candidates: CMA-ES for parameter
   fitting, regularized evolution once forms go symbolic (@TODO decide).
@@ -188,6 +197,44 @@ working versions land in Stage 2; mature versions in Stage 3+.
      context database. Intransitive comparison cycles are signal, not
      noise: they mark where the test distribution is under-specified and
      the critic should attack next.
+4. **Visualization and inspection** — a dashboard with two endpoints
+   sharing one read-only *inspector* over the record store.
+   - **4a. Observer endpoint** — attach to a run (live-tailed or post
+     hoc) and view a single agent/optimizer's progress and current state.
+   - **4b. Human-optimizer endpoint** — the inspector plus a proposal
+     panel. Architecturally a `HumanOptimizer(Optimizer)` ask–tell
+     adapter: `ask()` blocks until the UI submits a candidate, `tell()`
+     renders the evaluation records back. The human plays the same game
+     through the same port as TPE or an RL actor. How the functional form
+     is manipulated stays notional for now; the only settled point is
+     that the Stage 2 parametric version is coefficient sliders/boxes
+     over θ, while symbolic-form editing is unspecified (and is the one
+     part likely to outgrow a dashboard framework).
+   - **4c. The inspector.** Panels, each a pure function of records:
+     - *Formula panel*: the candidate rendered as a LaTeX equation
+       (functional representations carry a `to_latex()`).
+     - *Performance heatmap*: rows = components of the 3b ranking vector;
+       columns = system bins under a swappable grouping key (electron
+       count, family, regime). Cell color = error relative to a baseline
+       picked from a dropdown of what is available — a baseline is any
+       candidate or reference method with records in the store (LDA is
+       always seeded; higher-order references appear as they land).
+     - *Drill-down*: heatmap cell → list of member systems with scalar
+       errors → single-system detail view.
+     - *System detail*: renderer chosen by the system's world. 1D:
+       wells on a line, n(x), and — once 2a lands — the v_xc(x)-error
+       and one-step δn(x) curves (the 1D form of "largest density-error
+       regions"). 3D worlds (later): ball-and-stick with view modes —
+       density isolevels, largest-density-error regions — plus the
+       per-system error table.
+     - *History scrubber*: slider, forward/reverse step controls, and a
+       trial-number box over the append-only record sequence; every
+       panel re-renders at trial t, with a best-so-far loss strip as
+       context.
+   - **Rule: the viz computes no physics.** Everything displayed is in a
+     record or reachable from one (e.g. a pointer to cached density
+     arrays). This keeps the record schema honest and complete, and
+     keeps the dashboard swappable.
 
 ## Open questions
 
