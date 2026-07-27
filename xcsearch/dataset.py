@@ -129,12 +129,24 @@ def _total_energy(system: System) -> float:
     return solve_system(system).e_exact + system.nuclear_repulsion()
 
 
-def find_req(builder, r_scan: np.ndarray | None = None) -> float:
-    """Locate the equilibrium separation as the interior minimum of E(R).
+def find_req(
+    builder, r_scan: np.ndarray | None = None, fallback: float | None = None
+) -> float:
+    """Reference separation for a molecule: the interior minimum of E(R).
 
     E(R) is the Born-Oppenheimer curve (electronic + nuclear repulsion); the
     electronic energy alone falls monotonically as the wells merge and has no
     interior minimum.
+
+    Not every system in D7 is bound. Every molecule here carries exactly two
+    electrons, so any well set with total nuclear charge above 2 is a cation,
+    and the interaction v(u) = A exp(-kappa |u|) is *bounded*: unlike Coulomb,
+    it cannot hold a strongly charged well set together. Those curves fall
+    monotonically to their dissociation limit and have no equilibrium at all.
+    For them ``fallback`` supplies a nominal separation to sample around --
+    such a record is still a perfectly good two-electron density for fitting,
+    it just is not sitting at an equilibrium geometry. With no ``fallback``
+    the missing minimum is an error rather than a silently bogus R_eq.
     """
     if r_scan is None:
         # Wide enough to bracket the interior minimum for both weakly bound
@@ -142,9 +154,14 @@ def find_req(builder, r_scan: np.ndarray | None = None) -> float:
         r_scan = np.linspace(0.8, 7.0, 20)
     energies = np.array([_total_energy(builder(r)) for r in r_scan])
     i = int(np.argmin(energies))
-    assert 0 < i < len(r_scan) - 1, (
-        f"E(R) minimum at scan edge (i={i}); widen the scan range"
-    )
+    if not 0 < i < len(r_scan) - 1:
+        if fallback is not None:
+            return float(fallback)
+        raise ValueError(
+            f"E(R) minimum at scan edge (i={i}, R={r_scan[i]:.2f}): this well "
+            "set is unbound with two electrons, so it has no R_eq. Pass "
+            "`fallback` to sample around a nominal separation instead."
+        )
     # Parabolic (vertex) refinement through the three bracketing points.
     r0, r1, r2 = r_scan[i - 1], r_scan[i], r_scan[i + 1]
     e0, e1, e2 = energies[i - 1], energies[i], energies[i + 1]
@@ -185,23 +202,37 @@ def _records_for_molecule(name, builder, r_eq, samples):
     return out
 
 
+# Molecules that are unbound at two electrons (total nuclear charge well above
+# 2, held together by a *bounded* exponential interaction): E(R) decreases all
+# the way to dissociation, so there is no R_eq. They still contribute valid
+# two-electron densities, sampled around this nominal separation -- the middle
+# of the range the genuinely bound molecules settle at (R_eq ~ 1.8 - 3.5).
+# The regime tags for these are "relative to nominal", not "relative to
+# equilibrium". Drop the entry to make a molecule's minimum mandatory again.
+_NOMINAL_R: dict[str, float] = {
+    "chain6": 2.5,
+    "trimer212": 2.5,
+    "homo22": 2.5,
+}
+
+
 def enumerate_systems() -> list[tuple[System, str, str, str]]:
     """Full D7 record list as ``(system, regime_tag, split, record_name)``.
 
     Molecular R_eq values are located on the fly (this is the expensive part
-    of a dataset build).
+    of a dataset build); unbound molecules fall back to ``_NOMINAL_R``.
     """
     builders = _molecule_builders()
     records: list[tuple[System, str, str, str]] = []
 
     train_molecules = ["chain2", "chain6", "diatomic12", "trimer121", "trimer212"]
     for name in train_molecules:
-        r_eq = find_req(builders[name])
+        r_eq = find_req(builders[name], fallback=_NOMINAL_R.get(name))
         records += _records_for_molecule(name, builders[name], r_eq, _TRAIN_MOL_SAMPLES)
 
     # Held-out molecules over their whole range.
     for name in ["chain4", "homo22"]:
-        r_eq = find_req(builders[name])
+        r_eq = find_req(builders[name], fallback=_NOMINAL_R.get(name))
         records += _records_for_molecule(name, builders[name], r_eq, _HOLDOUT_MOL_SAMPLES)
 
     # Atoms (no separation): Z = 1, 3, 4 train; the never-trained Z = 2 holdout.
