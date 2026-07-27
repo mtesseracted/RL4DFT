@@ -98,8 +98,10 @@ feature (definitions under Features below):
   heatmap with baseline dropdown, drill-down, 1D detail curves, history
   scrubber), and the human-optimizer endpoint in its minimal parametric
   form — coefficient sliders/boxes over θ wired through a
-  `HumanOptimizer(Optimizer)` ask–tell adapter. Candidate framework:
-  Plotly Dash behind a thin adapter of our own (@TODO confirm framework).
+  `HumanOptimizer(Optimizer)` ask–tell adapter. Framework: **Plotly
+  Dash**, behind a thin adapter of our own — the viz reads only the
+  record store, so a later swap to a full web stack (e.g. for symbolic
+  formula editing) rewrites the adapter, not the system.
 - **Better optimizer.** Replace TPE with a stronger non-ML optimizer once
   the optimizer interface exists — candidates: CMA-ES for parameter
   fitting, regularized evolution once forms go symbolic (@TODO decide).
