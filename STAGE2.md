@@ -90,8 +90,10 @@ classes, constructor injection in one composition script — no
   `FrozenDensityEvaluator` (energy MSE only) + `MeanSquaredError` must
   reproduce Stage 1's best θ and train MSE **exactly**: same seed → same
   trial sequence → identical floats. Any deviation is a refactor bug to
-  find, not a tolerance to widen. This is sub-stage 2.1's acceptance gate
-  and the operational meaning of "same functionality".
+  find, not a tolerance to widen. This is sub-stage 2.1c's acceptance
+  gate and the operational meaning of "same functionality"; 2.1d pins the
+  seeded result as a checked-in regression fixture that every later
+  sub-stage keeps asserting.
 - **D16 — Optimizer upgrade: CMA-ES** (resolves the PLAN.md @TODO). The
   Stage 2 space is a fixed-length θ vector — CMA-ES's home turf. Lands as
   a `CoefficientOptimizer` adapter; swapping it in is a one-line change
@@ -151,26 +153,65 @@ Stage 1 → Stage 2 migration map:
 | `search.py` | `optimizers/optuna_tpe.py` |
 | `run_stage1.py` | `run_stage2.py` |
 
-`search.py`, `evaluate.py`, and `run_stage1.py` are deleted once the D15
-gate passes — no legacy shims. Tests migrate to mirror the new modules.
+`search.py`, `evaluate.py`, and `run_stage1.py` are deleted in sub-stage
+2.1d, once the D15 gate passes — no legacy shims. Tests migrate to mirror
+the new modules.
 
 ## Sub-stages
 
+Each sub-stage leaves the pipeline runnable and the D15 result intact —
+the plan is implementable strictly one component at a time. The numbering
+is a valid order, but not a forced one: given 2.1 + 2.2, sub-stages
+2.3–2.6 are mutually independent and may land in any order; 2.7 needs 2.2
+(and its derivative curves need 2.4).
+
 ### 2.1 — Ports, driver, and the drop-in refactor
 
-The big move, and nothing but the move: no new physics, no new features.
+The big move — no new physics, no new features — done strangler-fig
+style: the new loop grows *alongside* the old one, and the Stage 1
+pipeline stays green until the final step. Each of 2.1a–2.1d is
+independently landable with the suite passing.
 
-- `ports.py`, `records.py`, `driver.py`; the migration-map moves;
-  `LocalAnsatz`/`LocalAnsatzForm`; `FixedFormOptimizer`; `OptunaTPE`
-  (ask–tell via `study.ask()`/`study.tell()`, seeded TPESampler);
+#### 2.1a — Relocation only
+
+- Move `world.py`, `solver.py`, `dataset.py`, `functionals.py` into
+  `worlds/exp1d/`; fix imports; `functionals` now imports the interaction
+  constants from `world` (removing Stage 1's duplicated `_A`/`_KAPPA`).
+  No behavior change of any kind.
+- **Acceptance**: `run_stage1` runs and the full Stage 1 test suite
+  passes with only import paths updated.
+
+#### 2.1b — Core additions (pure additions)
+
+- `ports.py`, `records.py`; `LocalAnsatz(Functional)` and
+  `LocalAnsatzForm(FunctionalForm)` as wrappers over the existing
+  functions, with the D6/D8 search box in `bounds()`.
+- **Acceptance**: (a) `LocalAnsatzForm.build(θ).exc(n, w)` equals the
+  Stage 1 `exc(n, w, θ)` bitwise for random θ; (b) `bounds()` matches the
+  D8 box; (c) the Stage 1 loop is untouched and green.
+
+#### 2.1c — The new loop beside the old
+
+- `driver.py`; `FixedFormOptimizer`; `OptunaTPE` (ask–tell via
+  `study.ask()`/`study.tell()`, seeded TPESampler);
   `FrozenDensityEvaluator` emitting one rung-1 record per system with
   `metric = "exc_sq_error"`; `MeanSquaredError`; `run_stage2.py`
-  (in-memory record list stands in for the store until 2.2).
-- **Acceptance**: (a) the D15 equivalence gate — identical best θ and
-  train MSE to a Stage 1 run at the same seed; (b) an import-audit test:
-  a pytest that greps each module's imports against the ownership table
-  and fails on any undeclared import; (c) old entry points deleted, full
-  test suite green.
+  (in-memory record list stands in for the store until 2.2). Both entry
+  points now coexist.
+- **Acceptance**: (a) the D15 gate as an ordinary test — `run_stage1` and
+  `run_stage2` at the same seed produce identical best θ and train MSE;
+  (b) `MeanSquaredError.score` equals `evaluate.loss` for the same θ and
+  dataset.
+
+#### 2.1d — Retire Stage 1
+
+- Delete `run_stage1.py`, `search.py`, `evaluate.py`; migrate their
+  remaining tests; add the import-audit test; pin the seeded D15 result
+  (seed, best θ, train MSE) as a checked-in regression fixture.
+- **Acceptance**: (a) the import audit — a pytest that greps each
+  module's imports against the ownership table and fails on any
+  undeclared import — passes; (b) full test suite green; (c) the D15
+  fixture test passes against the pinned values.
 
 ### 2.2 — SQLite record store and system geometry
 
@@ -184,7 +225,8 @@ The big move, and nothing but the move: no new physics, no new features.
   feature-4 heatmap query (mean value by regime × metric for a candidate,
   relative to a baseline candidate) is a single SQL statement with no
   Python post-processing; (c) a second reader process sees new rows
-  mid-run (WAL live-tail).
+  mid-run (WAL live-tail); (d) the pinned D15 fixture still passes —
+  routing records through the store changes no number.
 
 ### 2.3 — Rung 0: exact-condition self-tests (feature 2)
 
@@ -201,7 +243,8 @@ The big move, and nothing but the move: no new physics, no new features.
 - **Acceptance**: (a) the LDA member scores 0.0 on uniform-gas
   consistency; (b) a deliberately self-interacting form produces a
   nonzero violation record with rung 0; (c) conditions never import the
-  solver (covered by the 2.1 import audit).
+  solver (covered by the 2.1 import audit); (d) the pinned D15 fixture
+  still passes — rung-0 records are invisible to the energy-only policy.
 
 ### 2.4 — Rung 1 derivative losses (feature 2a)
 
@@ -225,8 +268,9 @@ The big move, and nothing but the move: no new physics, no new features.
   tolerance for random θ; (b) inversion closes the loop: solving the
   one-body problem with the inverted v_s reproduces n_exact to grid
   precision; (c) one KS step with the *exact* v_xc moves the density by
-  less than the discretization error; (d) with the energy-only policy,
-  D15 equivalence still holds (new metrics change no Stage 1 number).
+  less than the discretization error; (d) the pinned D15 fixture still
+  passes with the energy-only policy (new metrics change no Stage 1
+  number).
 
 ### 2.5 — Near-duplicate index (feature 1)
 
