@@ -82,7 +82,7 @@ regime) error table. The best θ is also saved as JSON, together with the
 exponent menu, the baseline, both MSEs, the trial count and the seed — enough
 to interpret the vector without the run that produced it.
 
-Tests: `.venv/bin/pytest -m "not slow"` runs the fast suite (33 tests, a few
+Tests: `.venv/bin/pytest -m "not slow"` runs the fast suite (50 tests, a few
 minutes); dropping the marker adds 8 slower cases that do real reference
 solves and a full search.
 
@@ -90,6 +90,33 @@ solves and a full search.
 plus an E(R) scan per molecule. Cost scales as (grid points)², and the widest
 dissociating geometries reach ~10⁶-dimensional eigenproblems, so a cold build
 takes hours. The search itself, on the cached data, takes seconds.
+
+## Plots
+
+```bash
+.venv/bin/python -m xcsearch.plots        # or: run_stage1 --plots
+```
+
+Writes two families of figure under `data/plots/` (a few minutes for the full
+set; `--data`, `--theta` and `--out` override the paths):
+
+- `density/<record>.png`, one per system — the exact reference density against
+  the **self-consistent** LDA and θ densities, with each nucleus marked on the
+  axis and labelled by Z. The legend carries each functional's total-energy
+  error ΔE and density error ∫|Δn| against the reference.
+- `energy/<molecule>.png`, one per molecule sampled at several bond lengths —
+  the Born–Oppenheimer curve E(R) for reference, LDA and θ, with the
+  extrapolation geometries shaded and each functional's MAE in the legend.
+
+This is the one place the project runs a self-consistent KS solve: the search
+scores candidates on frozen reference densities and never relaxes a density of
+its own (`ks.py` is post-processing, and nothing in the search path imports
+it). The distinction is the point — a functional can reproduce E_xc well *on
+the exact density* and still relax to a poor density, and only these figures
+show that. Where the SCF does not settle, the legend says so rather than
+quietly plotting a half-converged curve; the well-separated equal-well chains
+are genuinely near-degenerate at two electrons, and their density slides
+between wells instead of converging.
 
 ## What it does
 

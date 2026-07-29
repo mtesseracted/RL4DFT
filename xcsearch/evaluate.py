@@ -20,7 +20,13 @@ from .functionals import exc, LDA_THETA
 
 @dataclass
 class Record:
-    """One frozen system: its density and exact XC energy, with tags."""
+    """One frozen system: its density and exact XC energy, with tags.
+
+    The trailing geometry fields are written by newer dataset builds and are
+    ``None`` for caches predating them; they are used only by post-processing
+    (plots), never by the loss. See ``dataset.system_for_record`` for the
+    fallback that recovers them.
+    """
 
     name: str
     x: np.ndarray
@@ -30,6 +36,9 @@ class Record:
     e_xc_exact: float
     regime_tag: str
     split: str
+    well_z: np.ndarray | None = None
+    well_x: np.ndarray | None = None
+    r: float | None = None
 
 
 def load_dataset(path: str) -> list[Record]:
@@ -37,6 +46,7 @@ def load_dataset(path: str) -> list[Record]:
     records: list[Record] = []
     for file in sorted(glob.glob(os.path.join(path, "*.npz"))):
         d = np.load(file, allow_pickle=False)
+        stored = d.files
         records.append(
             Record(
                 name=str(d["name"]),
@@ -47,6 +57,9 @@ def load_dataset(path: str) -> list[Record]:
                 e_xc_exact=float(d["E_xc_exact"]),
                 regime_tag=str(d["regime_tag"]),
                 split=str(d["split"]),
+                well_z=d["well_z"] if "well_z" in stored else None,
+                well_x=d["well_x"] if "well_x" in stored else None,
+                r=float(d["R"]) if "R" in stored else None,
             )
         )
     return records

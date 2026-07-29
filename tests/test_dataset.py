@@ -13,6 +13,7 @@ from xcsearch.dataset import (
     extract_exc,
     find_req,
     enumerate_systems,
+    separation as _separation,
     _molecule_builders,
     _NOMINAL_R,
 )
@@ -54,14 +55,6 @@ def test_er_curve_has_interior_minimum(name):
 # nuclear charge >> 2 dissociates, so E(R) has no interior minimum. find_req
 # must fall back rather than blow up mid-build.
 # --------------------------------------------------------------------------
-def _separation(system) -> float:
-    """Nearest-neighbour spacing, which is R for every builder in D7."""
-    centers = [x for _, x in system.wells]
-    if len(centers) < 2:
-        return 0.0
-    return (max(centers) - min(centers)) / (len(centers) - 1)
-
-
 def _stub_energy(curve):
     """Patch _total_energy with an R -> E curve, skipping the real solves."""
     return lambda system: curve(_separation(system))

@@ -1,6 +1,6 @@
 """Stage 1 entry point: build dataset if absent, search, print the report.
 
-    python -m xcsearch.run_stage1 [--data DIR] [--trials N]
+    python -m xcsearch.run_stage1 [--data DIR] [--trials N] [--plots [DIR]]
 
 Ties the sub-stages together (STAGE1.md 1.6): build the frozen dataset if the
 cache is missing, run the TPE search over the exchange ansatz, and print the
@@ -46,6 +46,14 @@ def main() -> None:
     parser.add_argument(
         "--out", default="data/stage1/best_theta.json", help="where to write the best theta"
     )
+    parser.add_argument(
+        "--plots",
+        nargs="?",
+        const="data/plots",
+        default=None,
+        metavar="DIR",
+        help="also write post-processing figures (default dir: data/plots)",
+    )
     args = parser.parse_args()
 
     if not glob.glob(os.path.join(args.data, "*.npz")):
@@ -69,6 +77,16 @@ def main() -> None:
     print(f"Wrote best theta to {args.out}\n")
 
     print(format_report(report(best_theta, records)))
+
+    if args.plots is not None:
+        # Imported here, not at module scope: plotting pulls in matplotlib and
+        # the self-consistent solver, and a plain search run should need
+        # neither.
+        from .plots import make_plots
+
+        print(f"\nWriting figures to {args.plots}/ ...")
+        written = make_plots(args.data, best_theta, args.plots, verbose=False)
+        print(f"  {len(written)} figures.")
 
 
 if __name__ == "__main__":

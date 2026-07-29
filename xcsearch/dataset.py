@@ -243,6 +243,53 @@ def enumerate_systems() -> list[tuple[System, str, str, str]]:
     return records
 
 
+def system_for_record(name: str, grid: Grid) -> System:
+    """Rebuild the :class:`System` behind a cached record.
+
+    Post-processing (plots) needs the well positions and charges, which older
+    caches do not store. They are recoverable exactly: every builder puts its
+    first well at the origin and the rest at multiples of R, and ``_grid_for``
+    pads the well span by ``MARGIN`` on each side. So probing the builder at
+    R = 1 gives the span-per-R, and the grid's right edge gives the span.
+
+    Callers holding a cache that *does* store the geometry should use that;
+    this is the fallback, and ``geometry_is_consistent`` checks it.
+    """
+    if name.startswith("atom_Z"):
+        z = float(name[len("atom_Z"):])
+        return System([(z, 0.0)], n_elec=2, name=name)
+
+    molecule = name.split("_x")[0]
+    builders = _molecule_builders()
+    if molecule not in builders:
+        raise KeyError(f"no builder for molecule {molecule!r} (record {name!r})")
+    builder = builders[molecule]
+
+    span_per_r = max(x for _, x in builder(1.0).wells)
+    r = (float(grid.x.max()) - MARGIN) / span_per_r
+    return builder(r)
+
+
+def geometry_is_consistent(
+    system: System, grid: Grid, n: np.ndarray, e_exact: float, e_xc_exact: float
+) -> bool:
+    """Does ``system`` reproduce a record's stored E_xc from its stored density?
+
+    ``extract_exc`` runs the density against ``v_ext``, so it is sensitive to
+    every well charge and position. Agreement is strong evidence that a
+    reconstructed geometry is the one the record was built from.
+    """
+    return abs(extract_exc(e_exact, n, grid, system) - e_xc_exact) < 1e-8
+
+
+def separation(system: System) -> float:
+    """Nearest-neighbour well spacing -- R for every builder here; 0 for atoms."""
+    centers = sorted(x for _, x in system.wells)
+    if len(centers) < 2:
+        return 0.0
+    return (centers[-1] - centers[0]) / (len(centers) - 1)
+
+
 def build_dataset(out_dir: str) -> int:
     """Build the D7 dataset, writing one ``.npz`` per system. Returns count."""
     os.makedirs(out_dir, exist_ok=True)
@@ -260,5 +307,9 @@ def build_dataset(out_dir: str) -> int:
             regime_tag=regime,
             split=split,
             name=record_name,
+            # Geometry, so post-processing need not reconstruct it (D7).
+            well_z=np.array([z for z, _ in system.wells]),
+            well_x=np.array([x for _, x in system.wells]),
+            R=separation(system),
         )
     return len(records)
