@@ -98,13 +98,24 @@ feature (definitions under Features below):
   heatmap with baseline dropdown, drill-down, 1D detail curves, history
   scrubber), and the human-optimizer endpoint in its minimal parametric
   form — coefficient sliders/boxes over θ wired through a
-  `HumanOptimizer(Optimizer)` ask–tell adapter. Framework: **Plotly
+  `HumanOptimizer(CoefficientOptimizer)` ask–tell adapter (`STAGE2.md`
+  D11). Framework: **Plotly
   Dash**, behind a thin adapter of our own — the viz reads only the
   record store, so a later swap to a full web stack (e.g. for symbolic
   formula editing) rewrites the adapter, not the system.
 - **Better optimizer.** Replace TPE with a stronger non-ML optimizer once
-  the optimizer interface exists — candidates: CMA-ES for parameter
-  fitting, regularized evolution once forms go symbolic (@TODO decide).
+  the optimizer interface exists — decided: **CMA-ES** (`STAGE2.md` D16),
+  since the Stage 2 space is a fixed-length θ vector. Regularized
+  evolution waits for symbolic forms, where it arrives as a form
+  proposer.
+
+Class inventory, module ownership/visibility rules, and per-sub-stage
+implementation specs (2.1–2.7, each with acceptance tests) are settled in
+`STAGE2.md`, continuing the decision numbering from `STAGE1.md` (D9–D16).
+Notably: the optimizer port decomposes into a *form proposer* and a
+*coefficient optimizer* (D11, ports defined now, composed later as a
+drop-in), and "same functionality after the refactor" is pinned to an
+exact-equivalence gate against a seeded Stage 1 run (D15).
 
 ## Stage 3+ — ML-guided search
 
@@ -204,8 +215,9 @@ working versions land in Stage 2; mature versions in Stage 3+.
    - **4a. Observer endpoint** — attach to a run (live-tailed or post
      hoc) and view a single agent/optimizer's progress and current state.
    - **4b. Human-optimizer endpoint** — the inspector plus a proposal
-     panel. Architecturally a `HumanOptimizer(Optimizer)` ask–tell
-     adapter: `ask()` blocks until the UI submits a candidate, `tell()`
+     panel. Architecturally a `HumanOptimizer` ask–tell adapter — in the
+     Stage 2 parametric version a `CoefficientOptimizer` (`STAGE2.md`
+     D11): `ask()` blocks until the UI submits a candidate, `tell()`
      renders the evaluation records back. The human plays the same game
      through the same port as TPE or an RL actor. How the functional form
      is manipulated stays notional for now; the only settled point is
