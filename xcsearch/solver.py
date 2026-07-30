@@ -23,6 +23,7 @@ unchanged.
 from __future__ import annotations
 
 import numpy as np
+import scipy.linalg as sla
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
@@ -35,14 +36,54 @@ def _one_body(grid: Grid, v_ext: np.ndarray) -> sp.csr_matrix:
     return (kinetic + sp.diags(v_ext)).tocsr()
 
 
+def _tridiagonal_bands(h: sp.csr_matrix) -> tuple[np.ndarray, np.ndarray] | None:
+    """``(diagonal, off-diagonal)`` if ``h`` is tridiagonal, else ``None``.
+
+    A three-point stencil stays tridiagonal on a nonuniform grid too -- only
+    the band values change -- so this is a property of the stencil, not of
+    the uniform spacing.
+    """
+    offsets = {int(o) for o in h.todia().offsets}
+    if not offsets <= {-1, 0, 1}:
+        return None
+    return h.diagonal(0).copy(), h.diagonal(1).copy()
+
+
 def solve_1e(grid: Grid, v_ext: np.ndarray) -> tuple[float, np.ndarray]:
     """Ground state of one electron.
 
     Returns ``(E, psi)`` with ``psi`` normalised so ``sum(w * psi**2) == 1``.
     """
     h = _one_body(grid, v_ext)
-    # k=2 and a start vector make the Lanczos solve robust for the ground state.
-    vals, vecs = spla.eigsh(h, k=2, which="SA", v0=np.ones(grid.n_points))
+    # Direct tridiagonal eigensolve rather than Lanczos. Two reasons, both of
+    # which bite once the self-consistent post-processing starts feeding in
+    # rough potentials (v_ext + v_H + v_xc):
+    #
+    #  * Lanczos on "smallest algebraic" converges badly against a spectrum
+    #    reaching ~2/dx^2, and for those potentials failed outright.
+    #  * ARPACK is not deterministic on a *degenerate* spectrum: when the
+    #    Krylov space hits an invariant subspace it augments with an internal
+    #    random vector, and that generator carries state across calls. A chain
+    #    of well-separated identical wells is exactly that case, so which well
+    #    the ground state favoured changed from run to run -- and a plot you
+    #    cannot reproduce is worse than no plot. Passing v0 does not fix it;
+    #    LAPACK does.
+    #
+    # solve_2e_singlet keeps Lanczos: its Hamiltonian lives on the (x1, x2)
+    # tensor grid, where a direct solve is out of the question.
+    bands = _tridiagonal_bands(h)
+    if bands is not None:
+        diagonal, off_diagonal = bands
+        vals, vecs = sla.eigh_tridiagonal(
+            diagonal, off_diagonal, select="i", select_range=(0, 1)
+        )
+    else:
+        # Non-tridiagonal stencil: fall back to shift-invert Lanczos, sigma
+        # strictly below the spectrum floor (variationally, E >= min(v)).
+        vals, vecs = spla.eigsh(
+            h, k=2, sigma=float(np.min(v_ext)) - 1.0, which="LM",
+            v0=np.ones(grid.n_points),
+        )
     order = np.argsort(vals)
     e = float(vals[order[0]])
     v = vecs[:, order[0]]
