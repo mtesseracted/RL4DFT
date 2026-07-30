@@ -129,6 +129,14 @@ single 3+ bucket until we get closer.
   so the search does not circle through similar candidates.
 - Widening the search space: non-locality, symbolic forms, the
   constraint-satisfying family of 2c.
+- **Past 2 electrons in 1D, before any move to 3D**: replace exact
+  diagonalization with DMRG via **TeNPy** for the reference solves — the
+  exponential interaction has an exact compact MPO (why Baker et al.
+  chose it), so N > 2 stays cheap at dataset-build time. Ships as a new
+  adapter beside `solve_2e_singlet`, gated on reproducing the Lanczos
+  N = 2 results. Extraction needs the generalization that comes with any
+  N > 2 move: T_s via iterative KS inversion (the N-electron version of
+  the Stage 2.4 machinery), since T_vW is exact only for 2e singlets.
 - Higher rungs of the fidelity ladder (3a): CI/CCSD(T)-class references, a
   strong-correlation stress set, SCF spot-checks, and the noise-floor
   escalation policy.
