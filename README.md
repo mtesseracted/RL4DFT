@@ -58,6 +58,32 @@ product upward, laid out in `PLAN.md`. Standing design decisions so far:
 Early design phase. The premise (this README) comes first; `PLAN.md` with the
 staged implementation plan is being developed next.
 
+## Reading the code
+
+`tools/codemap.py` renders how the package fits together — every call between
+our own functions, nested by stack depth and foldable, with library calls
+(numpy, scipy, optuna) counted per function instead of expanded into the tree.
+That filter is the point: an IDE call hierarchy on this code is unreadable
+because `np.asarray` swamps everything.
+
+```sh
+python tools/codemap.py                # build/codemap.html -- open it
+python tools/codemap.py --format text  # indented tree, for the terminal
+python tools/codemap.py --format json  # the raw graph
+```
+
+It reads the source with `ast` and never imports or runs the package, so it is
+safe on a broken tree and needs no dependencies. Edges labelled *inferred*
+(a method bound by name), *ambiguous* or *dynamic* (a call through a parameter,
+like `builder(r)` inside `find_req`) are heuristics rather than facts, and are
+marked as such in every output.
+
+The graph is also assertable: `tests/test_codemap.py` walks everything
+reachable from `evaluate.loss` and fails if it ever reaches `solver` or
+`dataset`, which is the STAGE1 rung-1 rule — the references are frozen, so no
+reference solve may run in the search hot loop — enforced instead of merely
+documented.
+
 # References
 
 ## Non-local functionals

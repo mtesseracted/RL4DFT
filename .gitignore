@@ -6,6 +6,7 @@
 # build files
 __pycache__
 *.egg-info
+build/
 
 # virtualenvs
 .venv/
