@@ -200,6 +200,23 @@ placed in a layer, so it cannot quietly inherit someone else's colour.
 
 # References
 
+## Stage 1 world (1D exponential interaction)
+
+References cited in `STAGE1.md` (design decisions D1, D6; sub-stage 1.4).
+
+- T. E. Baker, E. M. Stoudenmire, L. O. Wagner, K. Burke & S. R. White,
+  *One-dimensional mimicking of electronic structure: The case for
+  exponentials*, [Phys. Rev. B **91**, 235141
+  (2015)](https://journals.aps.org/prb/abstract/10.1103/PhysRevB.91.235141)
+  ([arXiv:1504.05620](https://arxiv.org/abs/1504.05620)). Source of the
+  exponential interaction `v(u) = A·exp(−κ|u|)` and its fitted constants,
+  the closed-form 1D-LDA exchange, and the 1D-LDA correlation
+  parametrization for this world.
+  - Erratum: [Phys. Rev. B **93**, 119912(E)
+    (2016)](https://journals.aps.org/prb/abstract/10.1103/PhysRevB.93.119912)
+    — check it when resolving the `@TODO` verifications of the transcribed
+    constants and parametrizations.
+
 ## Non-local functionals
 
 Exactly known functionals and exactly solvable correlated systems. The
