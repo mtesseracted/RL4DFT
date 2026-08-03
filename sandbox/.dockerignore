@@ -1,0 +1,3 @@
+# The build context is sandbox/ only -- the repo itself is never copied into
+# the image, it arrives at runtime as a read-only mount.
+README.md

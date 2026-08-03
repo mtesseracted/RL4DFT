@@ -18,3 +18,7 @@ data/
 .pytest_cache/
 optuna*.db
 
+# work exported out of the Claude sandbox (sandbox/xcdev.sh export / fetch)
+*.bundle
+sandbox-*.tar
+
