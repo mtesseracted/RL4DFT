@@ -2,7 +2,7 @@
 # --dangerously-skip-permissions.
 #
 # The safety property does NOT come from this image: it comes from how the
-# container is run (see docker/xcdev.sh). Nothing on the host is ever mounted
+# container is run (see sandbox/xcdev.sh). Nothing on the host is ever mounted
 # writable, and the Docker socket is never exposed. Inside the container the
 # user has passwordless sudo on purpose -- the whole point is that Claude can
 # do anything it likes in here.

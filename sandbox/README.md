@@ -41,7 +41,7 @@ than as root.
 Build the image (a few minutes, mostly apt and npm):
 
 ```sh
-./docker/xcdev.sh build
+./sandbox/xcdev.sh build
 ```
 
 Under rootless podman the script adds `--userns=keep-id`, which maps your host
@@ -52,24 +52,24 @@ and everything else to a subuid, and the mode-0600 credentials file mounted at
 ## Use
 
 ```sh
-./docker/xcdev.sh sync-wip     # optional: carry uncommitted changes across
-./docker/xcdev.sh claude       # Claude, all permissions on
+./sandbox/xcdev.sh sync-wip     # optional: carry uncommitted changes across
+./sandbox/xcdev.sh claude       # Claude, all permissions on
 ```
 
 `claude` passes any extra arguments straight through, so
-`./docker/xcdev.sh claude -p "run the stage 1 tests"` works.
+`./sandbox/xcdev.sh claude -p "run the stage 1 tests"` works.
 
 Other subcommands:
 
 ```sh
-./docker/xcdev.sh shell             # bash in the sandbox
-./docker/xcdev.sh run pytest -q     # one-off command
-./docker/xcdev.sh log               # commits made inside the sandbox
-./docker/xcdev.sh ls [path]         # list files inside the sandbox
-./docker/xcdev.sh export            # git bundle of committed work -> host
-./docker/xcdev.sh fetch data -o r.tar   # result files -> host
-./docker/xcdev.sh reset             # discard the sandbox work volume
-./docker/xcdev.sh reset-all         # discard the work volume AND the login
+./sandbox/xcdev.sh shell             # bash in the sandbox
+./sandbox/xcdev.sh run pytest -q     # one-off command
+./sandbox/xcdev.sh log               # commits made inside the sandbox
+./sandbox/xcdev.sh ls [path]         # list files inside the sandbox
+./sandbox/xcdev.sh export            # git bundle of committed work -> host
+./sandbox/xcdev.sh fetch data -o r.tar   # result files -> host
+./sandbox/xcdev.sh reset             # discard the sandbox work volume
+./sandbox/xcdev.sh reset-all         # discard the work volume AND the login
 ```
 
 The work volume persists between runs, so you can stop and restart the sandbox
@@ -86,7 +86,7 @@ your filesystem — so this costs nothing in isolation.
 **Committed code** — as a git bundle:
 
 ```sh
-./docker/xcdev.sh export                        # writes sandbox-export.bundle
+./sandbox/xcdev.sh export                        # writes sandbox-export.bundle
 git bundle list-heads sandbox-export.bundle     # see what is in it
 git fetch sandbox-export.bundle stage1:sandbox-stage1
 git log sandbox-stage1                          # review before merging
@@ -96,9 +96,9 @@ git log sandbox-stage1                          # review before merging
 so *not* in the bundle. Look first, then pull what you want as a tar:
 
 ```sh
-./docker/xcdev.sh ls                      # what is in the sandbox checkout
-./docker/xcdev.sh ls data/stage1          # drill in
-./docker/xcdev.sh fetch data figures -o results.tar
+./sandbox/xcdev.sh ls                      # what is in the sandbox checkout
+./sandbox/xcdev.sh ls data/stage1          # drill in
+./sandbox/xcdev.sh fetch data figures -o results.tar
 tar -tvf results.tar                      # inspect before unpacking
 tar -xf results.tar -C /tmp/from-sandbox
 ```
@@ -134,7 +134,7 @@ Two caveats on what crosses into the sandbox in the first place:
   a window.
 - Claude's auto-updater is disabled inside the image (it is installed globally
   as root and would be shadowed by the `/home/dev` volume anyway). To move to a
-  newer Claude Code, rerun `./docker/xcdev.sh build`.
+  newer Claude Code, rerun `./sandbox/xcdev.sh build`.
 - If you would rather not share your host login, run with `XCDEV_NO_AUTH=1` and
   do `/login` inside the sandbox once — the token then lives in the sandbox
   home volume. Setting `ANTHROPIC_API_KEY` in your host environment takes

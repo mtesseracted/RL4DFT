@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Host-side driver for the dft_xc_search Claude sandbox.
 #
-#   ./docker/xcdev.sh build          build (or rebuild) the image
-#   ./docker/xcdev.sh claude [args]  start Claude with all permissions on
-#   ./docker/xcdev.sh shell          plain bash shell in the sandbox
-#   ./docker/xcdev.sh run <cmd...>   one-off command in the sandbox
-#   ./docker/xcdev.sh sync-wip       copy uncommitted host changes into sandbox
-#   ./docker/xcdev.sh log            what the sandbox has committed so far
-#   ./docker/xcdev.sh ls [path]      list files inside the sandbox
-#   ./docker/xcdev.sh export [file]  git bundle of committed work -> host
-#   ./docker/xcdev.sh fetch <path..> tar of result files -> host
-#   ./docker/xcdev.sh reset          throw away the sandbox work volume
-#   ./docker/xcdev.sh reset-all      also throw away the sandbox Claude login
+#   ./sandbox/xcdev.sh build          build (or rebuild) the image
+#   ./sandbox/xcdev.sh claude [args]  start Claude with all permissions on
+#   ./sandbox/xcdev.sh shell          plain bash shell in the sandbox
+#   ./sandbox/xcdev.sh run <cmd...>   one-off command in the sandbox
+#   ./sandbox/xcdev.sh sync-wip       copy uncommitted host changes into sandbox
+#   ./sandbox/xcdev.sh log            what the sandbox has committed so far
+#   ./sandbox/xcdev.sh ls [path]      list files inside the sandbox
+#   ./sandbox/xcdev.sh export [file]  git bundle of committed work -> host
+#   ./sandbox/xcdev.sh fetch <path..> tar of result files -> host
+#   ./sandbox/xcdev.sh reset          throw away the sandbox work volume
+#   ./sandbox/xcdev.sh reset-all      also throw away the sandbox Claude login
 #
 # Safety model
 # ------------
