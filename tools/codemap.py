@@ -32,6 +32,7 @@ import ast
 import html
 import json
 import os
+import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
@@ -702,6 +703,10 @@ def _text_node(graph: Graph, node: Node, out: list[str], rev) -> None:
 # ---------------------------------------------------------------------------
 # Layers -- the three-way split the colour encoding carries
 # ---------------------------------------------------------------------------
+# Three groups, because three is how many categorical hues stay distinguishable
+# to every reader at once (see the palette note in the header comment). The
+# module name is printed on every row regardless, so the colour reinforces the
+# grouping rather than carrying it.
 LAYERS = [
     (
         "reference",
@@ -714,20 +719,34 @@ LAYERS = [
         "candidate",
         "Candidate scoring",
         ["functionals", "evaluate"],
-        "A theta in, a number out. The search hot loop -- never touches the solver.",
+        "A theta in, a number out. The search hot loop -- structurally forbidden "
+        "from importing the solver.",
     ),
     (
         "driver",
-        "Driver",
-        ["search", "run_stage1", "__init__"],
-        "TPE over the ansatz parameters, and the entry point that wires it together.",
+        "Driver & diagnostics",
+        ["search", "run_stage1", "ks", "plots", "__init__"],
+        "TPE over the ansatz parameters, the entry point that wires it together, "
+        "and the post-processing that re-checks a result with a self-consistent "
+        "KS solve.",
     ),
 ]
 _LAYER_OF = {m: key for key, _, mods, _ in LAYERS for m in mods}
 
 
 def layer_of(module: str) -> str:
+    """Layer for a module, defaulting loudly rather than silently.
+
+    A module missing from ``LAYERS`` still renders, but ``unassigned_modules``
+    reports it -- a new module picking up a colour by accident is exactly the
+    kind of quiet wrongness this map exists to prevent.
+    """
     return _LAYER_OF.get(module, "driver")
+
+
+def unassigned_modules(graph: "Graph") -> list[str]:
+    """Modules present in the package but not placed in any layer."""
+    return sorted(m for m in graph.modules if m not in _LAYER_OF)
 
 
 # ---------------------------------------------------------------------------
@@ -1536,6 +1555,14 @@ def main() -> None:
 
     graph = Graph()
     graph.load(args.package)
+
+    stray = unassigned_modules(graph)
+    if stray:
+        print(
+            f"warning: {', '.join(stray)} not placed in tools/codemap.py LAYERS -- "
+            "coloured as 'driver' for now",
+            file=sys.stderr,
+        )
 
     if args.format == "text":
         text = render_text(graph, args.depth)

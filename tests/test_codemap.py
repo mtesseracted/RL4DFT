@@ -45,6 +45,12 @@ def test_every_module_parsed(graph):
         assert name in graph.modules, name
 
 
+def test_every_module_has_an_explicit_layer(graph):
+    """A new module must be placed in LAYERS deliberately. Without this it just
+    inherits the default colour and quietly claims to be part of the driver."""
+    assert codemap.unassigned_modules(graph) == []
+
+
 def test_main_wires_the_four_sub_stages(graph):
     calls = _targets(graph, "run_stage1.main", {"direct"})
     assert {
