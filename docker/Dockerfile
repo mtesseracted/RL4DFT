@@ -62,6 +62,15 @@ RUN pip install --no-cache-dir \
         matplotlib \
         pytest
 
+# A login shell sources /etc/profile, which resets PATH and would drop the venv
+# -- so `xcdev.sh shell` (bash -l) has to be told about it separately from the
+# ENV above.
+RUN printf '%s\n' \
+        'export VIRTUAL_ENV=/opt/venv' \
+        'case ":$PATH:" in *":/opt/venv/bin:"*) ;; *) PATH="/opt/venv/bin:$PATH" ;; esac' \
+        'export PATH' \
+        > /etc/profile.d/10-xcdev-venv.sh
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 

@@ -10,15 +10,15 @@ touch anything on your drive.
 | --- | --- | --- |
 | `/host/repo` | this repository on your drive | **read-only** |
 | `/seed/.credentials.json` | `~/.claude/.credentials.json` | **read-only** |
-| `/work` | Docker named volume `<project>-sandbox-work` | read-write |
-| `/home/dev` | Docker named volume `<project>-sandbox-home` | read-write |
+| `/work` | named volume `<project>-sandbox-work` | read-write |
+| `/home/dev` | named volume `<project>-sandbox-home` | read-write |
 
-Nothing else from the host is shared. In particular there is **no Docker
+Nothing else from the host is shared. In particular there is **no container
 socket** (which would be equivalent to root on the host), no `--privileged`, no
 `--network host`, and no writable bind mount. Inside the container the `dev`
 user has passwordless `sudo` on purpose — Claude is meant to be able to
 `apt install`, rewrite files and delete things freely, because the blast radius
-is a Docker volume you can throw away with `xcdev.sh reset`.
+is a volume you can throw away with `xcdev.sh reset`.
 
 On startup the entrypoint clones `/host/repo` into `/work/<project>`. That
 clone is where Claude works. The host remote is kept as `host`, so you can
@@ -32,18 +32,22 @@ See "Tightening further" below.
 
 ## Setup
 
-Docker is not currently installed on this machine. On Ubuntu:
+`xcdev.sh` drives either **podman** (preferred, and what this is tested on) or
+**docker** — it picks whichever is installed, and `XCDEV_ENGINE=docker` forces
+the choice. Rootless podman is the better fit here: the container runtime
+itself is unprivileged, so a container escape lands you as your own user rather
+than as root.
 
-```sh
-sudo apt install docker.io
-sudo usermod -aG docker "$USER"   # then log out and back in
-```
-
-Then build the image (a few minutes, mostly apt and npm):
+Build the image (a few minutes, mostly apt and npm):
 
 ```sh
 ./docker/xcdev.sh build
 ```
+
+Under rootless podman the script adds `--userns=keep-id`, which maps your host
+UID to the same UID inside. Without it your host user maps to container root
+and everything else to a subuid, and the mode-0600 credentials file mounted at
+`/seed` would be unreadable to the unprivileged `dev` user in the container.
 
 ## Use
 
@@ -61,7 +65,9 @@ Other subcommands:
 ./docker/xcdev.sh shell             # bash in the sandbox
 ./docker/xcdev.sh run pytest -q     # one-off command
 ./docker/xcdev.sh log               # commits made inside the sandbox
-./docker/xcdev.sh export            # git bundle of the sandbox work -> host
+./docker/xcdev.sh ls [path]         # list files inside the sandbox
+./docker/xcdev.sh export            # git bundle of committed work -> host
+./docker/xcdev.sh fetch data -o r.tar   # result files -> host
 ./docker/xcdev.sh reset             # discard the sandbox work volume
 ./docker/xcdev.sh reset-all         # discard the work volume AND the login
 ```
@@ -69,10 +75,15 @@ Other subcommands:
 The work volume persists between runs, so you can stop and restart the sandbox
 without losing anything.
 
-## Getting work back out
+## Getting work and data back out
 
-Because the host mount is read-only, the sandbox cannot write results to your
-drive; extraction is always initiated by you, from the host:
+The sandbox cannot write to your drive, so extraction is always something *you*
+run from the host. The trick is the direction of the write: the host command
+redirects the container's **stdout** into a file on your drive. The container
+only ever writes to a pipe it was handed — it never holds a writable handle on
+your filesystem — so this costs nothing in isolation.
+
+**Committed code** — as a git bundle:
 
 ```sh
 ./docker/xcdev.sh export                        # writes sandbox-export.bundle
@@ -81,8 +92,29 @@ git fetch sandbox-export.bundle stage1:sandbox-stage1
 git log sandbox-stage1                          # review before merging
 ```
 
-That review step is the point of the design: nothing lands in your working
-tree until you have looked at it.
+**Result files** — plots, `.npz` arrays, `optuna*.db`, anything gitignored and
+so *not* in the bundle. Look first, then pull what you want as a tar:
+
+```sh
+./docker/xcdev.sh ls                      # what is in the sandbox checkout
+./docker/xcdev.sh ls data/stage1          # drill in
+./docker/xcdev.sh fetch data figures -o results.tar
+tar -tvf results.tar                      # inspect before unpacking
+tar -xf results.tar -C /tmp/from-sandbox
+```
+
+Paths are relative to the sandbox checkout. `fetch` writes
+`sandbox-data.tar` next to the repo unless you pass `-o`.
+
+**Everything at once** — if you would rather grab the whole volume and sift
+through it later, the engine can do that directly:
+
+```sh
+podman volume export dft_xc_search-sandbox-work > sandbox-work.tar
+```
+
+In all three cases you review before anything lands in your working tree. That
+review step is the point of the design.
 
 Two caveats on what crosses into the sandbox in the first place:
 
@@ -111,6 +143,8 @@ Two caveats on what crosses into the sandbox in the first place:
   dev-container arrangement and it **discards** the guarantee this setup exists
   to provide; the script warns when you use it.
 - `XCDEV_MEMORY=8g` caps container memory if a search run starts thrashing.
+- `XCDEV_ENGINE=docker` forces the engine when both podman and docker are
+  installed; the default preference is podman.
 
 ## Tightening further
 
