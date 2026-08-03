@@ -66,6 +66,37 @@ if [ ! -f "$HOME/.claude.json" ]; then
         > "$HOME/.claude.json"
 fi
 
+# Status line (model / context usage / cost). The script is mounted read-only
+# from the host and re-copied every start, so host edits to it take effect
+# here on the next run. The settings entry is only *added* -- anything else
+# you configure inside the sandbox survives.
+if [ -f "$SEED_DIR/statusline.py" ]; then
+    mkdir -p "$HOME/.claude"
+    cp "$SEED_DIR/statusline.py" "$HOME/.claude/statusline.py"
+    chmod 0755 "$HOME/.claude/statusline.py"
+    python3 - "$HOME/.claude/settings.json" >&2 <<'PYEOF'
+import json, sys
+
+path = sys.argv[1]
+try:
+    with open(path) as fh:
+        cfg = json.load(fh)
+    if not isinstance(cfg, dict):
+        cfg = {}
+except Exception:
+    cfg = {}
+
+if "statusLine" not in cfg:
+    cfg["statusLine"] = {
+        "type": "command",
+        "command": "python3 ~/.claude/statusline.py",
+    }
+    with open(path, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+    print("[xcdev] status line configured")
+PYEOF
+fi
+
 # ---------------------------------------------------------------------------
 # 3. Editable install of the project
 # ---------------------------------------------------------------------------

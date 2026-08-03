@@ -130,6 +130,12 @@ build_run_args() {
         RUN_ARGS+=(-v "$HOME/.claude/.credentials.json:/seed/.credentials.json:ro")
     fi
 
+    # Your host status line (model / context / cost), mounted read-only and
+    # copied into the sandbox home by the entrypoint.
+    if [ "${XCDEV_NO_STATUSLINE:-0}" != "1" ] && [ -f "$HOME/.claude/statusline.py" ]; then
+        RUN_ARGS+=(-v "$HOME/.claude/statusline.py:/seed/statusline.py:ro")
+    fi
+
     for var in GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL; do
         [ -n "${!var:-}" ] && RUN_ARGS+=(-e "${var}=${!var}")
     done
