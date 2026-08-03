@@ -145,6 +145,28 @@ Two caveats on what crosses into the sandbox in the first place:
 - `XCDEV_MEMORY=8g` caps container memory if a search run starts thrashing.
 - `XCDEV_ENGINE=docker` forces the engine when both podman and docker are
   installed; the default preference is podman.
+- The image is deliberately not minimal: man pages (the slim base excludes
+  them at the dpkg level, so that is undone and the base packages reinstalled),
+  networking tools (`ping`, `ip`, `ss`, `dig`, `nc`, `traceroute`, `netstat`),
+  `vim`, `nano`, `tmux`, `htop`, `tree`, `file`, `rsync`, `strace`, `lsof`,
+  `pstree`, archive tools and bash completion.
+- **`ping` needs one host-side change.** Rootless containers get no
+  `CAP_NET_RAW`, so `xcdev.sh` passes
+  `--sysctl net.ipv4.ping_group_range=<gid> <gid>` to allow unprivileged ICMP
+  sockets inside the container. That is necessary but not sufficient: the
+  rootless network helper on the *host* also needs to open an ICMP socket, and
+  Debian/Ubuntu ship `net.ipv4.ping_group_range = 1 0` (an empty range). The
+  host `ping` works regardless because its binary has `cap_net_raw=ep`, but the
+  helper has no such capability, so echo replies never come back. To enable it:
+
+  ```sh
+  sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
+  # persist it:
+  echo 'net.ipv4.ping_group_range = 0 2147483647' \
+      | sudo tee /etc/sysctl.d/99-rootless-ping.conf
+  ```
+
+  Everything else — DNS, HTTPS, `traceroute` (UDP) — works without it.
 
 ## Tightening further
 
