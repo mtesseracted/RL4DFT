@@ -106,8 +106,35 @@ tar -xf results.tar -C /tmp/from-sandbox
 Paths are relative to the sandbox checkout. `fetch` writes
 `sandbox-data.tar` next to the repo unless you pass `-o`.
 
-**Everything at once** — if you would rather grab the whole volume and sift
-through it later, the engine can do that directly:
+**Straight off the volume** — the volumes are ordinary directories under
+`~/.local/share/containers/storage/volumes/`, and `xcdev.sh` keeps them
+readable from your own shell, so you can just `ls` and `cp`:
+
+```sh
+ls ~/.local/share/containers/storage/volumes/dft_xc_search-sandbox-work/_data/dft_xc_search
+```
+
+This needs the `unlock` step. A volume that podman auto-creates during `run`
+gets its top-level directory owned by the first subuid (100000) with mode
+0700, so your own shell cannot even traverse into it — even though `_data`
+underneath is already yours and world-readable. `unlock` fixes that by
+pre-creating volumes (which avoids it entirely) and, for any already in the
+broken state, running `podman unshare chown 0:0` on that one directory —
+inside the namespace uid 0 *is* your host uid. Podman does not undo it.
+
+`build`, `reset`, `reset-all` and every container start do this automatically,
+so it should already be true. To check or repair by hand:
+
+```sh
+./sandbox/xcdev.sh unlock
+```
+
+Nothing is weakened by this: files in the volume are already owned by you
+thanks to `--userns=keep-id`, and the container still cannot write anywhere on
+your drive outside its own volumes.
+
+**Everything at once** — if you would rather grab the whole volume as one
+archive, the engine can do that directly:
 
 ```sh
 podman volume export dft_xc_search-sandbox-work > sandbox-work.tar
