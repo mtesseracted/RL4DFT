@@ -89,6 +89,13 @@ build_run_args() {
         --init
         --hostname xcdev
         --pids-limit 4096
+        # A rootless container gets no CAP_NET_RAW, so iputils falls back to a
+        # raw socket and ping fails. Permitting unprivileged ICMP datagram
+        # sockets inside the container's *own* network namespace is enough, and
+        # grants nothing on the host. The range must stay within the GIDs
+        # mapped into the user namespace, so name the dev GID exactly rather
+        # than using a wide range (which the kernel rejects as EINVAL).
+        --sysctl "net.ipv4.ping_group_range=$(id -g) $(id -g)"
         -e "XCDEV_CHECKOUT=${CHECKOUT}"
         -e "XCDEV_HOST_REPO=/host/repo"
         -v "${HOME_VOLUME}:/home/dev"

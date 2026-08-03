@@ -3,7 +3,7 @@
 #
 # The safety property does NOT come from this image: it comes from how the
 # container is run (see sandbox/xcdev.sh). Nothing on the host is ever mounted
-# writable, and the Docker socket is never exposed. Inside the container the
+# writable, and the container socket is never exposed. Inside the container the
 # user has passwordless sudo on purpose -- the whole point is that Claude can
 # do anything it likes in here.
 
@@ -11,22 +11,73 @@ FROM python:3.12-slim
 
 ARG DEBIAN_FRONTEND=noninteractive
 
+# The slim base drops man pages at the dpkg level (`path-exclude
+# /usr/share/man/*`), so `man` finds nothing no matter what you install. Undo
+# that FIRST, so every package installed below ships its manual, then reinstall
+# the base packages whose pages were discarded when the base image was built.
+RUN sed -i '/path-exclude.*\/usr\/share\/man/d' /etc/dpkg/dpkg.cfg.d/* \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends --reinstall \
+        bash \
+        coreutils \
+        findutils \
+        grep \
+        sed \
+        mawk \
+        diffutils \
+        tar \
+        gzip \
+        procps \
+        util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         curl \
+        wget \
         ca-certificates \
         sudo \
         less \
         jq \
         ripgrep \
         procps \
-        vim-tiny \
         openssh-client \
         build-essential \
         gfortran \
         pkg-config \
         nodejs \
         npm \
+    # documentation -- `man` itself, plus the C library/syscall pages
+        man-db \
+        manpages \
+        manpages-dev \
+        bash-completion \
+    # networking: ping, ip/ss, dig, nc, traceroute, and the legacy ifconfig set
+        iputils-ping \
+        iproute2 \
+        dnsutils \
+        netcat-openbsd \
+        traceroute \
+        net-tools \
+    # interactive comfort
+        vim \
+        nano \
+        tmux \
+        htop \
+        tree \
+        file \
+        rsync \
+        bc \
+    # archives
+        unzip \
+        zip \
+        xz-utils \
+        bzip2 \
+    # poking at things that misbehave
+        strace \
+        lsof \
+        psmisc \
+        time \
     && rm -rf /var/lib/apt/lists/*
 
 # Claude Code. Installed globally as root so that it is NOT shadowed by the
@@ -69,6 +120,9 @@ RUN printf '%s\n' \
         'export VIRTUAL_ENV=/opt/venv' \
         'case ":$PATH:" in *":/opt/venv/bin:"*) ;; *) PATH="/opt/venv/bin:$PATH" ;; esac' \
         'export PATH' \
+        'if [ -f /usr/share/bash-completion/bash_completion ]; then' \
+        '    . /usr/share/bash-completion/bash_completion' \
+        'fi' \
         > /etc/profile.d/10-xcdev-venv.sh
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
