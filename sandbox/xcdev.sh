@@ -10,6 +10,7 @@
 #   ./sandbox/xcdev.sh ls [path]      list files inside the sandbox
 #   ./sandbox/xcdev.sh export [file]  git bundle of committed work -> host
 #   ./sandbox/xcdev.sh fetch <path..> tar of result files -> host
+#   ./sandbox/xcdev.sh unlock         make the volumes readable from your shell
 #   ./sandbox/xcdev.sh reset          throw away the sandbox work volume
 #   ./sandbox/xcdev.sh reset-all      also throw away the sandbox Claude login
 #
@@ -81,6 +82,50 @@ engine_is_rootless_podman() {
 }
 
 # ---------------------------------------------------------------------------
+# Volume accessibility ("unlock")
+#
+# A volume that podman auto-creates during `run` ends up with its top-level
+# directory owned by the first subuid (100000) and mode 0700, so you cannot
+# even `ls` into it from your own shell -- despite _data underneath already
+# being yours and world-readable. Inside `podman unshare`, uid 0 *is* your host
+# uid, so chowning that one directory to 0:0 hands it back to you. Podman does
+# not undo this on later runs.
+#
+# Pre-creating the volume avoids the problem in the first place; both are done
+# here so a freshly reset volume is reachable straight away.
+# ---------------------------------------------------------------------------
+volume_parent_dir() {
+    local mountpoint
+    mountpoint="$("$ENGINE" volume inspect "$1" --format '{{.Mountpoint}}' 2>/dev/null)" || return 1
+    [ -n "$mountpoint" ] || return 1
+    dirname -- "$mountpoint"
+}
+
+sandbox_volumes() {
+    if [ "${XCDEV_RW:-0}" = "1" ]; then
+        printf '%s\n' "$HOME_VOLUME"
+    else
+        printf '%s\n' "$WORK_VOLUME" "$HOME_VOLUME"
+    fi
+}
+
+# Create the volumes if absent, then make them readable from the host shell.
+# Quiet and best-effort: never let this stop a container from starting.
+prepare_volumes() {
+    engine_is_rootless_podman || return 0
+    local v d
+    while read -r v; do
+        "$ENGINE" volume exists "$v" >/dev/null 2>&1 \
+            || "$ENGINE" volume create "$v" >/dev/null 2>&1 \
+            || true
+        d="$(volume_parent_dir "$v")" || continue
+        [ -r "$d/_data" ] && continue
+        "$ENGINE" unshare chown 0:0 "$d" >/dev/null 2>&1 || true
+    done < <(sandbox_volumes)
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # `<engine> run` argument assembly
 # ---------------------------------------------------------------------------
 build_run_args() {
@@ -146,12 +191,14 @@ build_run_args() {
 }
 
 engine_run() {
+    prepare_volumes
     build_run_args
     exec "$ENGINE" run "${RUN_ARGS[@]}" "$IMAGE" "$@"
 }
 
 # Non-interactive variant used by export/log, which need to capture stdout.
 engine_run_quiet() {
+    prepare_volumes
     build_run_args
     "$ENGINE" run "${RUN_ARGS[@]}" "$IMAGE" "$@"
 }
@@ -166,6 +213,24 @@ cmd_build() {
         -t "$IMAGE" \
         "$@" \
         "$SCRIPT_DIR"
+    prepare_volumes
+}
+
+cmd_unlock() {
+    if ! engine_is_rootless_podman; then
+        printf 'xcdev: unlock only applies to rootless podman; nothing to do for %s\n' "$ENGINE" >&2
+        return 0
+    fi
+    prepare_volumes
+    local v d
+    while read -r v; do
+        d="$(volume_parent_dir "$v")" || { printf 'xcdev: %-34s (does not exist)\n' "$v" >&2; continue; }
+        if [ -r "$d/_data" ]; then
+            printf 'xcdev: %-34s readable at %s\n' "$v" "$d/_data" >&2
+        else
+            printf 'xcdev: %-34s STILL UNREADABLE at %s\n' "$v" "$d/_data" >&2
+        fi
+    done < <(sandbox_volumes)
 }
 
 cmd_claude() {
@@ -253,6 +318,7 @@ cmd_reset() {
     read -r -p 'Type yes to continue: ' reply
     [ "$reply" = "yes" ] || die "aborted"
     "$ENGINE" volume rm "$WORK_VOLUME" >/dev/null && printf 'xcdev: removed %s\n' "$WORK_VOLUME" >&2
+    prepare_volumes
 }
 
 cmd_reset_all() {
@@ -261,6 +327,7 @@ cmd_reset_all() {
     [ "$reply" = "yes" ] || die "aborted"
     "$ENGINE" volume rm "$WORK_VOLUME" "$HOME_VOLUME" >/dev/null \
         && printf 'xcdev: removed both volumes\n' >&2
+    prepare_volumes
 }
 
 # Print the header comment block (everything after the shebang, up to the first
@@ -283,6 +350,7 @@ case "${1:-help}" in
     log)       shift; cmd_log ;;
     ls)        shift; cmd_ls "$@" ;;
     fetch)     shift; cmd_fetch "$@" ;;
+    unlock)    shift; cmd_unlock ;;
     export)    shift; cmd_export "$@" ;;
     reset)     shift; cmd_reset ;;
     reset-all) shift; cmd_reset_all ;;
