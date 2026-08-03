@@ -123,6 +123,10 @@ RUN printf '%s\n' \
         'if [ -f /usr/share/bash-completion/bash_completion ]; then' \
         '    . /usr/share/bash-completion/bash_completion' \
         'fi' \
+        '# Inside the sandbox there is nothing of the host left to damage, so' \
+        '# plain `claude` means the dangerous one. `xcdev.sh claude` execs the' \
+        '# binary directly and is unaffected by this alias.' \
+        "alias claude='claude --dangerously-skip-permissions'" \
         > /etc/profile.d/10-xcdev-venv.sh
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
