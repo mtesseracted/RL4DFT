@@ -11,8 +11,8 @@ optimizers at unnamed seeds is an anecdote.
 
 from __future__ import annotations
 
+import ast
 import os
-import re
 
 import numpy as np
 import optuna
@@ -205,27 +205,32 @@ def test_cmaes_is_substitutable_for_tpe_in_the_same_stack(lda_systems):
 def test_the_composition_root_names_the_optimizer_exactly_once():
     """Acceptance (c), literally: swapping optimizers is one line of source.
 
-    If the constructor were spread over several lines, or the class named in
-    more than one place, "swap it in run_stage2.py" would stop being a
-    one-line change and start being a refactor.
+    Parsed rather than grepped, so the docstring that *describes* the stack and
+    the import that makes it available do not count as construction sites. If
+    the constructor were spread over several lines, or called from more than
+    one place, "swap it in run_stage2.py" would stop being a one-line change
+    and start being a refactor.
     """
     root = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "xcsearch", "run_stage2.py",
     )
     with open(root) as f:
-        lines = f.readlines()
+        source = f.read()
+    lines = source.splitlines()
 
-    # The construction, not the import and not the docstring that describes it.
-    constructing = [
-        n for n, line in enumerate(lines)
-        if re.match(r"^\s*\w+ = FixedFormOptimizer\(", line)
+    calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "OptunaTPE"
     ]
-    assert len(constructing) == 1, "more than one line constructs the optimizer"
+    assert len(calls) == 1, f"{len(calls)} places construct the optimizer"
 
-    line = lines[constructing[0]]
-    assert "OptunaTPE(" in line and "form.bounds()" in line, line
-    # And the swap really is textual: the replacement is a valid construction
-    # of the same shape.
+    line = lines[calls[0].lineno - 1]
+    assert "form.bounds()" in line, line
+    # The swap is textual, and what it produces is a valid construction of the
+    # same shape -- the form still owns the box either way.
     swapped = line.replace("OptunaTPE(", "CMAES(")
     assert "CMAES(form.bounds(), seed=args.seed)" in swapped

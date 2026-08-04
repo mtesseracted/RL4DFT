@@ -75,11 +75,36 @@ def format_heatmap(store: SQLiteRecordStore, candidate_id: int, baseline_id: int
     return "\n".join(lines)
 
 
+def serve_human_session(driver: SearchDriver, human, args) -> None:
+    """Run the loop in the background and serve the dashboard in front of it.
+
+    The driver blocks on ``HumanOptimizer.ask()`` until the submit button puts
+    a theta on its queue, so the "optimizer" here is a person with sliders and
+    everything else in the loop is unchanged -- which is the whole point of
+    the port. Their candidates land in the store beside any other run's.
+    """
+    import threading
+
+    from .viz.app import create_app
+
+    worker = threading.Thread(target=driver.run, args=(args.trials,), daemon=True)
+    worker.start()
+    print(f"Human session: {args.trials} proposals, run {driver.run_id}.")
+    print(f"Open http://127.0.0.1:{args.port} and submit candidates.")
+    create_app(args.store, human=human).run(host="127.0.0.1", port=args.port)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stage 2 XC-functional search")
     parser.add_argument("--data", default=DATA_DIR, help="dataset cache dir")
     parser.add_argument("--trials", type=int, default=3000, help="optimizer trials")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--human", action="store_true",
+        help="play the search by hand: serves the dashboard and takes proposals "
+             "from its submit button instead of from an optimizer",
+    )
+    parser.add_argument("--port", type=int, default=8050)
     parser.add_argument(
         "--store", default=os.path.join(DATA_DIR, "records.sqlite"),
         help="record store (one file, many runs)",
@@ -97,7 +122,17 @@ def main() -> None:
     print(f"Loaded {len(systems)} systems.")
 
     form = LocalAnsatzForm()
-    optimizer = FixedFormOptimizer(form, OptunaTPE(form.bounds(), seed=args.seed))
+    # Swapping the coefficient optimizer is this one line: CMAES(form.bounds(),
+    # seed=args.seed) for the D16 optimizer, HumanOptimizer(form.bounds()) for
+    # a person. The form owns the search box either way.
+    coefficients = OptunaTPE(form.bounds(), seed=args.seed)
+    if args.human:
+        # Imported here, not at module scope: the human endpoint is only
+        # useful with the dashboard, and dash is an optional extra.
+        from .optimizers.human import HumanOptimizer
+
+        coefficients = HumanOptimizer(form.bounds())
+    optimizer = FixedFormOptimizer(form, coefficients)
     # Rung 0 first: it costs milliseconds and needs no system, so a candidate
     # is measured against the exact conditions before anything is spent on it.
     evaluators = [
@@ -114,7 +149,9 @@ def main() -> None:
     baseline_id = store.seed_baseline(
         lda, [r for ev in evaluators for r in ev.evaluate(lda)]
     )
-    run_id = store.begin_run("optuna_tpe", notes=f"seed={args.seed}")
+    run_id = store.begin_run(
+        "human" if args.human else "optuna_tpe", notes=f"seed={args.seed}"
+    )
 
     driver = SearchDriver(
         optimizer=optimizer,
@@ -127,6 +164,12 @@ def main() -> None:
         index=NearDuplicateIndex(store.connection),
     )
     # -----------------------------------------------------------------------
+
+    if args.human:
+        # A human session is the same loop with a slower optimizer: the driver
+        # runs in the background and blocks on the queue the dashboard feeds.
+        serve_human_session(driver, coefficients, args)
+        return
 
     print(f"Searching ({args.trials} trials, run {run_id} in {args.store})...")
     result = driver.run(args.trials)

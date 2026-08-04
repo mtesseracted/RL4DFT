@@ -70,6 +70,15 @@ ALLOWED: dict[str, set[str]] = {
         "matplotlib", "numpy",
     },
     "conditions": {"ports", "records", "world", "functionals", "numpy"},
+    # viz: store, records, dash -- plus the two the table takes for granted.
+    # numpy because the .npz pointer has to be read by something, and reading
+    # an array is not physics; plotly because dash's figures are plotly's.
+    # Nothing here imports a world, a functional or an evaluator.
+    # sqlite3 is declared, like the store's own row: the viewer opens its own
+    # read-only connections rather than sharing the writer's.
+    "data": {"store", "records", "sqlite3", "numpy"},
+    "figures": {"records", "numpy", "plotly"},
+    "app": {"store", "records", "data", "figures", "dash"},
     # The composition root is the one module that may see everything -- that
     # is what makes it the only composition point.
     "run_stage2": None,

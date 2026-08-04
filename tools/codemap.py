@@ -761,6 +761,13 @@ LAYERS = [
         "from importing the solver.",
     ),
     (
+        "viz",
+        "Observation",
+        ["app", "data", "figures", "human"],
+        "The feature-4 dashboard and the human endpoint that feeds candidates "
+        "back into the loop. Renders what the store holds; imports no physics.",
+    ),
+    (
         "driver",
         "Driver & diagnostics",
         ["run_stage2", "driver", "store", "composed", "optuna_tpe", "cmaes",
@@ -1111,6 +1118,7 @@ CSS = """
   --ink-3:       #79838f;
   --accent:      #2a78d6;
   --layer-core:      #7c5cd6;
+  --layer-viz:       #b8397f;
   --layer-reference: #2a78d6;
   --layer-candidate: #eb6834;
   --layer-driver:    #1baf7a;
@@ -1133,6 +1141,7 @@ CSS = """
     --ink-3:     #7b8592;
     --accent:    #3987e5;
     --layer-core:      #9179e0;
+    --layer-viz:       #cc4f92;
     --layer-reference: #3987e5;
     --layer-candidate: #d95926;
     --layer-driver:    #199e70;
@@ -1153,6 +1162,7 @@ CSS = """
   --ink-3:     #7b8592;
   --accent:    #3987e5;
   --layer-core:      #9179e0;
+  --layer-viz:       #cc4f92;
   --layer-reference: #3987e5;
   --layer-candidate: #d95926;
   --layer-driver:    #199e70;
@@ -1271,6 +1281,7 @@ li.collapsed > .row .twist::before { transform: rotate(0deg); }
   align-self: center; background: var(--layer-unknown);
 }
 .dot.layer-core      { background: var(--layer-core); }
+.dot.layer-viz       { background: var(--layer-viz); }
 .dot.layer-reference { background: var(--layer-reference); }
 .dot.layer-candidate { background: var(--layer-candidate); }
 .dot.layer-driver    { background: var(--layer-driver); }
@@ -1338,6 +1349,7 @@ table.matrix thead th span { writing-mode: vertical-rl; transform: rotate(180deg
 table.matrix th[scope="row"] { text-align: right; font-weight: 500; color: var(--ink-2); white-space: nowrap; }
 table.matrix td.hit { background: currentColor; }
 table.matrix td.hit.layer-core { color: var(--layer-core); }
+table.matrix td.hit.layer-viz { color: var(--layer-viz); }
 table.matrix td.hit.layer-reference { color: var(--layer-reference); }
 table.matrix td.hit.layer-candidate { color: var(--layer-candidate); }
 table.matrix td.hit.layer-driver { color: var(--layer-driver); }

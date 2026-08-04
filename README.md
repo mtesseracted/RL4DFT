@@ -107,6 +107,36 @@ plus an E(R) scan per molecule. Cost scales as (grid points)², and the widest
 dissociating geometries reach ~10⁶-dimensional eigenproblems, so a cold build
 takes hours. The search itself, on the cached data, takes seconds.
 
+## Dashboard
+
+```bash
+.venv/bin/python -m xcsearch.viz.app --store data/exp1d/records.sqlite
+```
+
+A Dash app over the record store (`--extra viz`). Four panels: the selected
+candidate's formula in LaTeX; a regime × metric heatmap against a baseline of
+your choosing (the LDA baseline is seeded with a label and sorts first, but any
+candidate in the store is selectable); a per-system drill-down with the wells
+marked and the reference density and potential drawn from the `.npz` the store
+points at; and a history scrubber over a run with its best-so-far strip.
+
+It polls, and the store is in WAL mode, so the panels track a search that is
+still running. It imports no physics module — everything it shows is in a
+record or reachable from one, which is what stops a panel quietly computing a
+quantity the search never measured.
+
+To play the search by hand:
+
+```bash
+.venv/bin/python -m xcsearch.run_stage2 --human --trials 20
+```
+
+The proposal panel gets one slider per coefficient, bounded by the form's own
+`bounds()`. A person is an optimizer here in the literal sense — the same port,
+the same driver, the same records — so a human session is just a run whose
+optimizer is called `human`, and its candidates are indistinguishable in shape
+from TPE's in the store.
+
 ## Plots
 
 ```bash
