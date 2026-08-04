@@ -756,14 +756,15 @@ LAYERS = [
     (
         "candidate",
         "Candidate scoring",
-        ["functionals", "evaluate"],
+        ["functionals", "evaluate", "evaluators", "ranking"],
         "A theta in, a number out. The search hot loop -- structurally forbidden "
         "from importing the solver.",
     ),
     (
         "driver",
         "Driver & diagnostics",
-        ["search", "run_stage1", "scf", "plots", "__init__"],
+        ["search", "run_stage1", "run_stage2", "driver", "composed",
+         "optuna_tpe", "scf", "plots", "__init__"],
         "TPE over the ansatz parameters, the entry point that wires it together, "
         "and the post-processing that re-checks a result with a self-consistent "
         "KS solve.",

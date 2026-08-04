@@ -14,11 +14,13 @@ not import ``solver`` -- no reference solves in the search hot loop.
 
 from __future__ import annotations
 
+import glob
 import os
 from dataclasses import dataclass
 
 import numpy as np
 
+from ...records import SystemRecord
 from .world import Grid, System, v_int
 from .solver import solve_2e_singlet
 
@@ -313,3 +315,31 @@ def build_dataset(out_dir: str) -> int:
             R=separation(system),
         )
     return len(records)
+
+
+def load_frozen(path: str) -> list[SystemRecord]:
+    """Read the frozen cache in ``path`` as world-free ``SystemRecord``s.
+
+    This is the boundary the ``Dataset`` port exists to draw (2.2): everything
+    upstream of it may know the exponential world; everything downstream sees
+    records and nothing else. Files are read in sorted order, which fixes the
+    order of the records and therefore the summation order of any policy that
+    averages over them -- D15 is a bitwise gate, so that order is part of the
+    contract, not an accident of the filesystem.
+    """
+    records: list[SystemRecord] = []
+    for file in sorted(glob.glob(os.path.join(path, "*.npz"))):
+        d = np.load(file, allow_pickle=False)
+        records.append(
+            SystemRecord(
+                name=str(d["name"]),
+                x=d["x"],
+                w=d["w"],
+                n_ref=d["n"],
+                e_exact=float(d["E_exact"]),
+                e_xc_exact=float(d["E_xc_exact"]),
+                regime=str(d["regime_tag"]),
+                split=str(d["split"]),
+            )
+        )
+    return records
