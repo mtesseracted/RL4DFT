@@ -34,8 +34,11 @@ and acceptance tests per sub-stage.
 ## Stage 2 — Refactor, first features, better optimizer
 
 Once Stage 1 works, refactor it so that every layer Stage 1 hard-coded
-becomes a swappable component: system/dataset, density provider, functional
-representation, evaluator, ranking policy, optimizer, exact conditions.
+becomes a swappable component: system/dataset, functional representation,
+evaluator, ranking policy, optimizer, exact conditions. (A swappable
+*density provider* — who supplies the starting density and how far it is
+relaxed — is deliberately not in this iteration; it arrives with the
+evaluation-protocol addendum, `STAGE2.md` A1.)
 The **design pattern** is **Ports and Adapters** (hexagonal architecture):
 a core — search driver, evaluation records, ranking — that defines ports as
 ABCs, with everything external (optimizers, DFT engines, storage) plugged
@@ -137,6 +140,13 @@ single 3+ bucket until we get closer.
   N = 2 results. Extraction needs the generalization that comes with any
   N > 2 move: T_s via iterative KS inversion (the N-electron version of
   the Stage 2.4 machinery), since T_vW is exact only for 2e singlets.
+- **Parallel evaluation — `ask_batch()`.** The Stage 2 optimizer ports
+  mandate strict ask–tell alternation (`STAGE2.md` D11): one proposal
+  outstanding at a time, which costs nothing while evaluations are
+  milliseconds. When expensive rungs make concurrent evaluation worth
+  having, extend the ports with `ask_batch(n)` and tells keyed by
+  proposal id (θ values are ambiguous under duplicates) — a designed
+  port revision, not adapter improvisation.
 - Higher rungs of the fidelity ladder (3a): CI/CCSD(T)-class references, a
   strong-correlation stress set, SCF spot-checks, and the noise-floor
   escalation policy.

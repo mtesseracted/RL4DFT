@@ -42,8 +42,11 @@ classes, constructor injection in one composition script — no
     case — closed forms are simple), autograd, or the shared
     finite-difference helper in `numerics.py`. No closed form is ever
     demanded by the port.
-  - `Functional.fingerprint() -> ndarray` — the feature-1 near-duplicate
-    key (for parametric forms: form id + θ).
+  - `Functional.fingerprint() -> (form_key, ndarray)` — the feature-1
+    near-duplicate key: a discrete `form_key` (stable identifier of the
+    `FunctionalForm`) plus the metric vector (for parametric forms: θ,
+    nothing else). Categorical identity never enters the vector — it
+    has no distance semantics under random projections.
   - `Functional.to_latex() -> str` — the feature-4 formula panel.
   - `FunctionalForm` is the *family*: `n_params`, `bounds()`,
     `build(theta) -> Functional`, `to_latex()` with symbolic
@@ -64,6 +67,23 @@ classes, constructor injection in one composition script — no
     `TwoLevelOptimizer(Optimizer)` (a `FormProposer` outer loop, a fresh
     `CoefficientOptimizer` per proposed form, an inner-loop budget) as a
     drop-in — the driver never learns the difference.
+  - **Ask–tell contract: strict alternation.** Every `ask()` is
+    answered by exactly one `tell()` for that proposal before the next
+    `ask()`. The driver guarantees it; adapters rely on it (`OptunaTPE`
+    holds its single pending trial — no θ-to-trial matching, which is
+    ambiguous under duplicate θ) and must *raise* on a violation, never
+    guess. Batch-structured optimizers buffer inside the adapter: the
+    CMA-ES adapter pulls a generation from `cma`, serves it one
+    candidate per `ask()`, and updates `cma` only once the generation's
+    scores are complete; the human submission queue is the same
+    pattern. What alternation forbids is *concurrent evaluation* of
+    multiple open proposals — that arrives as a deliberate future port
+    revision, `ask_batch(n)` with tells keyed by proposal id (see the
+    PLAN.md Stage 3+ note), never as adapter improvisation. The
+    contract holds at both mirrored levels — driver ↔ `Optimizer` and
+    `FixedFormOptimizer` ↔ `CoefficientOptimizer` — and `ask()`'s
+    docstring must state the alternation rule and point at the future
+    `ask_batch()`.
 - **D12 — Ranking is visible in the loop.** The driver applies the
   `RankingPolicy` itself and passes the result to `tell`:
 
@@ -73,19 +93,42 @@ classes, constructor injection in one composition script — no
       score = policy.score(records)
       optimizer.tell(functional, records, score)
 
+  The in-memory contract is explicit: `EvaluationRecord =
+  (candidate_id, system, rung, metric, value, regime, split)`. The
+  evaluator copies `regime` and `split` from the `SystemRecord` it is
+  evaluating into every record it emits; condition records (rung 0)
+  carry `None` for system, regime, and split. Records are therefore
+  self-sufficient — no policy ever needs a store lookup to interpret
+  them.
+
   Scalarizing adapters (TPE, CMA-ES) consume `score`; record-consuming
   optimizers (Stage 3) read `records`. Stage 1's MSE is demoted to
-  `MeanSquaredError(RankingPolicy)`: mean of the rung-1 squared
-  energy-error records with `split == train`. `score` is always
-  minimized.
+  `MeanSquaredError(RankingPolicy)`: the mean of `value` over records
+  with `rung == 1`, `metric == "exc_sq_error"`, `split == "train"`.
+  `score` is always minimized.
 - **D13 — Record store: SQLite from the start** (PLAN.md, feature 4).
-  Three tables:
-  - `candidates(id, fingerprint, form_latex, theta_json, created_at)`
+  Four tables:
+  - `runs(id, optimizer, started_at, notes)` — one row per search run.
+    The composition root opens it (`store.begin_run(label) -> run_id` is
+    the entire API — no status lifecycle, no config blob) and the driver
+    stamps the id on every candidate it stores. One store holds many
+    runs: optimizer comparisons (2.6) group by run, the feature-4
+    history scrubber scrubs within a run, and a human session is just a
+    run with `optimizer = 'human'`.
+  - `candidates(id, run_id, label, fingerprint, form_latex, theta_json,
+    created_at)` — `label` is nullable human-readable text, `NULL` for
+    almost all candidates. The LDA baseline is seeded by the store
+    initializer with `label = 'LDA'`, `run_id = NULL` (reference
+    furniture, belongs to no run).
   - `evaluations(candidate_id, system, rung, metric, value)` — **long
     format**, one row per scalar. Condition violations are rows with
     `system = NULL` and `metric` = condition name. Long format makes the
     feature-4 heatmap a single GROUP BY.
   - `systems(name, world, wells_json, n_elec, regime, split, npz_path)`
+  `regime`/`split` live normalized in `systems`: the store drops the
+  denormalized copies on each `EvaluationRecord` at write time and
+  reconstitutes them by join on read — the store is the only component
+  that knows both shapes.
   Density-sized arrays never enter SQLite: they stay in the `.npz` cache
   and the store holds paths (the "viz computes no physics" rule —
   everything displayed is in a record or reachable from one). WAL mode so
@@ -107,7 +150,18 @@ classes, constructor injection in one composition script — no
   find, not a tolerance to widen. This is sub-stage 2.1c's acceptance
   gate and the operational meaning of "same functionality"; 2.1d pins the
   seeded result as a checked-in regression fixture that every later
-  sub-stage keeps asserting.
+  sub-stage keeps asserting. Bitwise equality deliberately dictates
+  implementation details — `MeanSquaredError` must reproduce
+  `evaluate.loss`'s reduction order, the same numpy operations in the
+  same order; that is a feature of the gate, not an accident. The
+  fixture records, as provenance metadata only, the versions that
+  determine its floats (python, numpy, scipy, optuna). The test asserts
+  bitwise **regardless of installed versions** — versions changing is
+  fine exactly when the output doesn't; when a dependency bump does
+  move a float, the test fails and the recorded versions make the
+  diagnosis immediate. Regenerating the fixture is allowed only in a
+  commit that changes nothing but dependency specs and the fixture
+  itself, with old and new values stated in the commit message.
 - **D16 — Optimizer upgrade: CMA-ES** (resolves the PLAN.md @TODO). The
   Stage 2 space is a fixed-length θ vector — CMA-ES's home turf. Lands as
   a `CoefficientOptimizer` adapter; swapping it in is a one-line change
@@ -119,7 +173,7 @@ classes, constructor injection in one composition script — no
 | Module | Owns | May import |
 |---|---|---|
 | `ports.py` | **all** ABCs: `Functional`, `FunctionalForm`, `Optimizer`, `FormProposer`, `CoefficientOptimizer`, `Evaluator`, `RankingPolicy`, `Condition`, `RecordStore`, `Dataset` | records, numpy |
-| `records.py` | `EvaluationRecord`, `SystemRecord`, `XCInput` dataclasses | numpy |
+| `records.py` | `EvaluationRecord`, `SystemRecord`, `XCInput` dataclasses | numpy, scipy.sparse |
 | `numerics.py` | finite-difference functional-derivative helper | numpy |
 | `ks.py` | one-body KS step on `(x, w, laplacian, v)` arrays | numpy, scipy |
 | `driver.py` | `SearchDriver` — the D12 loop | ports, records |
@@ -221,7 +275,8 @@ independently landable with the suite passing.
 
 - Delete `run_stage1.py`, `search.py`, `evaluate.py`; migrate their
   remaining tests; add the import-audit test; pin the seeded D15 result
-  (seed, best θ, train MSE) as a checked-in regression fixture.
+  (seed, best θ, train MSE, plus provenance versions per D15) as a
+  checked-in regression fixture.
 - **Acceptance**: (a) the import audit — a pytest that greps each
   module's imports against the ownership table and fails on any
   undeclared import — passes; (b) full test suite green; (c) the D15
@@ -234,23 +289,34 @@ independently landable with the suite passing.
   Stage 1 wrote); the builder registers each system's row in `systems`.
   Cache is rebuilt once — this fixes the Stage 1 gap that the frozen
   record never stored the geometry the feature-4 detail view renders.
-- **Acceptance**: (a) after an N-trial run, `candidates` has N rows and
-  `evaluations` has exactly N × (systems + conditions) rows; (b) the
+- **Acceptance**: (a) after an N-trial run, that run has N `candidates`
+  rows, and every candidate's set of `(system, metric)` evaluation rows
+  is *identical* (evaluation shape is a property of the composed
+  evaluator stack, never of the candidate) — so `evaluations` holds
+  exactly N × M rows with M measured from the first candidate, never
+  hardcoded. With the 2.1c stack M = the system count; 2.3 (conditions)
+  and 2.4 (extra metrics) grow M without touching this test; (b) the
   feature-4 heatmap query (mean value by regime × metric for a candidate,
   relative to a baseline candidate) is a single SQL statement with no
-  Python post-processing; (c) a second reader process sees new rows
+  Python post-processing — a LEFT JOIN to `systems` with
+  `COALESCE(regime, 'conditions')` as the bin, so rung-0 rows
+  (`system = NULL`) appear as their own column instead of being silently
+  dropped by an inner join; (c) a second reader process sees new rows
   mid-run (WAL live-tail); (d) the pinned D15 fixture still passes —
   routing records through the store changes no number.
 
 ### 2.3 — Rung 0: exact-condition self-tests (feature 2)
 
-- `Condition` ABC; `worlds/exp1d/conditions.py` with the first condition
-  set (@TODO enumerate and derive the exact list for this world; opening
+- `Condition` ABC — `violation(functional: Functional) -> float`,
+  0.0 = satisfied; a condition is *constructed with* whatever world data
+  it needs (probe density, the world's UEG exchange curve) at
+  composition time, so the method takes only the candidate.
+  `worlds/exp1d/conditions.py` holds the first condition set (@TODO
+  enumerate and derive the exact list for this world; opening
   candidates: uniform-gas consistency — ε_x(n; θ) vs the world's exact
   UEG exchange over a density range, exact for the LDA member;
   one-electron self-interaction — E_x + E_H on a stored one-electron
-  probe density; exchange non-positivity). Each condition returns a
-  violation magnitude, 0.0 = satisfied.
+  probe density; exchange non-positivity).
 - `ConditionsEvaluator` (rung 0): runs the injected condition set,
   emits one record per condition (`system = NULL`). Millisecond cost,
   runs before rung 1.
@@ -262,41 +328,71 @@ independently landable with the suite passing.
 
 ### 2.4 — Rung 1 derivative losses (feature 2a)
 
-- Dataset build adds, per system: `v_ext`, `v_hartree[n_exact]` (both
-  candidate-independent, frozen at build time), and `vxc_exact` by KS
-  inversion — for a 2-electron singlet φ = √(n/2), so
-  v_s = μ + ½ φ″/φ pointwise and v_xc = v_s − v_ext − v_H (@TODO settle
-  the additive-constant convention; proposal: fix μ so v_xc → 0 in the
-  density tail). One cache rebuild.
+- Dataset build adds, per system: `v_ext`, `v_hartree[n_ref]` (both
+  candidate-independent, frozen at build time), and `vxc_ref` by KS
+  inversion. The `_ref` naming is deliberate: the reference density and
+  potential are whatever the highest-order reference for that system
+  is — exact in this world, CI/CCSD(T)-class at rung 2 — and record
+  fields never claim more. For a 2-electron singlet φ = √(n/2), so
+  v_s = μ + ½ φ″/φ pointwise and v_xc = v_s − v_ext − v_H. The
+  inversion is evaluated only where `n/n_max` exceeds a relative floor
+  (~1e−10, the order of Stage 1's edge-confinement guard); outside that
+  region the boundary value is held — never a 0/0 in the vacuum.
+  (@TODO settle the additive-constant convention; sharpened proposal:
+  anchor v_xc to zero at the *edge of the valid region* — the outermost
+  points with `n/n_max` ≈ 1e−8–1e−4, numerically clean but still
+  asymptotic; the exact window is an implementation-time call.) One
+  cache rebuild.
 - `LocalAnsatz.vxc` analytic (@TODO derive the closed forms for
   d(n·ε)/dn of the LDA-x, LDA-c, and power terms); `numerics.py`
   finite-difference helper as the cross-check and the fallback any future
   adapter may use.
 - `FrozenDensityEvaluator` gains two metrics per system:
-  `vxc_l2_error` (w-weighted L2 against `vxc_exact`) and `one_step_dn` —
+  `vxc_l2_error` — the *density-weighted* L2
+  `sqrt(Σ w · n_ref · (vxc − vxc_ref)²)`. Density weighting is the
+  physically meaningful norm (the first-order energy response to a
+  potential error is ∫ n δv), and it makes the vacuum margins drop out
+  with no cutoff. The general principle, for any future potential
+  comparison: weight by the density at which the potentials are being
+  compared — here n_ref; a protocol without a reference density has
+  no `vxc_ref` either, so this criterion is simply not offered there.
+  And `one_step_dn` —
   via `ks.py`: occupy the lowest orbital of
-  −½∇² + v_ext + v_hartree + v_xc[n; θ] twice, measure ‖n_new − n_exact‖.
+  −½∇² + v_ext + v_hartree + v_xc[n; θ] twice, measure ‖n_new − n_ref‖
+  (both densities are tiny in the vacuum, so tails self-suppress).
   Whether these enter the training score stays a `RankingPolicy` choice;
   the records exist regardless (3c: never collapse before recording).
 - **Acceptance**: (a) analytic and finite-difference vxc agree to
   tolerance for random θ; (b) inversion closes the loop: solving the
-  one-body problem with the inverted v_s reproduces n_exact to grid
-  precision; (c) one KS step with the *exact* v_xc moves the density by
-  less than the discretization error; (d) the pinned D15 fixture still
+  one-body problem with the inverted v_s reproduces n_ref to grid
+  precision; (c) one KS step with the *reference* v_xc moves the density by
+  less than the discretization error; (d) margin invariance: rebuilding
+  one system with double the vacuum margin changes its `vxc_l2_error`
+  by less than tolerance — the density weighting is what makes this
+  hold, and this test keeps it held; (e) the pinned D15 fixture still
   passes with the energy-only policy (new metrics change no Stage 1
   number).
 
 ### 2.5 — Near-duplicate index (feature 1)
 
 - `NearDuplicateIndex` in `store.py`: `add(candidate_id, fingerprint)`,
-  `near(fingerprint, radius) -> candidate_ids`, LSH via seeded random
-  projections over the fingerprint vector, buckets persisted in SQLite.
+  `near(fingerprint, radius) -> candidate_ids`. Two-level lookup: exact
+  partition by `form_key` (SQL equality, no hashing), then LSH via
+  seeded random projections over the θ vector *within* the partition;
+  bucket rows are `(form_key, bucket_hash, candidate_id)`, persisted in
+  SQLite. `near()` never returns a candidate of a different form, by
+  construction rather than by projection luck. This is A2's
+  partition-then-measure structure arriving early: the partition key
+  later generalizes to the leaf-multiset side, and θ-proximity stays
+  the within-form metric.
 - Wiring in Stage 2 is passive: the driver records duplicate hits; no
   optimizer consults the index yet (proposers conditioning on it is
   Stage 3, feature 1's mature form).
 - **Acceptance**: (a) near-identical θ land in the same bucket, distant θ
-  don't (statistical test over seeded draws); (b) `near()` cost does not
-  scan the full candidate table.
+  don't (statistical test over seeded draws); (b) candidates of
+  different forms never share a bucket (true by partition — the test
+  documents the intent); (c) `near()` cost does not scan the full
+  candidate table.
 
 ### 2.6 — CMA-ES (D16)
 
@@ -304,18 +400,21 @@ independently landable with the suite passing.
   `cma` package's ask–tell API, honoring `FunctionalForm.bounds()`;
   `pyproject.toml` gains the `[cmaes]` extra.
 - **Acceptance**: (a) on the Stage 1 problem it reaches a train MSE ≤ the
-  seeded TPE-3000 result within the same evaluation budget; (b) it
+  seeded TPE-3000 result within the same evaluation budget, at fixed
+  named seeds (TPE at the D15 seed, a pinned CMA-ES seed — the seeds are
+  part of the test); (b) it
   recovers the LDA member (c₀ ≈ 1, |cᵢ| small); (c) the swap in
   `run_stage2.py` is one constructor line.
 
 ### 2.7 — Visualization (feature 4)
 
 - The Dash app per PLAN.md feature 4, first-version form: formula panel
-  (`form_latex` via MathJax), heatmap with baseline dropdown (any
-  candidate in the store; LDA always seeded as a named candidate),
-  drill-down to per-system detail (wells on a line from `wells_json`,
-  n(x) from the `.npz` pointer; v_xc-error and δn curves once 2.4 has
-  landed), history scrubber over candidate ids with a best-so-far strip.
+  (`form_latex` via MathJax), heatmap with baseline dropdown (labeled
+  candidates first — LDA is always seeded with `label = 'LDA'` — then
+  any candidate in the store), drill-down to per-system detail (wells on
+  a line from `wells_json`, n(x) from the `.npz` pointer; v_xc-error and
+  δn curves once 2.4 has landed), history scrubber over a selected run's
+  candidate ids with a best-so-far strip.
 - The human endpoint: `HumanOptimizer(CoefficientOptimizer)` — `ask()`
   blocks on a queue the submit callback feeds; the proposal panel is
   sliders/boxes over θ bounds from `FunctionalForm.bounds()`. Symbolic
@@ -367,7 +466,10 @@ convergence must be an explicit axis: the Stage 1 post-processing SCF
 genuinely non-convergent at stretched/dissociating equal-well
 geometries — endemic near-degeneracy, not a property of a particular
 functional — so "converged" cannot be assumed, only requested and
-reported.
+reported. Reporting shape: any protocol that iterates SCF emits a
+status row per system (`metric = "scf_residual"`, value = the final
+residual, 0.0 when converged) alongside its criteria — non-convergence
+is data, never an exception.
 
 ### A2 — Functional taxonomy for the proposer and the LSH index
 

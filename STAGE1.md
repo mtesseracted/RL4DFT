@@ -17,7 +17,9 @@ do not add imports beyond the listed ones.
 - **D2 — Discretization.** A `Grid` object owns nodes `x`, quadrature
   weights `w`, and the Laplacian. The Stage 1 implementation is a uniform
   grid in a hard-wall box, built per system as `[X_min − M, X_max + M]`
-  with margin M = 15 a.u. and dx ≈ 0.05–0.1 (converged, then frozen).
+  with margin M = 25 a.u. (revised from 15 during 1.3 — the two-electron
+  Z = 1 anion needs ~25 a.u. to pass the edge-density guard) and dx = 0.1
+  (converged, then frozen).
   **All integrals everywhere go through `w`** (`sum(w * f)`); no code
   outside `Grid` may assume constant spacing. A nonuniform, atom-refined
   grid is an anticipated later `Grid` implementation (quadrature comes
