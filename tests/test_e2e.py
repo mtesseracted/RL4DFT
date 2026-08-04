@@ -1,7 +1,8 @@
-"""End-to-end test: real physics through the whole Stage 1 pipeline.
+"""End-to-end test: real physics through the whole Stage 2 pipeline.
 
 Solve a handful of real two-electron systems, extract exact E_xc, cache to
-.npz, load, run a short TPE search, and report. Marked slow (reference solves).
+.npz, load them as ``SystemRecord``s, and run a short search through the
+composed stack. Marked slow (reference solves).
 Run with:  pytest -m slow    (or just pytest, which includes it).
 """
 
@@ -9,11 +10,14 @@ import numpy as np
 import optuna
 import pytest
 
+from xcsearch.driver import SearchDriver
+from xcsearch.evaluators import FrozenDensityEvaluator
+from xcsearch.optimizers.composed import FixedFormOptimizer
+from xcsearch.optimizers.optuna_tpe import OptunaTPE
+from xcsearch.ranking import MeanSquaredError
+from xcsearch.worlds.exp1d.dataset import load_frozen, solve_system
+from xcsearch.worlds.exp1d.functionals import LDA_THETA, LocalAnsatzForm
 from xcsearch.worlds.exp1d.world import System
-from xcsearch.worlds.exp1d.dataset import solve_system
-from xcsearch.evaluate import load_dataset, loss, report, format_report
-from xcsearch.worlds.exp1d.functionals import LDA_THETA
-from xcsearch.search import run_search, theta_from_params
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -48,29 +52,35 @@ def _build(tmp_path):
 
 def test_pipeline_recovers_near_lda(tmp_path):
     _build(tmp_path)
-    records = load_dataset(str(tmp_path))
-    assert len(records) == len(_SYSTEMS)
+    systems = load_frozen(str(tmp_path))
+    assert len(systems) == len(_SYSTEMS)
 
     # Exact E_xc is negative and O(0.1-1) in these units; sanity-check magnitude.
-    for r in records:
-        assert -5.0 < r.e_xc_exact < 0.0
+    for s in systems:
+        assert -5.0 < s.e_xc_exact < 0.0
 
-    study = run_search(records, n_trials=500, seed=0)
-    best = theta_from_params(study.best_params)
+    form = LocalAnsatzForm()
+    evaluator = FrozenDensityEvaluator(systems)
+    policy = MeanSquaredError()
+    driver = SearchDriver(
+        optimizer=FixedFormOptimizer(form, OptunaTPE(form.bounds(), seed=0)),
+        evaluators=[evaluator],
+        policy=policy,
+    )
+    result = driver.run(500)
 
-    lda_train = loss(LDA_THETA, records)
-    best_train = study.best_value
+    lda_train = policy.score(evaluator.evaluate(form.build(LDA_THETA)))
 
     # (a) The ansatz contains LDA, so the fitted form cannot do worse on train.
     # (With few train systems the fit is underdetermined, so we assert the
     # robust inequality, not unique-coefficient recovery -- that is a
-    # full-dataset claim for run_stage1.)
-    assert best_train <= lda_train + 1e-9
+    # full-dataset claim for a real run.)
+    assert result.best_score <= lda_train + 1e-9
 
-    # The report renders and carries both candidate and baseline columns for
-    # every (split, regime) present, including the holdout rows.
-    rows = report(best, records)
-    assert format_report(rows).count("\n") >= len(rows)
-    assert any(row.split == "holdout" for row in rows)
-    for row in rows:
-        assert np.isfinite(row.mse) and np.isfinite(row.mse_lda)
+    # Every system produced exactly one rung-1 record, holdout included: the
+    # evaluation shape is a property of the evaluator stack, never of the
+    # candidate or of the split.
+    records = evaluator.evaluate(result.best_functional)
+    assert len(records) == len(systems)
+    assert {r.split for r in records} == {"train", "holdout"}
+    assert all(np.isfinite(r.value) for r in records)

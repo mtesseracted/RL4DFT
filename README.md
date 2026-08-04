@@ -55,8 +55,14 @@ product upward, laid out in `PLAN.md`. Standing design decisions so far:
 
 ## Status
 
-Stage 1 (the 1D MVP) is implemented; see `PLAN.md` for the staged plan and
-`STAGE1.md` for the full specification and its design decisions (D1–D8).
+Stage 1 (the 1D MVP) is implemented. Stage 2 — the ports-and-adapters
+refactor, and the first working version of each of PLAN.md's features — is in
+progress; see `PLAN.md` for the staged plan, `STAGE1.md` for the MVP's design
+decisions (D1–D8) and `STAGE2.md` for Stage 2's (D9–D16).
+
+Stage 1's entry point (`run_stage1.py`) and its search/evaluate modules were
+retired in sub-stage 2.1d, once the D15 equivalence gate proved the refactored
+pipeline reproduces their numbers bitwise. `run_stage2.py` replaces them.
 
 # Stage 1 — the 1D MVP
 
@@ -64,7 +70,7 @@ Stage 1 (the 1D MVP) is implemented; see `PLAN.md` for the staged plan and
 
 ```bash
 uv sync --extra dev --extra plots    # or: pip install -e ".[dev,plots]"
-.venv/bin/python -m xcsearch.run_stage1
+.venv/bin/python -m xcsearch.run_stage2
 ```
 
 The first run builds the reference dataset (expensive; see the note below),
@@ -75,16 +81,17 @@ caches it, and every later run reuses that cache.
 | `--data DIR` | `data/stage1` | dataset cache; built if no `.npz` are found |
 | `--trials N` | `3000` | TPE trials |
 | `--seed N` | `0` | sampler seed (runs are reproducible) |
-| `--out PATH` | `data/stage1/best_theta.json` | where the best θ is written |
+| `--out PATH` | `data/stage1/best_theta_stage2.json` | where the best θ is written |
 
-Output is the best θ, the LDA baseline, train MSE for both, and a per-(split,
-regime) error table. The best θ is also saved as JSON, together with the
-exponent menu, the baseline, both MSEs, the trial count and the seed — enough
-to interpret the vector without the run that produced it.
+Output is the best θ, the LDA baseline, train MSE for both, and the winning
+functional's formula in LaTeX. The best θ is also saved as JSON, together with
+the baseline, both MSEs, the trial count and the seed — enough to interpret
+the vector without the run that produced it. (The per-regime error table Stage
+1 printed becomes a store query in sub-stage 2.2.)
 
-Tests: `.venv/bin/pytest -m "not slow"` runs the fast suite (50 tests, a few
-minutes); dropping the marker adds 8 slower cases that do real reference
-solves and a full search.
+Tests: `.venv/bin/pytest -m "not slow"` runs the fast suite; dropping the
+marker adds the slower cases that do real reference solves and a full
+search.
 
 **Runtime.** Dataset construction runs an exact two-electron solve per record
 plus an E(R) scan per molecule. Cost scales as (grid points)², and the widest
@@ -94,7 +101,7 @@ takes hours. The search itself, on the cached data, takes seconds.
 ## Plots
 
 ```bash
-.venv/bin/python -m xcsearch.worlds.exp1d.plots   # or: run_stage1 --plots
+.venv/bin/python -m xcsearch.worlds.exp1d.plots
 ```
 
 Writes two families of figure under `data/plots/` (a few minutes for the full

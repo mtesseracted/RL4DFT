@@ -7,7 +7,7 @@ import pytest
 
 from xcsearch.worlds.exp1d import dataset
 from xcsearch.worlds.exp1d.dataset import extract_exc, separation
-from xcsearch.evaluate import load_dataset
+from xcsearch.worlds.exp1d.dataset import load_frozen
 from xcsearch.worlds.exp1d.functionals import LDA_THETA
 from xcsearch.worlds.exp1d.plots import (
     evaluate_record,
@@ -96,12 +96,13 @@ def test_make_plots_writes_one_energy_curve_per_multi_geometry_molecule(tmp_path
     assert sorted(os.listdir(out / "energy")) == ["chain2.png"]
 
 
-def test_geometry_is_recovered_when_the_cache_does_not_store_it(tmp_path):
-    # Older caches predate the well arrays; the grid-based reconstruction must
-    # still land on a geometry that reproduces the stored E_xc.
+def test_geometry_is_recovered_from_the_record_name_and_grid(tmp_path):
+    # SystemRecord does not carry the wells yet (they arrive with the systems
+    # table in 2.2), so plots reconstructs them: every builder puts its first
+    # well at the origin and the rest at multiples of R, and the grid pads the
+    # well span by a known margin.
     data = _tiny_dataset(tmp_path / "data", store_geometry=False)
-    records = {r.name: r for r in load_dataset(str(data))}
-    assert records["chain2_x1.50"].well_x is None, "test wrote geometry after all"
+    records = {r.name: r for r in load_frozen(str(data))}
 
     ev = evaluate_record(records["chain2_x1.50"], THETA)
     assert [x for _, x in ev.system.wells] == pytest.approx([0.0, 3.0])
@@ -109,9 +110,19 @@ def test_geometry_is_recovered_when_the_cache_does_not_store_it(tmp_path):
 
 
 def test_evaluate_record_rejects_a_geometry_that_cannot_be_the_records_own(tmp_path):
+    # The reconstruction is keyed on the record name. Rename a chain2 record
+    # to a single Z = 1 well and the wells it rebuilds cannot reproduce the
+    # stored E_xc -- which is what keeps the reconstruction honest.
+    #
+    # Note what the check cannot see: it compares E_xc, so any geometry with
+    # the same integral(v_ext * n) passes. A Z = 2 well at the origin is
+    # exactly that for these synthetic densities, which are symmetric about
+    # the midpoint of the two Z = 1 wells. The guard catches a *wrong*
+    # reconstruction, not every conceivable one -- and it retires in 2.2, when
+    # SystemRecord carries the wells and nothing is reconstructed at all.
     data = _tiny_dataset(tmp_path / "data")
-    record = {r.name: r for r in load_dataset(str(data))}["chain2_x1.00"]
-    record.well_z = np.array([3.0, 3.0])  # wrong charges for this density
+    record = {r.name: r for r in load_frozen(str(data))}["chain2_x1.00"]
+    record.name = "atom_Z1"
 
     with pytest.raises(ValueError, match="does not reproduce"):
         evaluate_record(record, THETA)
@@ -119,7 +130,7 @@ def test_evaluate_record_rejects_a_geometry_that_cannot_be_the_records_own(tmp_p
 
 def test_both_functionals_are_solved_and_differ_from_the_reference(tmp_path):
     data = _tiny_dataset(tmp_path / "data")
-    record = {r.name: r for r in load_dataset(str(data))}["chain2_x1.00"]
+    record = {r.name: r for r in load_frozen(str(data))}["chain2_x1.00"]
     ev = evaluate_record(record, THETA)
 
     assert set(ev.ks) == {"LDA", "theta"}
@@ -132,7 +143,7 @@ def test_both_functionals_are_solved_and_differ_from_the_reference(tmp_path):
 
 def test_legend_label_reports_both_errors_and_flags_non_convergence(tmp_path):
     data = _tiny_dataset(tmp_path / "data")
-    record = {r.name: r for r in load_dataset(str(data))}["chain2_x1.00"]
+    record = {r.name: r for r in load_frozen(str(data))}["chain2_x1.00"]
     ev = evaluate_record(record, THETA)
 
     label = _method_label(ev, "LDA", "LDA")
@@ -142,7 +153,7 @@ def test_legend_label_reports_both_errors_and_flags_non_convergence(tmp_path):
 
 def test_figures_carry_the_three_curves_and_mark_every_nucleus(tmp_path):
     data = _tiny_dataset(tmp_path / "data")
-    record = {r.name: r for r in load_dataset(str(data))}["chain2_x1.50"]
+    record = {r.name: r for r in load_frozen(str(data))}["chain2_x1.50"]
     ev = evaluate_record(record, THETA)
 
     fig = density_figure(ev)
@@ -157,7 +168,7 @@ def test_figures_carry_the_three_curves_and_mark_every_nucleus(tmp_path):
     assert curve.axes[0].get_xlabel().startswith("R")
 
 
-def test_load_theta_reads_the_run_stage1_payload(tmp_path):
+def test_load_theta_reads_the_run_stage2_payload(tmp_path):
     import json
 
     path = tmp_path / "best_theta.json"

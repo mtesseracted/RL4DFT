@@ -1,4 +1,4 @@
-"""Post-processing visualisation of a finished Stage 1 run.
+"""Post-processing visualisation of a finished run.
 
     python -m xcsearch.worlds.exp1d.plots [--data DIR] [--theta FILE] [--out DIR]
 
@@ -32,8 +32,13 @@ matplotlib.use("Agg")  # headless: figures go to files, never to a display.
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from .dataset import geometry_is_consistent, separation, system_for_record  # noqa: E402
-from ...evaluate import Record, load_dataset  # noqa: E402
+from .dataset import (  # noqa: E402
+    geometry_is_consistent,
+    load_frozen,
+    separation,
+    system_for_record,
+)
+from ...records import SystemRecord  # noqa: E402
 from .functionals import LDA_THETA  # noqa: E402
 from .scf import solve_ks_robust  # noqa: E402
 from .world import Grid, System  # noqa: E402
@@ -51,7 +56,7 @@ _THETA_LABEL = "θ (searched)"
 class Evaluated:
     """A record with both functionals solved self-consistently on it."""
 
-    record: Record
+    record: SystemRecord
     system: System
     grid: Grid
     ks: dict[str, object]  # method key -> KSResult
@@ -62,7 +67,7 @@ class Evaluated:
 
     def density_error(self, method: str) -> float:
         """``integral |n_method - n_exact| dx`` -- the L1 density error."""
-        return float(np.sum(self.grid.w * np.abs(self.ks[method].n - self.record.n)))
+        return float(np.sum(self.grid.w * np.abs(self.ks[method].n - self.record.n_ref)))
 
     def energy_error(self, method: str) -> float:
         """Self-consistent total energy minus the exact one (electronic)."""
@@ -77,26 +82,30 @@ class Evaluated:
         return float(self.record.e_exact + self.system.nuclear_repulsion())
 
 
-def _grid_of(record: Record) -> Grid:
+def _grid_of(record: SystemRecord) -> Grid:
     """Rebuild the record's grid. Spacing is uniform within a record."""
     dx = float(record.x[1] - record.x[0]) if record.x.size > 1 else 1.0
     return Grid(record.x, record.w, dx)
 
 
-def _system_of(record: Record, grid: Grid) -> System:
-    """Prefer geometry stored in the cache; reconstruct it otherwise."""
-    if record.well_z is not None and record.well_x is not None:
-        wells = list(zip(record.well_z.tolist(), record.well_x.tolist()))
-        return System(wells, n_elec=2, name=record.name)
+def _system_of(record: SystemRecord, grid: Grid) -> System:
+    """Reconstruct the wells behind a record from its name and its grid.
+
+    The cache does store the geometry, but ``SystemRecord`` does not carry it
+    yet -- ``wells`` arrives with the systems table in 2.2, and the
+    reconstruction shim goes away in the same move. Until then this is the
+    only route, and ``geometry_is_consistent`` (below) is what keeps it
+    honest: a wrong reconstruction cannot reproduce the stored E_xc.
+    """
     return system_for_record(record.name, grid)
 
 
-def evaluate_record(record: Record, theta: np.ndarray) -> Evaluated:
+def evaluate_record(record: SystemRecord, theta: np.ndarray) -> Evaluated:
     """Solve LDA and theta self-consistently for one cached record."""
     grid = _grid_of(record)
     system = _system_of(record, grid)
     if not geometry_is_consistent(
-        system, grid, record.n, record.e_exact, record.e_xc_exact
+        system, grid, record.n_ref, record.e_exact, record.e_xc_exact
     ):
         raise ValueError(
             f"{record.name}: reconstructed geometry does not reproduce the "
@@ -133,7 +142,7 @@ def _view_window(ev: Evaluated) -> tuple[float, float]:
     plus the wells, plus a little air.
     """
     x = ev.record.x
-    densities = [ev.record.n] + [ev.ks[m].n for m in ev.ks]
+    densities = [ev.record.n_ref] + [ev.ks[m].n for m in ev.ks]
     visible = np.zeros_like(x, dtype=bool)
     for n in densities:
         peak = float(np.max(n))
@@ -184,7 +193,7 @@ def density_figure(ev: Evaluated):
     """Reference vs self-consistent LDA and theta densities for one system."""
     fig, ax = plt.subplots(figsize=(7.2, 4.2))
 
-    ax.plot(ev.record.x, ev.record.n, label="exact reference", **_REFERENCE_STYLE)
+    ax.plot(ev.record.x, ev.record.n_ref, label="exact reference", **_REFERENCE_STYLE)
     ax.plot(
         ev.record.x,
         ev.ks["LDA"].n,
@@ -204,7 +213,7 @@ def density_figure(ev: Evaluated):
     ax.set_xlabel("x  (a.u.)")
     ax.set_ylabel("n(x)")
 
-    subtitle = f"{ev.record.regime_tag}, {ev.record.split} split"
+    subtitle = f"{ev.record.regime}, {ev.record.split} split"
     if ev.r > 0.0:
         subtitle += f",  R = {ev.r:.3f} a.u."
     ax.set_title(f"{ev.record.name}\n{subtitle}", fontsize=10)
@@ -257,7 +266,7 @@ def energy_curve_figure(molecule: str, evaluated: list[Evaluated]):
 
 
 def load_theta(path: str) -> np.ndarray:
-    """Read the searched theta written by ``run_stage1``."""
+    """Read the searched theta written by ``run_stage2``."""
     with open(path) as f:
         return np.array(json.load(f)["theta"], dtype=float)
 
@@ -266,7 +275,7 @@ def make_plots(
     data_dir: str, theta: np.ndarray, out_dir: str, verbose: bool = True
 ) -> list[str]:
     """Write every figure and return the paths, in the order written."""
-    records = load_dataset(data_dir)
+    records = load_frozen(data_dir)
     if not records:
         raise ValueError(f"no .npz records in {data_dir}")
 
@@ -313,15 +322,15 @@ def main() -> None:
     parser.add_argument("--data", default="data/stage1", help="dataset cache dir")
     parser.add_argument(
         "--theta",
-        default="data/stage1/best_theta.json",
-        help="best-theta JSON written by run_stage1",
+        default="data/stage1/best_theta_stage2.json",
+        help="best-theta JSON written by run_stage2",
     )
     parser.add_argument("--out", default="data/plots", help="output directory")
     args = parser.parse_args()
 
     if not os.path.exists(args.theta):
         raise SystemExit(
-            f"no theta at {args.theta}; run `python -m xcsearch.run_stage1` first"
+            f"no theta at {args.theta}; run `python -m xcsearch.run_stage2` first"
         )
 
     theta = load_theta(args.theta)

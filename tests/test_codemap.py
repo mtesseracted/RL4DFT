@@ -2,9 +2,10 @@
 
 Two jobs here. The first is the ordinary one: the analyser resolves what it
 claims to resolve, and every renderer runs. The second is more interesting --
-once you have a call graph of your own code, the ownership rules that STAGE1.md
-states in prose become assertions. ``test_evaluate_never_reaches_solver`` is the
-rung-1 discipline (no reference solves in the search hot loop) as a test.
+once you have a call graph of your own code, the ownership rules that STAGE2.md
+states in prose become assertions. ``test_the_scoring_path_never_reaches_solver``
+is the rung-1 discipline (no reference solves in the search hot loop) as a test,
+now proved through the ports rather than through a direct import.
 """
 
 from __future__ import annotations
@@ -41,7 +42,12 @@ def _targets(graph, qual, kinds=None):
 
 
 def test_every_module_parsed(graph):
-    for name in ["world", "solver", "dataset", "functionals", "evaluate", "search"]:
+    """Sub-packages included: the world moved under worlds/exp1d in 2.1a."""
+    for name in [
+        "world", "solver", "dataset", "functionals", "scf",  # worlds/exp1d
+        "ports", "records", "numerics", "driver", "evaluators", "ranking",
+        "composed", "optuna_tpe",                            # optimizers/
+    ]:
         assert name in graph.modules, name
 
 
@@ -51,22 +57,37 @@ def test_every_module_has_an_explicit_layer(graph):
     assert codemap.unassigned_modules(graph) == []
 
 
-def test_main_wires_the_four_sub_stages(graph):
-    calls = _targets(graph, "run_stage1.main", {"direct"})
+def test_the_composition_root_constructs_the_whole_stack(graph):
+    """run_stage2 is the only composition point, so the map should show the
+    entire assembled system hanging off one function."""
+    calls = _targets(graph, "run_stage2.main", {"direct"})
     assert {
         "dataset.build_dataset",
-        "evaluate.load_dataset",
-        "search.run_search",
-        "run_stage1.save_best_theta",
-        "evaluate.report",
+        "dataset.load_frozen",
+        "functionals.LocalAnsatzForm",
+        "optuna_tpe.OptunaTPE",
+        "composed.FixedFormOptimizer",
+        "evaluators.FrozenDensityEvaluator",
+        "ranking.MeanSquaredError",
+        "driver.SearchDriver",
+        "run_stage2.save_best_theta",
     } <= calls
 
 
-def test_search_objective_is_linked_through_a_value_reference(graph):
-    """`study.optimize(objective, ...)` is the whole loop; a naive call graph
-    drops it, and then `run_search` looks like a leaf."""
-    assert "search.run_search.objective" in _targets(graph, "search.run_search")
-    assert "evaluate.loss" in _targets(graph, "search.run_search.objective")
+def test_the_loop_is_visible_through_the_ports(graph):
+    """The D12 loop calls everything through ABCs, so every step binds to the
+    port *and* to its adapters. A map that resolved only the ABC would hide
+    which adapter can actually run, and one that resolved only the adapters
+    would hide the contract."""
+    edges = {e.label: e for e in graph.symbols["driver.SearchDriver.step"].edges}
+    assert set(edges) >= {
+        "self.optimizer.ask", "ev.evaluate", "self.policy.score",
+        "self.optimizer.tell", "self.store.add",
+    }
+    ask = edges["self.optimizer.ask"]
+    assert ask.kind == "ambiguous"
+    assert {"ports.Optimizer.ask", "composed.FixedFormOptimizer.ask"} <= set(ask.candidates)
+    assert edges["self.store.add"].target == "ports.RecordStore.add"
 
 
 def test_method_calls_on_untyped_values_are_bound_by_name(graph):
@@ -91,17 +112,17 @@ def test_type_annotations_are_not_call_edges(graph):
     assert "world.System" not in _targets(graph, "dataset.t_vw")
 
 
-def test_dataset_write_and_evaluate_read_are_detected(graph):
+def test_dataset_write_and_frozen_read_are_detected(graph):
     writes = [e for e in graph.symbols["dataset.build_dataset"].io if e.mode == "write"]
-    reads = [e for e in graph.symbols["evaluate.load_dataset"].io if e.mode == "read"]
+    reads = [e for e in graph.symbols["dataset.load_frozen"].io if e.mode == "read"]
     assert writes and "numpy.savez" in {e.func for e in writes}
     assert reads and "numpy.load" in {e.func for e in reads}
 
 
-def test_evaluate_never_reaches_solver(graph):
-    """STAGE1.md: the references are frozen, so no reference solve may run in
-    the search hot loop. Walk everything reachable from `loss` and prove it."""
-    seen, stack = set(), ["evaluate.loss"]
+def test_the_scoring_path_never_reaches_solver(graph):
+    """The references are frozen, so no reference solve may run in the search
+    hot loop. Walk everything reachable from the evaluator and prove it."""
+    seen, stack = set(), ["evaluators.FrozenDensityEvaluator.evaluate"]
     while stack:
         qual = stack.pop()
         if qual in seen:
@@ -134,7 +155,7 @@ def test_module_import_graph_is_acyclic(graph):
 
 def test_roots_are_entry_points_only(graph):
     """Anything reachable from `main` must not also be reported as a root."""
-    assert "run_stage1.main" in graph.roots()
+    assert "run_stage2.main" in graph.roots()
     assert "dataset.build_dataset" not in graph.roots()
 
 
@@ -146,7 +167,7 @@ def test_renderers_run(graph, fmt):
         "html": codemap.render_html,
     }[fmt]
     out = render(graph, 12)
-    assert "run_stage1.main" in out
+    assert "run_stage2.main" in out
     assert len(out) > 1000
 
 

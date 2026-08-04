@@ -1,0 +1,22 @@
+{
+  "description": "D15 equivalence gate, pinned. The Stage 2 stack (FixedFormOptimizer(LocalAnsatzForm, OptunaTPE) + FrozenDensityEvaluator + MeanSquaredError) on the synthetic frozen dataset built by tests/d15_fixture.py. Bitwise.",
+  "seed": 0,
+  "n_trials": 60,
+  "n_systems": 9,
+  "dataset_sha256": "658d415124d68aef58f4246d835e0cbfd17bb7a0148bef4ff0e6d1fba9e654d8",
+  "best_theta": [
+    1.9098149319198179,
+    0.7197242700995989,
+    -0.4952676117163275,
+    0.6654619231700962,
+    -0.47654117494005155
+  ],
+  "train_mse": 9.673866904072116e-05,
+  "lda_train_mse": 0.026528369689100547,
+  "versions": {
+    "python": "3.12.13",
+    "numpy": "2.5.1",
+    "scipy": "1.18.0",
+    "optuna": "4.9.0"
+  }
+}

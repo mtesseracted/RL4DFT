@@ -24,6 +24,7 @@ plots = ["matplotlib"]
 [tool.setuptools]
 packages = [
     "xcsearch",
+    "xcsearch.optimizers",
     "xcsearch.worlds",
     "xcsearch.worlds.exp1d",
 ]
