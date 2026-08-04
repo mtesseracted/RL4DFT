@@ -44,7 +44,10 @@ ALLOWED: dict[str, set[str]] = {
     "records": {"numpy", "scipy.sparse"},
     "numerics": {"numpy"},
     "ks": {"numpy", "scipy"},
-    "driver": {"ports", "records"},
+    # `store` for the near-duplicate index the driver feeds (2.5). It is the
+    # index's *type*, not a second persistence path: the driver still writes
+    # through the RecordStore port.
+    "driver": {"ports", "records", "store"},
     "store": {"ports", "records", "sqlite3", "numpy"},
     "ranking": {"ports", "records", "evaluators", "numpy"},
     "evaluators": {"ports", "records", "ks", "numerics", "numpy"},

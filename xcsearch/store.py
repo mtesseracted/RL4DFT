@@ -74,9 +74,28 @@ CREATE TABLE IF NOT EXISTS evaluations (
     value        REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS duplicate_buckets (
+    form_key     TEXT NOT NULL,
+    bucket_hash  TEXT NOT NULL,
+    candidate_id INTEGER NOT NULL REFERENCES candidates(id)
+);
+
+CREATE TABLE IF NOT EXISTS duplicate_index_meta (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    seed          INTEGER NOT NULL,
+    n_projections INTEGER NOT NULL,
+    n_tables      INTEGER NOT NULL,
+    width         REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS evaluations_candidate
     ON evaluations(candidate_id);
 CREATE INDEX IF NOT EXISTS candidates_run ON candidates(run_id);
+-- The lookup index for near(): (form_key, bucket_hash) is the whole query, so
+-- a bucket probe is a b-tree search rather than a scan of every candidate
+-- ever proposed. That is the property 2.5 acceptance (c) asserts.
+CREATE INDEX IF NOT EXISTS duplicate_buckets_lookup
+    ON duplicate_buckets(form_key, bucket_hash);
 """
 
 # The feature-4 heatmap: mean value by regime x metric for one candidate,
@@ -294,3 +313,162 @@ class SQLiteRecordStore(RecordStore):
             (run_id, rung, metric, split),
         ).fetchone()
         return (int(row["id"]), float(row["score"])) if row else None
+
+
+class NearDuplicateIndex:
+    """Near-duplicate lookup over candidates (feature 1, sub-stage 2.5).
+
+    Two levels, and the split is the point:
+
+    * **Partition by form**, exactly, with SQL equality on ``form_key``. Not
+      hashed, not projected. ``near()`` therefore *cannot* return a candidate
+      of a different form -- by construction, rather than by projection luck.
+      Categorical identity has no distance semantics: "how far is a power-law
+      ansatz from a symbolic tree" is not a question with a number for an
+      answer, and asking random projections to invent one gets an answer that
+      looks fine and means nothing.
+    * **LSH within the partition**, over the theta vector, by seeded random
+      projections. theta-proximity is a real metric and this is what it is
+      for.
+
+    This is A2's partition-then-measure structure arriving early. The
+    partition key later generalizes to the leaf-multiset side of a composite,
+    and theta-proximity stays the within-form metric.
+
+    LSH gives *recall*: bucket collisions are candidates for being near, not
+    proof of it. ``near()`` then filters them by actual distance, so what it
+    returns is exact -- the hashing only decides how few rows that filter has
+    to look at.
+    """
+
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        seed: int = 0,
+        n_projections: int = 4,
+        n_tables: int = 8,
+        width: float = 0.1,
+    ) -> None:
+        self.connection = connection
+        self.seed = int(seed)
+        self.n_projections = int(n_projections)
+        self.n_tables = int(n_tables)
+        self.width = float(width)
+        self._projections: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self._check_parameters()
+
+    def _check_parameters(self) -> None:
+        """Stored buckets are only meaningful under the parameters that made them.
+
+        The projections are *derived* from the seed rather than stored, which
+        keeps the table small and makes the index reproducible across
+        processes -- but it also means reopening a store with different
+        parameters would silently probe buckets that were never written with
+        those projections. So the parameters are recorded once and disagreement
+        is an error, not a surprise.
+        """
+        row = self.connection.execute(
+            "SELECT * FROM duplicate_index_meta WHERE id = 1"
+        ).fetchone()
+        mine = (self.seed, self.n_projections, self.n_tables, self.width)
+        if row is None:
+            self.connection.execute(
+                "INSERT INTO duplicate_index_meta "
+                "(id, seed, n_projections, n_tables, width) VALUES (1, ?, ?, ?, ?)",
+                mine,
+            )
+            self.connection.commit()
+            return
+        theirs = (row["seed"], row["n_projections"], row["n_tables"], row["width"])
+        if theirs != mine:
+            raise ValueError(
+                f"this store's near-duplicate buckets were built with "
+                f"(seed, projections, tables, width) = {theirs}, not {mine}. "
+                "Reusing them under different projections would return "
+                "neighbours that are not neighbours."
+            )
+
+    # -- hashing -----------------------------------------------------------
+    def _projection(self, dimension: int) -> tuple[np.ndarray, np.ndarray]:
+        """Random projections for a theta of this length, derived from the seed.
+
+        Keyed by dimension because forms differ in parameter count, and a
+        projection matrix is only meaningful against the length it was drawn
+        for. Deterministic, so two processes reading the same store agree.
+        """
+        if dimension not in self._projections:
+            rng = np.random.default_rng([self.seed, dimension])
+            planes = rng.standard_normal((self.n_tables, self.n_projections, dimension))
+            offsets = rng.uniform(0.0, self.width, (self.n_tables, self.n_projections))
+            self._projections[dimension] = (planes, offsets)
+        return self._projections[dimension]
+
+    def bucket_keys(self, vector: np.ndarray) -> list[str]:
+        """One bucket key per table -- p-stable LSH, ``floor((a.v + b)/width)``.
+
+        Several independent tables because a single one has to be either wide
+        (and return half the store) or narrow (and miss neighbours that fall
+        just across a cell boundary). Independent tables trade a few more rows
+        for recall that does not depend on where the cell edges happened to land.
+        """
+        vector = np.asarray(vector, dtype=float).ravel()
+        if vector.size == 0:
+            # A non-parametric form has no vector to project. Everything in
+            # its partition shares one bucket, which is the right answer:
+            # within such a form there is nothing yet to measure distance with.
+            return ["empty"]
+        planes, offsets = self._projection(vector.size)
+        projected = np.floor((planes @ vector + offsets) / self.width).astype(int)
+        return [
+            f"{table}:" + ",".join(str(int(h)) for h in row)
+            for table, row in enumerate(projected)
+        ]
+
+    # -- writes ------------------------------------------------------------
+    def add(self, candidate_id: int, fingerprint: tuple[str, np.ndarray]) -> None:
+        """Index one candidate under its form partition."""
+        form_key, vector = fingerprint
+        self.connection.executemany(
+            "INSERT INTO duplicate_buckets (form_key, bucket_hash, candidate_id) "
+            "VALUES (?, ?, ?)",
+            [(form_key, key, int(candidate_id)) for key in self.bucket_keys(vector)],
+        )
+        self.connection.commit()
+
+    # -- reads -------------------------------------------------------------
+    def near(self, fingerprint: tuple[str, np.ndarray], radius: float) -> list[int]:
+        """Candidate ids of the same form within ``radius`` (L2) of ``vector``.
+
+        Bucket collisions inside the partition give the shortlist; the exact
+        distance decides. Sorted by id, so the caller sees the oldest first.
+        """
+        form_key, vector = fingerprint
+        vector = np.asarray(vector, dtype=float).ravel()
+        keys = self.bucket_keys(vector)
+        placeholders = ",".join("?" for _ in keys)
+        rows = self.connection.execute(
+            f"""
+            SELECT DISTINCT b.candidate_id AS id, c.theta_json AS theta
+              FROM duplicate_buckets b
+              JOIN candidates c ON c.id = b.candidate_id
+             WHERE b.form_key = ? AND b.bucket_hash IN ({placeholders})
+            """,
+            (form_key, *keys),
+        ).fetchall()
+
+        hits = []
+        for row in rows:
+            other = (
+                np.asarray(json.loads(row["theta"]), dtype=float)
+                if row["theta"] is not None
+                else np.array([])
+            )
+            if other.shape != vector.shape:
+                # Same form key, different parameter count: not comparable,
+                # and not a neighbour. (Only reachable if a form changes its
+                # parameter count without changing its key, which is a bug in
+                # the form -- so it is skipped, not crashed on.)
+                continue
+            if vector.size == 0 or float(np.linalg.norm(other - vector)) <= radius:
+                hits.append(int(row["id"]))
+        return sorted(hits)

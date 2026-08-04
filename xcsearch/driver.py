@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from .ports import Evaluator, Functional, Optimizer, RankingPolicy, RecordStore
 from .records import EvaluationRecord
+from .store import NearDuplicateIndex
 
 
 @dataclass
@@ -26,6 +27,7 @@ class SearchResult:
     best_score: float
     best_candidate_id: int | None
     n_trials: int
+    duplicate_hits: int = 0
 
 
 @dataclass
@@ -43,11 +45,20 @@ class SearchDriver:
     policy: RankingPolicy
     store: RecordStore | None = None
     run_id: int | None = None
+    # Feature 1, wired passively in Stage 2 (2.5): the driver records how
+    # often a proposal lands near one already seen, and indexes each new
+    # candidate. Nothing *consults* it yet -- a proposer conditioning on the
+    # index is Stage 3, feature 1's mature form. Counting first is deliberate:
+    # it says whether the optimizer is circling before anything is built to
+    # stop it.
+    index: NearDuplicateIndex | None = None
+    duplicate_radius: float = 0.05
 
     best_functional: Functional | None = field(default=None, init=False)
     best_score: float = field(default=float("inf"), init=False)
     best_candidate_id: int | None = field(default=None, init=False)
     n_trials: int = field(default=0, init=False)
+    duplicate_hits: int = field(default=0, init=False)
 
     def step(self) -> tuple[Functional, list[EvaluationRecord], float]:
         """One candidate through the whole loop. The D12 five lines, exactly."""
@@ -60,6 +71,15 @@ class SearchDriver:
         )
         score = self.policy.score(records)
         self.optimizer.tell(functional, records, score)
+
+        if self.index is not None and candidate_id is not None:
+            fingerprint = functional.fingerprint()
+            # Asked before this candidate is indexed, so it cannot match
+            # itself: every id that comes back is a proposal the search
+            # already made.
+            if self.index.near(fingerprint, self.duplicate_radius):
+                self.duplicate_hits += 1
+            self.index.add(candidate_id, fingerprint)
 
         self.n_trials += 1
         if score < self.best_score:
@@ -80,4 +100,5 @@ class SearchDriver:
             best_score=self.best_score,
             best_candidate_id=self.best_candidate_id,
             n_trials=self.n_trials,
+            duplicate_hits=self.duplicate_hits,
         )

@@ -26,7 +26,7 @@ from .optimizers.composed import FixedFormOptimizer
 from .optimizers.optuna_tpe import OptunaTPE
 from .ranking import MeanSquaredError
 from .records import SystemRecord
-from .store import SQLiteRecordStore
+from .store import NearDuplicateIndex, SQLiteRecordStore
 from .worlds.exp1d.conditions import default_conditions
 from .worlds.exp1d.dataset import DATA_DIR, Exp1dDataset
 from .worlds.exp1d.functionals import LDA_THETA, LocalAnsatzForm
@@ -122,6 +122,9 @@ def main() -> None:
         policy=policy,
         store=store,
         run_id=run_id,
+        # Passive in Stage 2: the count says whether the optimizer is circling
+        # through near-identical proposals. Acting on it is Stage 3.
+        index=NearDuplicateIndex(store.connection),
     )
     # -----------------------------------------------------------------------
 
@@ -134,7 +137,11 @@ def main() -> None:
     print("\nBest theta:", np.array2string(best_theta, precision=4))
     print(f"LDA baseline theta: {np.array2string(LDA_THETA, precision=4)}")
     print(f"Train MSE  best: {result.best_score:.4e}")
-    print(f"Train MSE  LDA : {lda_mse:.4e}\n")
+    print(f"Train MSE  LDA : {lda_mse:.4e}")
+    print(
+        f"Near-duplicate proposals: {result.duplicate_hits}/{result.n_trials}"
+        f"  (within {driver.duplicate_radius} in theta)\n"
+    )
     print(result.best_functional.to_latex())
 
     print("\n" + format_heatmap(store, result.best_candidate_id, baseline_id))
