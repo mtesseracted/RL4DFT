@@ -6,6 +6,7 @@
 # build files
 __pycache__
 *.egg-info
+build/
 
 # virtualenvs
 .venv/
@@ -16,4 +17,8 @@ data/
 *.npz
 .pytest_cache/
 optuna*.db
+
+# work exported out of the Claude sandbox (sandbox/xcdev.sh export / fetch)
+*.bundle
+sandbox-*.tar
 

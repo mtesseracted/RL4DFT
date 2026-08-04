@@ -55,10 +55,167 @@ product upward, laid out in `PLAN.md`. Standing design decisions so far:
 
 ## Status
 
-Early design phase. The premise (this README) comes first; `PLAN.md` with the
-staged implementation plan is being developed next.
+Stage 1 (the 1D MVP) is implemented; see `PLAN.md` for the staged plan and
+`STAGE1.md` for the full specification and its design decisions (D1–D8).
+
+# Stage 1 — the 1D MVP
+
+## Running it
+
+```bash
+uv sync --extra dev                  # or: pip install -e ".[dev]"
+.venv/bin/python -m xcsearch.run_stage1
+```
+
+The first run builds the reference dataset (expensive; see the note below),
+caches it, and every later run reuses that cache.
+
+| flag | default | meaning |
+| --- | --- | --- |
+| `--data DIR` | `data/stage1` | dataset cache; built if no `.npz` are found |
+| `--trials N` | `3000` | TPE trials |
+| `--seed N` | `0` | sampler seed (runs are reproducible) |
+| `--out PATH` | `data/stage1/best_theta.json` | where the best θ is written |
+
+Output is the best θ, the LDA baseline, train MSE for both, and a per-(split,
+regime) error table. The best θ is also saved as JSON, together with the
+exponent menu, the baseline, both MSEs, the trial count and the seed — enough
+to interpret the vector without the run that produced it.
+
+Tests: `.venv/bin/pytest -m "not slow"` runs the fast suite (50 tests, a few
+minutes); dropping the marker adds 8 slower cases that do real reference
+solves and a full search.
+
+**Runtime.** Dataset construction runs an exact two-electron solve per record
+plus an E(R) scan per molecule. Cost scales as (grid points)², and the widest
+dissociating geometries reach ~10⁶-dimensional eigenproblems, so a cold build
+takes hours. The search itself, on the cached data, takes seconds.
+
+## Plots
+
+```bash
+.venv/bin/python -m xcsearch.plots        # or: run_stage1 --plots
+```
+
+Writes two families of figure under `data/plots/` (a few minutes for the full
+set; `--data`, `--theta` and `--out` override the paths):
+
+- `density/<record>.png`, one per system — the exact reference density against
+  the **self-consistent** LDA and θ densities, with each nucleus marked on the
+  axis and labelled by Z. The legend carries each functional's total-energy
+  error ΔE and density error ∫|Δn| against the reference.
+- `energy/<molecule>.png`, one per molecule sampled at several bond lengths —
+  the Born–Oppenheimer curve E(R) for reference, LDA and θ, with the
+  extrapolation geometries shaded and each functional's MAE in the legend.
+
+This is the one place the project runs a self-consistent KS solve: the search
+scores candidates on frozen reference densities and never relaxes a density of
+its own (`ks.py` is post-processing, and nothing in the search path imports
+it). The distinction is the point — a functional can reproduce E_xc well *on
+the exact density* and still relax to a poor density, and only these figures
+show that. Where the SCF does not settle, the legend says so rather than
+quietly plotting a half-converged curve; the well-separated equal-well chains
+are genuinely near-degenerate at two electrons, and their density slides
+between wells instead of converging.
+
+## What it does
+
+A complete search loop in miniature, in a world where the exact answer is
+computable — validating the machinery before it is pointed at real chemistry.
+
+**The world.** Electrons live on a 1D grid and interact through a *bounded*
+exponential kernel `v(u) = A exp(-κ|u|)`; the same kernel, scaled by Z, forms
+every attractive well — the exponential mimicking of Baker et al. (PRB **91**,
+235141, 2015). Every system carries two electrons in a singlet.
+
+**Exact references.** Each system is solved by direct diagonalization of the
+two-electron Hamiltonian on the (x₁,x₂) product grid. For a two-electron
+singlet the Kohn–Sham kinetic energy is *exactly* von Weizsäcker, so the exact
+XC energy falls out by subtraction, `E_xc = E_exact − T_vW − V_ext − E_H`,
+with no KS inversion anywhere.
+
+**Evaluation on frozen densities.** The dataset is built once, cached as
+`.npz`, and then frozen. The search hot loop scores candidates against those
+stored densities and energies; it never runs a self-consistent solve, and
+`evaluate.py` is structurally forbidden from importing `solver.py`. Each
+evaluation costs milliseconds, and functional quality is decoupled from SCF
+convergence. The price is that self-consistency error is invisible here — a
+deliberate simplification, revisited under "Beyond frozen densities" in
+`PLAN.md`.
+
+**Exchange-only search.** Correlation is fixed to the 1D-LDA Padé form; only
+exchange is searched, through the local ansatz
+`ε_x(n;θ) = c₀ ε_x^LDA(n) + Σ cᵢ n^{pᵢ}`, driven by Optuna's TPE sampler
+against training-split MSE. Exact LDA sits inside the search box at
+`c₀ = 1, cᵢ = 0`, so *the optimizer rediscovers LDA* is the acceptance test.
+
+**Splits that can't flatter the result.** Every record carries a regime tag
+(equilibrium / stretched / dissociating / atom) and a split. Two molecules and
+one atomic charge are never trained on, and geometries stretched far past
+equilibrium form a separate *extrapolation* split, never folded into the
+holdout headline.
+
+**Quadrature discipline.** `Grid` owns the weights and every integral is
+`sum(w·f)`, so a nonuniform grid can drop in later without touching callers.
+
+## Systems
+
+63 cached records: 5 training molecules × 9 geometries, 2 held-out molecules ×
+7 geometries, and 4 atoms (Z = 1, 3, 4 training; Z = 2 held out). Geometries
+are sampled as multiples of each molecule's own R_eq, located from the
+Born–Oppenheimer curve by a scan plus parabolic refinement.
+
+Not every well set binds. Because the interaction is bounded — unlike Coulomb
+— a well set whose total nuclear charge exceeds its two electrons dissociates
+with no equilibrium at all. Those molecules are sampled around a nominal
+separation instead, and their regime tags read relative to that nominal rather
+than to an equilibrium.
+
+## Reading the code
+
+`tools/codemap.py` renders how the package fits together — every call between
+our own functions, nested by stack depth and foldable, with library calls
+(numpy, scipy, optuna) counted per function instead of expanded into the tree.
+That filter is the point: an IDE call hierarchy on this code is unreadable
+because `np.asarray` swamps everything.
+
+```sh
+python tools/codemap.py                # build/codemap.html -- open it
+python tools/codemap.py --format text  # indented tree, for the terminal
+python tools/codemap.py --format json  # the raw graph
+```
+
+It reads the source with `ast` and never imports or runs the package, so it is
+safe on a broken tree and needs no dependencies. Edges labelled *inferred*
+(a method bound by name), *ambiguous* or *dynamic* (a call through a parameter,
+like `builder(r)` inside `find_req`) are heuristics rather than facts, and are
+marked as such in every output.
+
+The graph is also assertable, which is the part worth keeping.
+`tests/test_codemap.py` walks everything reachable from `evaluate.loss` and
+fails if it ever reaches `solver` or `dataset` — that is the "structurally
+forbidden from importing `solver.py`" claim above, checked rather than
+asserted in prose. The same file fails if a new module is added without being
+placed in a layer, so it cannot quietly inherit someone else's colour.
 
 # References
+
+## Stage 1 world (1D exponential interaction)
+
+References cited in `STAGE1.md` (design decisions D1, D6; sub-stage 1.4).
+
+- T. E. Baker, E. M. Stoudenmire, L. O. Wagner, K. Burke & S. R. White,
+  *One-dimensional mimicking of electronic structure: The case for
+  exponentials*, [Phys. Rev. B **91**, 235141
+  (2015)](https://journals.aps.org/prb/abstract/10.1103/PhysRevB.91.235141)
+  ([arXiv:1504.05620](https://arxiv.org/abs/1504.05620)). Source of the
+  exponential interaction `v(u) = A·exp(−κ|u|)` and its fitted constants,
+  the closed-form 1D-LDA exchange, and the 1D-LDA correlation
+  parametrization for this world.
+  - Erratum: [Phys. Rev. B **93**, 119912(E)
+    (2016)](https://journals.aps.org/prb/abstract/10.1103/PhysRevB.93.119912)
+    — check it when resolving the `@TODO` verifications of the transcribed
+    constants and parametrizations.
 
 ## Non-local functionals
 

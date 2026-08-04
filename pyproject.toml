@@ -12,6 +12,7 @@ dependencies = [
     "numpy",
     "scipy",
     "optuna",
+    "matplotlib",
 ]
 
 [project.optional-dependencies]

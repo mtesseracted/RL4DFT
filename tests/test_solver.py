@@ -61,3 +61,20 @@ def test_dx_halving_convergence_documented():
         # Monotonic convergence (direction-agnostic): consistent sign, shrinking.
         assert np.all(diffs > 0) or np.all(diffs < 0), f"{system.wells}: {energies}"
         assert abs(diffs[-1]) < abs(diffs[0]), f"{system.wells}: {energies}"
+
+
+def test_ground_state_is_reproducible_for_a_degenerate_potential():
+    # Six well-separated identical wells give a six-fold near-degenerate set
+    # of lowest states. Lanczos is not deterministic there -- it augments the
+    # Krylov space with an internally generated random vector, whose state
+    # carries across calls -- so the ground state came back localised in a
+    # different well from one call to the next, making any downstream
+    # self-consistent solve, and its plot, irreproducible.
+    grid = Grid.uniform(-15.0, 75.0, 0.1)
+    system = System([(1.0, 12.0 * i) for i in range(6)], n_elec=1)
+    v = system.v_ext(grid)
+
+    first = solve_1e(grid, v)
+    second = solve_1e(grid, v)
+    assert first[0] == second[0]
+    assert np.array_equal(first[1], second[1])
