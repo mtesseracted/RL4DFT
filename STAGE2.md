@@ -320,3 +320,109 @@ SCF beyond the D14 one-body step. No 3D world, no ball-and-stick renderer
 (the detail-view port exists; the 1D renderer is its only adapter). No
 plugin registry, config composition, or event bus — `run_stage2.py` stays
 the only composition point.
+
+## Addendum — queued features (not part of the 2.1–2.7 iteration)
+
+Recorded here while sub-stages 2.1–2.7 are being implemented, so the plan
+above stays fixed mid-flight. Nothing above this line changes. These get
+folded into a later plan iteration (design decisions + sub-stages) once
+the current one lands.
+
+### A1 — Evaluation protocol as the evaluator's decision
+
+Moving beyond frozen densities (PLAN.md "Beyond frozen densities"): the
+evaluator/test-system pairing decides the *level* of evaluation, rather
+than the pipeline hard-coding one. An evaluation protocol has three
+independent axes:
+
+- **Starting density** — random | a guess method (e.g. guess-from-core
+  style) | the high-order reference density.
+- **SCF iterations** — 0 (frozen, today's rung 1) | 1 (the D14 one-step)
+  | run to convergence.
+- **Evaluation criteria** — energy diff vs reference, density diff vs
+  reference, …; when more than one, a dict/list of named criteria, not a
+  single scalar.
+
+Stage 2's `FrozenDensityEvaluator` is one corner of this space
+(reference density, 0 iterations, energy criterion) and 2.4's one-step
+metric is a second — the addendum generalizes the corner into the cube.
+The D13 `evaluations` long format (one row per metric) already
+accommodates multi-criteria output. Known prior evidence for why
+convergence must be an explicit axis: the Stage 1 post-processing SCF
+(`ks.py`/`plots.py` on the `stage1` branch) found 16 of 126 solves
+genuinely non-convergent at stretched/dissociating equal-well
+geometries — endemic near-degeneracy, not a property of a particular
+functional — so "converged" cannot be assumed, only requested and
+reported.
+
+### A2 — Functional taxonomy for the proposer and the LSH index
+
+The `FormProposer` and the LSH index need a richer notion of what a
+functional *is*. A candidate carries a **flat, extensible set of meta
+tags beside its form fingerprint** — deliberately not a hierarchy, so a
+tag added later is just an absent key on old records: no migration, no
+re-hash, no "which category splits first" decision. Tag values are
+integers where a scale exists, so future distinctions slot into old
+data without breaking it. Tags so far:
+
+- **Locality** — semi-local | non-local; negative integer values
+  reserved to encode an interaction range later.
+- **Dependence** — integer: −1 = density-only; a non-negative value k =
+  orbital-dependent, seeing the occupied orbitals plus k orbitals above
+  them (0 = occupied only).
+- **v_ext dependence** — integer: 0 = none; 1 = full awareness — the
+  proposer/functional may see everything about the external potential:
+  well positions, charges, and the potential form. Values beyond 1 are
+  reserved for future partial-awareness distinctions (e.g.
+  fragmentation only). The exact functional for H₂ in the dissociation
+  limit has awareness of the atom positions, so v_ext-dependent forms
+  are a legitimate corner of the space, not a rule violation.
+
+A functional need not sit at one point: it can be a *composite* with
+parts of each, or multiple parts of one kind — hybrids (semi-local part
++ non-local exact-exchange part) and range-separated functionals (parts
+split by interaction range) are the canonical examples. The
+representation (and therefore `fingerprint()` and the LSH featurization)
+must be able to express such composites, not just leaf forms.
+
+**Composite identity and aggregation.** A composite's syntactic
+identity is the **multiset of its leaves**, each leaf a (form
+fingerprint, tag tuple) pair — a multiset because terms in a sum have
+no order, so aggregation must be order-invariant. Mixing weights stay
+out of it: an exact-exchange fraction or a range-split ω is a
+coefficient, i.e. part of θ, so weight proximity is a within-form θ
+question (2.5's machinery), not a form-identity question. Aggregation
+never reduces the multiset to one opaque hash — that destroys
+near-collision structure (a composite differing in a single leaf would
+be simply "different"). The syntactic channel hashes the multiset *as a
+set* (minhash-style set similarity), so composites sharing most leaves
+land near and wholesale different compositions land far. The **tag
+projection** of the multiset — e.g. {(semi-local, −1, 0),
+(non-local, 0, 0)}, read "a hybrid" — is materialized as a stored,
+queryable category key for the proposer and the viz; it is a filter,
+never a distance term, since bucketing on tags first would invert the
+tie-breaker rule below. The behavioral channel needs no aggregation
+rule at all: it evaluates the *total* functional on the probe set, so
+it is composition-blind by construction — which is what lets the
+syntactic aggregate afford to be crude, as long as crude preserves
+near-collisions.
+
+The LSH *metric* has **two channels with explicit weights**:
+
+- **Syntactic** — the form fingerprint, sensitive to the formula
+  itself, so distinct formulas never collapse just because they agree
+  on some probe set.
+- **Behavioral** — measured, not inferred from syntax: e.g. E_xc
+  evaluated on a small fixed probe set of densities at a few sampled θ,
+  tracking how much a change in the functional changes expected
+  energies in a nearby neighborhood of parameter space — so
+  re-parametrizations of the same physics land close and the proposer
+  does not circle through them.
+
+Meta tags act as the **tie-breaker** within near-collisions of the two
+channels: same form + different tags is a meaningful near-collision,
+not something to hash apart at the top level. Tags may grow payloads
+over time (which orbitals, which parts of v_ext) — the integer values
+above are the minimal first version of that. None of this binds
+sub-stage 2.5's `NearDuplicateIndex`, which hashes θ vectors within one
+fixed form and never sees a meta tag.
