@@ -592,3 +592,53 @@ over time (which orbitals, which parts of v_ext) — the integer values
 above are the minimal first version of that. None of this binds
 sub-stage 2.5's `NearDuplicateIndex`, which hashes θ vectors within one
 fixed form and never sees a meta tag.
+
+## Implementation notes — how the open @TODOs were resolved
+
+Recorded after 2.1–2.7 landed, so a reader of this plan is not left holding
+questions the code has already answered. Nothing above this line changes.
+
+- **2.3, the condition list.** Three conditions this world can state
+  *exactly*, all three called through the `Functional` port with no
+  privileged access: uniform-gas consistency (the LDA member scores exactly
+  0.0, and only it does), one-electron self-interaction (`E_xc[n] = −E_H[n]`,
+  exact for *any* normalized one-electron density — which is what keeps the
+  solver out of rung 0), and exchange non-positivity. The candidates the plan
+  listed were all three; deriving them turned up nothing further that a
+  *local* ansatz can violate. Lieb–Oxford, coordinate scaling and the
+  low-density limit want either a bound constant transcribed for this
+  interaction or ingredients a local form does not have, so they wait for the
+  form space to grow.
+- **2.4, the additive-constant convention.** The sharpened proposal, adopted:
+  v_xc is anchored to zero at the outermost points where `n/n_max` falls in
+  [1e−8, 1e−4] — asymptotic, still numerically clean. Outside the valid
+  region (`n/n_max > 1e−10`) the boundary value is held.
+- **2.4, the analytic v_xc closed forms.** The exchange derivative collapses:
+  `d(n·ε_x^LDA)/dn = −(A/π)·arctan(πn/κ)`. Correlation is the quotient rule on
+  the Padé form, guarded where `D′(y)`'s 1/√y meets the origin. Power terms
+  are `cᵢ(pᵢ+1)nᵖ`. All three are asserted against both finite-difference
+  helpers, including the generic one that assumes nothing about the
+  functional.
+- **The inversion is exact, not approximate.** Taking φ″ with the *record's
+  own Laplacian* rather than a fresh difference formula makes φ = √(n/2) an
+  eigenvector of the recovered Hamiltonian by construction, at the stored
+  discretization. Acceptance (b) and (c) therefore hold at machine precision
+  (~2e−12) rather than at a tolerance.
+
+Two amendments to the ownership table, both enforced by the import audit
+rather than applied silently (the reasoning is in `tests/test_import_audit.py`):
+
+- `records` and `numerics` are core modules that any port implementer speaks
+  by necessity — `ports`' own signatures are written in terms of `records` —
+  so they are granted wherever `ports` is.
+- `worlds/exp1d/solver.py` may import the core `ks`: the one-body eigenproblem
+  is the same problem whether it is a reference solve or feature 2a's step in
+  the loop, and solving it twice in two places is how two implementations
+  drift apart. `viz/data.py` declares `sqlite3` for the same reason `store`
+  does, and `worlds/exp1d/dataset.py` declares `scipy.sparse` because it
+  rebuilds the cached Laplacian.
+
+One sequencing change: 2.2's cache rebuild and 2.4's were run as a single
+build. 2.2's had written no files when 2.4 landed, and the end state is
+identical — the plan's "one cache rebuild" per sub-stage is about the cache's
+content, not about how many times the solver is paid for.
