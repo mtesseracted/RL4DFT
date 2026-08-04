@@ -19,6 +19,7 @@ import os
 from dataclasses import dataclass
 
 import numpy as np
+import scipy.sparse as sp
 
 from ...ports import Dataset
 from ...records import SystemRecord
@@ -51,6 +52,23 @@ _REPO_ROOT: str = os.path.dirname(
 # Density floor below which 1/n terms are treated as zero.
 _N_FLOOR = 1e-12
 
+# --- KS inversion (2.4) ---------------------------------------------------
+# The inversion divides by the orbital, so it is only evaluated where the
+# density is meaningfully above zero. The floor is relative to the peak and
+# sits at the order of the edge-confinement guard the build already enforces:
+# below it the density is vacuum and the quotient is noise.
+VXC_FLOOR: float = 1e-10
+
+# The additive constant. v_xc is fixed only up to a constant by the inversion
+# (a rigid shift of v_s shifts the eigenvalue, not the density), so a
+# convention is needed, and it should be a physical one. This anchors v_xc to
+# zero at the *edge of the valid region*: the outermost points where the
+# density has fallen to this window -- far enough out to be asymptotic, still
+# far enough in to be numerically clean. Anchoring at the peak instead would
+# put the convention where the physics is, and make every system's constant
+# depend on its own interior.
+VXC_ANCHOR_WINDOW: tuple[float, float] = (1e-8, 1e-4)
+
 
 # --------------------------------------------------------------------------
 # D5 energy components. Every integral goes through the grid weights.
@@ -81,6 +99,71 @@ def v_ext_energy(n: np.ndarray, grid: Grid, system: System) -> float:
 def extract_exc(e_exact: float, n: np.ndarray, grid: Grid, system: System) -> float:
     """E_xc^exact for a two-electron singlet (D5)."""
     return e_exact - t_vw(n, grid) - v_ext_energy(n, grid, system) - e_hartree(n, grid)
+
+
+def v_hartree(n: np.ndarray, grid: Grid) -> np.ndarray:
+    """Hartree potential ``v_H(x) = int v(x - x\') n(x\') dx\'`` on the grid."""
+    coupling = v_int(grid.x[:, None] - grid.x[None, :])
+    return np.asarray(coupling @ (grid.w * n))
+
+
+def invert_vxc(
+    n: np.ndarray,
+    grid: Grid,
+    v_ext: np.ndarray,
+    v_h: np.ndarray,
+    floor: float = VXC_FLOOR,
+    window: tuple[float, float] = VXC_ANCHOR_WINDOW,
+) -> np.ndarray:
+    """Recover v_xc from a two-electron singlet reference density (2.4).
+
+    Both electrons occupy phi = sqrt(n/2), so the KS equation is one-body and
+    can be read backwards: from ``-1/2 phi\'\' + v_s phi = mu phi``,
+
+        v_s = mu + (1/2) phi\'\' / phi,   v_xc = v_s - v_ext - v_H
+
+    The second derivative is taken with the *grid\'s own Laplacian*, not with a
+    fresh difference formula. That is what makes the inversion exact rather
+    than approximate: phi is then an eigenvector of ``-1/2 L + diag(v_s)`` by
+    construction, at the discretization the record is stored on, so solving
+    the one-body problem with the recovered potential returns the reference
+    density to machine precision (2.4 acceptance (b)).
+
+    Outside the valid region the boundary value is held -- never a 0/0 in the
+    vacuum -- and the additive constant follows VXC_ANCHOR_WINDOW.
+    """
+    n = np.asarray(n, dtype=float)
+    peak = float(np.max(n))
+    if peak <= 0.0:
+        raise ValueError("no valid region for the inversion: the density is empty")
+    phi = np.sqrt(np.clip(n, 0.0, None) / 2.0)
+    ratio = n / peak
+    valid = ratio > floor
+    if not valid.any():
+        raise ValueError("no valid region for the inversion: the density is empty")
+
+    safe_phi = np.where(valid, phi, 1.0)
+    v_s = 0.5 * np.asarray(grid.laplacian() @ phi) / safe_phi
+    vxc = v_s - np.asarray(v_ext) - np.asarray(v_h)
+
+    # Hold the boundary value outside the valid region.
+    indices = np.flatnonzero(valid)
+    first, last = int(indices[0]), int(indices[-1])
+    vxc[:first] = vxc[first]
+    vxc[last + 1:] = vxc[last]
+
+    # Anchor to zero at the edge of the valid region: the outermost point on
+    # each side whose density has fallen into the window.
+    lo, hi = window
+    in_window = np.flatnonzero(valid & (ratio >= lo) & (ratio <= hi))
+    if in_window.size:
+        edges = [int(in_window[0]), int(in_window[-1])]
+    else:
+        # A density that never passes through the window (a very compact
+        # system on a short grid) still needs a convention; the valid edges
+        # are the same idea, one step further out.
+        edges = [first, last]
+    return vxc - float(np.mean(vxc[edges]))
 
 
 # --------------------------------------------------------------------------
@@ -276,6 +359,14 @@ def build_dataset(out_dir: str = DATA_DIR) -> int:
     for system, regime, split, record_name in records:
         solved = solve_system(system)
         path = os.path.join(out_dir, f"{record_name}.npz")
+
+        # Frozen potential data for feature 2a (2.4). All candidate-
+        # independent, so it is computed once here and never in the loop.
+        v_ext_array = system.v_ext(solved.grid)
+        v_h = v_hartree(solved.n, solved.grid)
+        vxc_ref = invert_vxc(solved.n, solved.grid, v_ext_array, v_h)
+        laplacian = solved.grid.laplacian().tocsr()
+
         np.savez(
             path,
             x=solved.grid.x,
@@ -296,6 +387,16 @@ def build_dataset(out_dir: str = DATA_DIR) -> int:
             # nonuniform grid would be rebuilt from -- dx is a convenience for
             # the uniform case, never an assumption anything integrates with.
             dx=float(solved.grid.x[1] - solved.grid.x[0]),
+            # Potentials (2.4).
+            v_ext=v_ext_array,
+            v_hartree=v_h,
+            vxc_ref=vxc_ref,
+            # The Laplacian as CSR arrays rather than as bands: the record
+            # carries the operator the reference was computed with, and
+            # nothing downstream gets to assume a stencil or a spacing.
+            lap_data=laplacian.data,
+            lap_indices=laplacian.indices,
+            lap_indptr=laplacian.indptr,
         )
     return len(records)
 
@@ -326,6 +427,15 @@ def load_frozen(path: str = DATA_DIR) -> list[SystemRecord]:
     records: list[SystemRecord] = []
     for file in sorted(glob.glob(os.path.join(path, "*.npz"))):
         d = np.load(file, allow_pickle=False)
+        stored = set(d.files)
+        laplacian = (
+            sp.csr_matrix(
+                (d["lap_data"], d["lap_indices"], d["lap_indptr"]),
+                shape=(d["x"].size, d["x"].size),
+            )
+            if "lap_data" in stored
+            else None
+        )
         records.append(
             SystemRecord(
                 name=str(d["name"]),
@@ -342,6 +452,10 @@ def load_frozen(path: str = DATA_DIR) -> list[SystemRecord]:
                 ),
                 n_elec=int(d["n_elec"]),
                 npz_path=_repo_relative(file),
+                laplacian=laplacian,
+                v_ext=d["v_ext"] if "v_ext" in stored else None,
+                v_hartree=d["v_hartree"] if "v_hartree" in stored else None,
+                vxc_ref=d["vxc_ref"] if "vxc_ref" in stored else None,
             )
         )
     return records

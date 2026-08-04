@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from ...numerics import local_vxc
 from ...ports import Functional, FunctionalForm
 from ...records import XCInput
 from .world import A_INT as _A, KAPPA as _KAPPA
@@ -123,6 +122,95 @@ def exc(n: np.ndarray, w: np.ndarray, theta: np.ndarray) -> float:
     return float(np.sum(w * n * eps))
 
 
+# --------------------------------------------------------------------------
+# Analytic XC potentials: v = d(n eps)/dn (2.4).
+#
+# Every term of the ansatz is a pointwise function of n, so the functional
+# derivative is an ordinary one and the closed forms below are exact. The
+# finite-difference helpers in `numerics` stay as the cross-check (asserted in
+# the tests) and as the fallback for any adapter that has no closed form.
+# --------------------------------------------------------------------------
+def v_x_lda(n: np.ndarray) -> np.ndarray:
+    """``d(n eps_x_lda)/dn`` in closed form.
+
+    With ``y = pi n / kappa``, the exchange energy *density* is
+
+        n eps_x(n) = (A kappa / 2 pi^2) [ln(1 + y^2) - 2 y arctan(y)]
+
+    whose y-derivative collapses: ``2y/(1+y^2) - 2 arctan(y) - 2y/(1+y^2)``
+    leaves ``-2 arctan(y)``. Multiplying by ``dy/dn = pi/kappa``,
+
+        v_x(n) = -(A/pi) arctan(pi n / kappa)
+
+    Finite everywhere, and -A n / kappa as n -> 0, which is twice the energy
+    per particle in that limit -- as it must be for a term linear in n.
+    """
+    n = np.asarray(n, dtype=float)
+    return -(_A / np.pi) * np.arctan(np.pi * n / _KAPPA)
+
+
+def _c_denominator(y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The correlation Pade denominator D(y) and its derivative D'(y)."""
+    sqrt_y = np.sqrt(np.clip(y, 0.0, None))
+    a6 = _C_NU * (np.pi * _KAPPA * _KAPPA / _A)
+    denominator = (
+        _C_ALPHA
+        + _C_BETA * sqrt_y
+        + _C_GAMMA * y
+        + _C_DELTA * sqrt_y ** 3
+        + _C_ETA * y ** 2
+        + _C_SIGMA * sqrt_y ** 5
+        + a6 * y ** 3
+    )
+    # D'(y). The beta term carries a 1/sqrt(y) singularity at the origin; it
+    # is multiplied by n^2 downstream, so the product vanishes there, but the
+    # division still has to be kept away from y = 0.
+    safe_sqrt = np.where(sqrt_y > 0.0, sqrt_y, 1.0)
+    derivative = (
+        0.5 * _C_BETA / safe_sqrt
+        + _C_GAMMA
+        + 1.5 * _C_DELTA * sqrt_y
+        + 2.0 * _C_ETA * y
+        + 2.5 * _C_SIGMA * sqrt_y ** 3
+        + 3.0 * a6 * y ** 2
+    )
+    return denominator, np.where(sqrt_y > 0.0, derivative, 0.0)
+
+
+def v_c_lda(n: np.ndarray) -> np.ndarray:
+    """``d(n eps_c_lda)/dn`` in closed form.
+
+    ``n eps_c(n) = -A n^2 / (kappa D(y))`` with ``y = pi n / kappa``, so
+
+        v_c(n) = -2 A n / (kappa D) + (A pi n^2 / kappa^2) D'(y) / D^2
+    """
+    n = np.asarray(n, dtype=float)
+    y = np.pi * n / _KAPPA
+    denominator, derivative = _c_denominator(y)
+    return (
+        -2.0 * _A * n / (_KAPPA * denominator)
+        + (_A * np.pi * n * n / (_KAPPA * _KAPPA)) * derivative / (denominator * denominator)
+    )
+
+
+def v_x_ansatz(n: np.ndarray, theta: np.ndarray) -> np.ndarray:
+    """Exchange potential of the ansatz.
+
+    The power terms are the easy half: ``d(n * c_i n^p)/dn = c_i (p+1) n^p``.
+    """
+    n = np.asarray(n, dtype=float)
+    theta = np.asarray(theta, dtype=float)
+    out = theta[0] * v_x_lda(n)
+    for coeff, p in zip(theta[1:], EXPONENTS):
+        out = out + coeff * (p + 1.0) * np.power(n, p)
+    return out
+
+
+def vxc(n: np.ndarray, theta: np.ndarray) -> np.ndarray:
+    """The XC potential ``d(n eps_xc)/dn`` of the ansatz, analytic."""
+    return v_x_ansatz(n, theta) + v_c_lda(n)
+
+
 def e_xc_density(n: np.ndarray, theta: np.ndarray) -> np.ndarray:
     """XC energy *density* ``n * eps_xc(n; theta)`` -- the integrand of E_xc."""
     n = np.asarray(n, dtype=float)
@@ -152,9 +240,13 @@ class LocalAnsatz(Functional):
         return exc(x.n, x.w, self.theta)
 
     def vxc(self, x: XCInput) -> np.ndarray:
-        """``d(n eps_xc)/dn`` by central differences (2.4 replaces this with
-        the closed form and keeps the difference as its cross-check)."""
-        return local_vxc(lambda n: e_xc_density(n, self.theta), x.n)
+        """``d(n eps_xc)/dn`` in closed form (2.4).
+
+        Every term is a pointwise function of n, so the closed forms above are
+        exact and there is no reason to pay for finite differences in the hot
+        loop. ``numerics`` keeps the difference as the cross-check.
+        """
+        return vxc(x.n, self.theta)
 
     def fingerprint(self) -> tuple[str, np.ndarray]:
         return FORM_KEY, self.theta.copy()

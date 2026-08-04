@@ -741,7 +741,7 @@ LAYERS = [
     (
         "core",
         "Core contracts",
-        ["ports", "records", "numerics"],
+        ["ports", "records", "numerics", "ks"],
         "World-free, third-party-free: the ABCs every adapter implements, the "
         "data that crosses them, and the shared numerics. What an adapter "
         "author reads, and all they should have to read.",

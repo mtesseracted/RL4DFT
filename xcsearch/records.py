@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import scipy.sparse as sp
 
 
 @dataclass
@@ -77,6 +78,21 @@ class SystemRecord:
     wells: tuple[tuple[float, float], ...]
     n_elec: int
     npz_path: str | None
+    # Frozen potential data (2.4), for the derivative criteria of feature 2a.
+    # All candidate-independent and computed once, at build time: the grid's
+    # Laplacian, the external potential, the Hartree potential of the
+    # reference density, and the XC potential recovered by KS inversion.
+    # `vxc_ref` carries the `_ref` suffix for the same reason `n_ref` does --
+    # it is the best available reference, exact in this world and CI-class at
+    # rung 2, and the field name never claims more.
+    #
+    # None for a cache built before 2.4 or a system with no potential data;
+    # an evaluator asked for potential metrics on such a record says so
+    # rather than inventing them.
+    laplacian: sp.spmatrix | None = None
+    v_ext: np.ndarray | None = None
+    v_hartree: np.ndarray | None = None
+    vxc_ref: np.ndarray | None = None
 
 
 @dataclass

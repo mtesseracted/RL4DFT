@@ -53,9 +53,14 @@ ALLOWED: dict[str, set[str]] = {
     "cmaes": {"ports", "records", "cma", "numpy"},
     "human": {"ports", "records", "queue", "numpy"},
     "world": {"numpy", "scipy.sparse"},
-    "solver": {"world", "numpy", "scipy"},
+    # `solver` may reach the core `ks` module: the one-body eigenproblem is
+    # the same problem whether it is a reference solve or feature 2a's step in
+    # the loop, and solving it twice, two ways, is how the two drift apart.
+    "solver": {"world", "ks", "numpy", "scipy"},
     "functionals": {"ports", "records", "numerics", "world", "numpy"},
-    "dataset": {"world", "solver", "ports", "records", "numpy"},
+    # scipy.sparse: the cache stores the Laplacian the reference was computed
+    # with (2.4), and rebuilding it on load is this module's job.
+    "dataset": {"world", "solver", "ports", "records", "numpy", "scipy.sparse"},
     "scf": {"world", "solver", "functionals", "dataset", "numerics", "numpy"},
     "plots": {
         "world", "dataset", "functionals", "scf", "ranking", "records",

@@ -1,11 +1,12 @@
 """Self-consistent Kohn-Sham solve for a two-electron singlet.
 
-**Post-processing only.** The Stage 1 *search* never runs an SCF -- candidates
-are scored on frozen reference densities, and ``evaluate.py`` is forbidden from
-importing ``solver`` (see STAGE1.md D8). Nothing in the search path imports
-this module. It exists to answer a question the search deliberately does not
-ask: *what density would this functional actually produce if you solved with
-it?* That is what the density plots compare against the exact reference.
+**Post-processing only.** The search never runs an SCF: candidates are scored
+on frozen reference densities, and nothing in the search path imports this
+module. (D14's one-body *step* is a different thing entirely -- one iteration,
+no self-consistency, in the world-free ``ks`` module -- and it does run in the
+loop.) This exists to answer a question the search deliberately does not ask:
+*what density would this functional actually produce if you solved with it?*
+That is what the density plots compare against the exact reference.
 
 For a two-electron singlet both electrons occupy one orbital ``phi``, so
 ``n = 2 phi^2`` and the KS kinetic energy is exactly von Weizsaecker (with
@@ -14,10 +15,9 @@ therefore a single one-body eigenproblem, iterated to self-consistency:
 
     v_KS = v_ext + v_H[n] + v_xc[n; theta],   n = 2 |phi_0|^2
 
-The XC potential is the pointwise derivative ``d(n eps_xc(n))/dn``, taken by
-central differences: every ansatz member is a *local* function of n, so this
-is an ordinary derivative, not a functional one, and finite differences keep
-it exact for whatever exponent menu the search is using.
+The XC potential is the pointwise derivative ``d(n eps_xc(n))/dn``: every
+ansatz member is a *local* function of n, so this is an ordinary derivative,
+not a functional one, and ``functionals`` has it in closed form.
 """
 
 from __future__ import annotations
@@ -26,21 +26,20 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ...numerics import local_vxc
 from .world import Grid, System, v_int
 from .solver import solve_1e
-from .functionals import e_xc_density, exc
+from .functionals import exc, vxc as functional_vxc
 from .dataset import t_vw, e_hartree, v_ext_energy
 
 
 def v_xc(n: np.ndarray, theta: np.ndarray) -> np.ndarray:
-    """XC potential ``d(n eps_xc)/dn``, by central differences.
+    """XC potential ``d(n eps_xc)/dn``.
 
-    Stage 1 declared the step and the difference here; both now live in
-    ``numerics`` (2.1b), so the step constant has exactly one home and this is
-    a delegation rather than a second copy.
+    Stage 1 took this by central differences here; 2.4 derived the closed
+    forms, so this delegates to them. The finite-difference helpers in
+    ``numerics`` remain the cross-check, in the tests, where they belong.
     """
-    return local_vxc(lambda density: e_xc_density(density, theta), n)
+    return functional_vxc(n, theta)
 
 
 @dataclass
