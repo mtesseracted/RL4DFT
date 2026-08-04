@@ -83,7 +83,11 @@ classes, constructor injection in one composition script — no
     contract holds at both mirrored levels — driver ↔ `Optimizer` and
     `FixedFormOptimizer` ↔ `CoefficientOptimizer` — and `ask()`'s
     docstring must state the alternation rule and point at the future
-    `ask_batch()`.
+    `ask_batch()`. Pairing is *positional*: `tell()` refers to the
+    single outstanding proposal, and adapters must not match by object
+    identity or value equality — a θ that round-trips through JSON (the
+    2.7 human path does exactly this) returns as a different object,
+    and duplicate θ makes value matching ambiguous.
 - **D12 — Ranking is visible in the loop.** The driver applies the
   `RankingPolicy` itself and passes the result to `tell`:
 
@@ -119,12 +123,21 @@ classes, constructor injection in one composition script — no
     created_at)` — `label` is nullable human-readable text, `NULL` for
     almost all candidates. The LDA baseline is seeded by the store
     initializer with `label = 'LDA'`, `run_id = NULL` (reference
-    furniture, belongs to no run).
+    furniture, belongs to no run). `theta_json` and `form_latex` are
+    derived by the store from the port itself — `fingerprint()` (the
+    vector component, serialized; `NULL` when the form is non-parametric
+    and the vector is empty) and `to_latex()` — never from adapter
+    attributes; no component ever reaches past `Functional` for a θ.
   - `evaluations(candidate_id, system, rung, metric, value)` — **long
     format**, one row per scalar. Condition violations are rows with
     `system = NULL` and `metric` = condition name. Long format makes the
     feature-4 heatmap a single GROUP BY.
   - `systems(name, world, wells_json, n_elec, regime, split, npz_path)`
+    — populated via `register_systems(systems: list[SystemRecord]) ->
+    None` on the port: an idempotent upsert keyed by `name`, called by
+    the composition root after `Dataset.load()`, before the run starts.
+    The store serializes `wells_json` and the scalar columns from
+    `SystemRecord` fields alone — it never sees a world module.
   `regime`/`split` live normalized in `systems`: the store drops the
   denormalized copies on each `EvaluationRecord` at write time and
   reconstitutes them by join on read — the store is the only component
@@ -187,7 +200,9 @@ classes, constructor injection in one composition script — no
 | `worlds/exp1d/world.py` | `Grid`, `v_int`, `System` (+ geometry serialization) | numpy, scipy.sparse |
 | `worlds/exp1d/solver.py` | reference exact diagonalization | world, numpy, scipy |
 | `worlds/exp1d/functionals.py` | `eps_x_lda`, `eps_c_lda`, `LocalAnsatz(Functional)`, `LocalAnsatzForm(FunctionalForm)` | ports, world, numpy |
-| `worlds/exp1d/dataset.py` | D7 system lists, E_xc extraction, v_xc inversion (2.4), `.npz` cache builder, `load_frozen(path) -> list[SystemRecord]` | world, solver, records, numpy |
+| `worlds/exp1d/dataset.py` | D7 system lists, E_xc extraction, v_xc inversion (2.4), `.npz` cache builder, `load_frozen(path) -> list[SystemRecord]`, `Exp1dDataset(Dataset)` | world, solver, ports, records, numpy |
+| `worlds/exp1d/scf.py` | post-processing self-consistent KS solve for this world (`solve_ks_robust`) | world, solver, functionals, dataset, numerics, numpy |
+| `worlds/exp1d/plots.py` | post-processing comparison plots, own `python -m` entry | world, dataset, functionals, scf, ranking, records, matplotlib, numpy |
 | `worlds/exp1d/conditions.py` | the 1D exponential world's `Condition` set | ports, world, functionals, numpy |
 | `viz/` | the feature-4 Dash app (observer + human endpoints) | store, records, dash |
 | `run_stage2.py` | composition root: construct everything explicitly, inject, run | everything |
@@ -220,7 +235,7 @@ Stage 1 → Stage 2 migration map:
 | `evaluate.py` | split: loading → `worlds/exp1d/dataset.py` (`load_frozen`), loss → `ranking.py`, report → a store query |
 | `search.py` | `optimizers/optuna_tpe.py` |
 | `run_stage1.py` | `run_stage2.py` |
-| `ks.py` (post-processing SCF, world-bound) | `worlds/exp1d/scf.py` — this world's self-consistent solve. The *core* `ks.py` (D14 one-body step, world-free) is a fresh, unrelated module; the name is reused, the code is not |
+| `ks.py` (post-processing SCF, world-bound) | `worlds/exp1d/scf.py` — this world's self-consistent solve. The *core* `ks.py` (D14 one-body step, world-free) is a fresh, unrelated module; the name is reused, the code is not. Its central-difference v_xc (step `_DN`) is superseded by the shared finite-difference helper in `numerics.py` once 2.1b lands: the step constant has exactly one home, and `scf.py` delegates rather than redeclaring it — a second `_DN` is the same sync hazard 2.1a retires for `_A`/`_KAPPA` |
 | `plots.py` | `worlds/exp1d/plots.py` — a post-processing tool, not `viz/` (it runs SCF, and viz computes no physics). Keeps its own `python -m` entry; only the `run_stage1 --plots` flag dies with `run_stage1.py`. In 2.1d its `evaluate` import is repointed (loading → `load_frozen`, loss → `ranking`). Eventually superseded by 2.7 + the A1 protocols (SCF results become records, viz renders records) |
 
 `search.py`, `evaluate.py`, and `run_stage1.py` are deleted in sub-stage
@@ -292,12 +307,34 @@ independently landable with the suite passing.
 ### 2.2 — SQLite record store and system geometry
 
 - `store.py` per D13; `driver` writes through the `RecordStore` port.
+- The `Dataset` port becomes concrete: `build(force: bool = False) ->
+  None` — reference solves, E_xc extraction, write the `.npz` cache;
+  the only place solver time is spent — and `load() ->
+  list[SystemRecord]` — read the frozen cache; raises if it is missing
+  rather than silently building (building is expensive and stays
+  explicit). `Exp1dDataset(Dataset)` in `worlds/exp1d/dataset.py`
+  wraps the existing builder and `load_frozen`. The delineation rule
+  the port exists to enforce: the `Dataset` adapter is the **last
+  component that may know the world**. Everything it hands over is a
+  `SystemRecord`, which gains the descriptive fields the `systems`
+  table needs (`world`, `wells`, `n_elec`, `npz_path`, beside the
+  existing `name`, `regime`, `split`); downstream components consume
+  `SystemRecord` only. `Dataset` never sees the store and the store
+  never sees the world — they meet only as data, in `run_stage2.py`:
+  build if the cache is absent → `load()` →
+  `store.register_systems(records)` → the D12 loop.
 - The `.npz` cache: geometry partially landed post-hoc in Stage 1
   (`well_z`, `well_x`, `R`, plus a name-based recovery shim for caches
   predating those fields). 2.2 standardizes: keep `well_z`/`well_x`/`R`,
-  add `n_elec` and `dx`, register each system's row in `systems`, and
-  delete the recovery shim — the cache is rebuilt once anyway, so no
-  pre-geometry cache survives to need it.
+  add `n_elec` and `dx`, and delete the recovery shim — the cache is
+  rebuilt once anyway, so no pre-geometry cache survives to need it.
+  The cache lives at `data/exp1d/` — world-scoped, not stage-scoped,
+  since the same cache outlives plan iterations; the old `data/stage1/`
+  directory is deleted with the rebuild, and 2.4's second rebuild
+  (adding the potential fields) writes in place to the same directory
+  (deterministic content — versioning the cache would imply the numbers
+  might differ). `npz_path` in `systems` stores the path relative to
+  the repo root.
 - **Acceptance**: (a) after an N-trial run, that run has N `candidates`
   rows, and every candidate's set of `(system, metric)` evaluation rows
   is *identical* (evaluation shape is a property of the composed
