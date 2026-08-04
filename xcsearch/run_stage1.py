@@ -16,9 +16,9 @@ import os
 
 import numpy as np
 
-from .dataset import build_dataset
+from .worlds.exp1d.dataset import build_dataset
 from .evaluate import load_dataset, format_report, report, loss
-from .functionals import EXPONENTS, LDA_THETA
+from .worlds.exp1d.functionals import EXPONENTS, LDA_THETA
 from .search import run_search, theta_from_params
 
 
@@ -82,7 +82,7 @@ def main() -> None:
         # Imported here, not at module scope: plotting pulls in matplotlib and
         # the self-consistent solver, and a plain search run should need
         # neither.
-        from .plots import make_plots
+        from .worlds.exp1d.plots import make_plots
 
         print(f"\nWriting figures to {args.plots}/ ...")
         written = make_plots(args.data, best_theta, args.plots, verbose=False)

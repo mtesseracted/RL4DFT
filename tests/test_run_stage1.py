@@ -5,7 +5,7 @@ import json
 import numpy as np
 
 from xcsearch.evaluate import Record
-from xcsearch.functionals import EXPONENTS, LDA_THETA
+from xcsearch.worlds.exp1d.functionals import EXPONENTS, LDA_THETA
 from xcsearch.run_stage1 import save_best_theta
 
 

@@ -5,11 +5,11 @@ import os
 import numpy as np
 import pytest
 
-from xcsearch import dataset
-from xcsearch.dataset import extract_exc, separation
+from xcsearch.worlds.exp1d import dataset
+from xcsearch.worlds.exp1d.dataset import extract_exc, separation
 from xcsearch.evaluate import load_dataset
-from xcsearch.functionals import LDA_THETA
-from xcsearch.plots import (
+from xcsearch.worlds.exp1d.functionals import LDA_THETA
+from xcsearch.worlds.exp1d.plots import (
     evaluate_record,
     energy_curve_figure,
     density_figure,
@@ -17,7 +17,7 @@ from xcsearch.plots import (
     make_plots,
     _method_label,
 )
-from xcsearch.world import Grid, System
+from xcsearch.worlds.exp1d.world import Grid, System
 
 THETA = np.array([1.3, -0.05, 0.4, -0.2, 0.0])
 

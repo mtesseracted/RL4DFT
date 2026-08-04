@@ -3,10 +3,10 @@
 import numpy as np
 import pytest
 
-from xcsearch import dataset
-from xcsearch.world import Grid, System
-from xcsearch.solver import solve_1e
-from xcsearch.dataset import (
+from xcsearch.worlds.exp1d import dataset
+from xcsearch.worlds.exp1d.world import Grid, System
+from xcsearch.worlds.exp1d.solver import solve_1e
+from xcsearch.worlds.exp1d.dataset import (
     t_vw,
     e_hartree,
     v_ext_energy,

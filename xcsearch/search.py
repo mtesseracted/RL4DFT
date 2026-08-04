@@ -13,7 +13,7 @@ import numpy as np
 import optuna
 
 from .evaluate import Record, loss
-from .functionals import EXPONENTS
+from .worlds.exp1d.functionals import EXPONENTS
 
 
 def _theta_from_trial(trial: optuna.Trial) -> np.ndarray:

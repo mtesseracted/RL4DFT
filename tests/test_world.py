@@ -3,7 +3,7 @@
 import numpy as np
 import scipy.sparse.linalg as spla
 
-from xcsearch.world import Grid, System, v_int, A_INT, KAPPA
+from xcsearch.worlds.exp1d.world import Grid, System, v_int, A_INT, KAPPA
 
 
 def test_quadrature_integrates_gaussian():
@@ -29,7 +29,7 @@ def test_particle_in_a_box_eigenvalues():
 
 def test_single_well_energy_converges_monotonically():
     # (c) single-well ground-state energy converges monotonically under dx-halving.
-    from xcsearch.solver import solve_1e
+    from xcsearch.worlds.exp1d.solver import solve_1e
 
     system = System([(1.0, 0.0)])
     energies = []

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .functionals import exc, LDA_THETA
+from .worlds.exp1d.functionals import exc, LDA_THETA
 
 
 @dataclass

@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from xcsearch.functionals import exc, LDA_THETA
+from xcsearch.worlds.exp1d.functionals import exc, LDA_THETA
 from xcsearch.evaluate import load_dataset, loss, report
 
 

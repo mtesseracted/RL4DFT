@@ -2,8 +2,8 @@
 
 import numpy as np
 
-from xcsearch.world import Grid, System
-from xcsearch.solver import solve_1e, solve_2e_singlet
+from xcsearch.worlds.exp1d.world import Grid, System
+from xcsearch.worlds.exp1d.solver import solve_1e, solve_2e_singlet
 
 
 def test_noninteracting_two_electrons_is_twice_one_electron():
@@ -19,7 +19,7 @@ def test_noninteracting_two_electrons_is_twice_one_electron():
     # generic builder with a zero interaction. We do it directly here.
     import scipy.sparse as sp
     import scipy.sparse.linalg as spla
-    from xcsearch.solver import _one_body
+    from xcsearch.worlds.exp1d.solver import _one_body
 
     h = _one_body(grid, v)
     ident = sp.identity(grid.n_points, format="csr")

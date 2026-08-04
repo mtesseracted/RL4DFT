@@ -3,11 +3,11 @@
 import numpy as np
 import pytest
 
-from xcsearch.dataset import e_hartree, t_vw, v_ext_energy
-from xcsearch.functionals import LDA_THETA, exc
-from xcsearch.ks import solve_ks, solve_ks_robust, v_xc
-from xcsearch.solver import solve_1e
-from xcsearch.world import Grid, System
+from xcsearch.worlds.exp1d.dataset import e_hartree, t_vw, v_ext_energy
+from xcsearch.worlds.exp1d.functionals import LDA_THETA, exc
+from xcsearch.worlds.exp1d.scf import solve_ks, solve_ks_robust, v_xc
+from xcsearch.worlds.exp1d.solver import solve_1e
+from xcsearch.worlds.exp1d.world import Grid, System
 
 
 def _grid() -> Grid:
@@ -63,7 +63,7 @@ def test_converged_density_is_the_fixed_point_of_the_ks_equation():
     result = solve_ks(system, grid, LDA_THETA)
     assert result.converged
 
-    from xcsearch.world import v_int
+    from xcsearch.worlds.exp1d.world import v_int
 
     coupling = np.asarray(v_int(grid.x[:, None] - grid.x[None, :]))
     v_h = coupling @ (grid.w * result.n)

@@ -1,6 +1,6 @@
 """Post-processing visualisation of a finished Stage 1 run.
 
-    python -m xcsearch.plots [--data DIR] [--theta FILE] [--out DIR]
+    python -m xcsearch.worlds.exp1d.plots [--data DIR] [--theta FILE] [--out DIR]
 
 Two families of figure, written under ``data/plots`` by default:
 
@@ -33,9 +33,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
 from .dataset import geometry_is_consistent, separation, system_for_record  # noqa: E402
-from .evaluate import Record, load_dataset  # noqa: E402
+from ...evaluate import Record, load_dataset  # noqa: E402
 from .functionals import LDA_THETA  # noqa: E402
-from .ks import solve_ks_robust  # noqa: E402
+from .scf import solve_ks_robust  # noqa: E402
 from .world import Grid, System  # noqa: E402
 
 # Consistent identity for the three curves across every figure.

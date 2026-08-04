@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from xcsearch.functionals import (
+from xcsearch.worlds.exp1d.functionals import (
     eps_x_lda,
     eps_c_lda,
     eps_x_ansatz,

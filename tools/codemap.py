@@ -292,15 +292,44 @@ class Graph:
 
     # -- build -------------------------------------------------------------
     def load(self, pkg_dir: str) -> None:
-        names = sorted(
-            f[:-3]
-            for f in os.listdir(pkg_dir)
-            if f.endswith(".py") and f != "__init__.py"
-        )
-        if os.path.exists(os.path.join(pkg_dir, "__init__.py")):
-            names.insert(0, "__init__")
+        """Parse every module in the package, sub-packages included.
+
+        Modules are keyed by *basename*, not by dotted path: ``from
+        .worlds.exp1d.functionals import exc`` records the module as
+        ``functionals`` (``_imports`` keeps only the last component), so the
+        two halves must agree. Basenames are therefore required to be unique
+        across the package -- asserted below rather than assumed, because a
+        second ``dataset.py`` in a second world would otherwise silently
+        overwrite the first here.
+
+        Sub-package ``__init__.py`` files are skipped: they are docstring-only
+        namespace markers, and including them would collide with the root
+        ``__init__`` under basename keying.
+        """
+        found: dict[str, str] = {}
+        for dirpath, dirnames, filenames in os.walk(pkg_dir):
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith("__"))
+            for filename in sorted(filenames):
+                if not filename.endswith(".py"):
+                    continue
+                path = os.path.join(dirpath, filename)
+                if filename == "__init__.py":
+                    if os.path.abspath(dirpath) != os.path.abspath(pkg_dir):
+                        continue
+                    name = "__init__"
+                else:
+                    name = filename[:-3]
+                if name in found:
+                    raise ValueError(
+                        f"duplicate module basename {name!r}: {found[name]} and "
+                        f"{path}. The map keys modules by basename (see load)."
+                    )
+                found[name] = path
+
+        # Root __init__ first, then alphabetical -- the old flat ordering.
+        names = sorted(found, key=lambda n: (n != "__init__", n))
         for name in names:
-            path = os.path.join(pkg_dir, f"{name}.py")
+            path = found[name]
             with open(path, encoding="utf-8") as fh:
                 source = fh.read()
             parser = ModuleParser(name, path, source)
@@ -725,7 +754,7 @@ LAYERS = [
     (
         "driver",
         "Driver & diagnostics",
-        ["search", "run_stage1", "ks", "plots", "__init__"],
+        ["search", "run_stage1", "scf", "plots", "__init__"],
         "TPE over the ansatz parameters, the entry point that wires it together, "
         "and the post-processing that re-checks a result with a self-consistent "
         "KS solve.",

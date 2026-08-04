@@ -63,7 +63,7 @@ Stage 1 (the 1D MVP) is implemented; see `PLAN.md` for the staged plan and
 ## Running it
 
 ```bash
-uv sync --extra dev                  # or: pip install -e ".[dev]"
+uv sync --extra dev --extra plots    # or: pip install -e ".[dev,plots]"
 .venv/bin/python -m xcsearch.run_stage1
 ```
 
@@ -94,7 +94,7 @@ takes hours. The search itself, on the cached data, takes seconds.
 ## Plots
 
 ```bash
-.venv/bin/python -m xcsearch.plots        # or: run_stage1 --plots
+.venv/bin/python -m xcsearch.worlds.exp1d.plots   # or: run_stage1 --plots
 ```
 
 Writes two families of figure under `data/plots/` (a few minutes for the full
@@ -110,7 +110,7 @@ set; `--data`, `--theta` and `--out` override the paths):
 
 This is the one place the project runs a self-consistent KS solve: the search
 scores candidates on frozen reference densities and never relaxes a density of
-its own (`ks.py` is post-processing, and nothing in the search path imports
+its own (`worlds/exp1d/scf.py` is post-processing, and nothing in the search path imports
 it). The distinction is the point — a functional can reproduce E_xc well *on
 the exact density* and still relax to a poor density, and only these figures
 show that. Where the SCF does not settle, the legend says so rather than

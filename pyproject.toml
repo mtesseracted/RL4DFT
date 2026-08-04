@@ -12,14 +12,21 @@ dependencies = [
     "numpy",
     "scipy",
     "optuna",
-    "matplotlib",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# Post-processing figures only (worlds/exp1d/plots.py). A search run needs
+# neither matplotlib nor an SCF solve, so this is not a core dependency
+# (STAGE2.md 2.1a).
+plots = ["matplotlib"]
 
 [tool.setuptools]
-packages = ["xcsearch"]
+packages = [
+    "xcsearch",
+    "xcsearch.worlds",
+    "xcsearch.worlds.exp1d",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

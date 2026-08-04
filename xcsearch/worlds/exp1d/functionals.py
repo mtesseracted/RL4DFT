@@ -1,8 +1,7 @@
-"""Exchange-correlation functionals for the Stage 1 exponential 1D world.
+"""Exchange-correlation functionals for the exponential 1D world.
 
 Pure functions of numpy arrays plus quadrature weights ``w`` -- no grid
-machinery, no other project imports (STAGE1.md: numpy only), so everything
-here is trivially testable in isolation.
+machinery, so everything here is trivially testable in isolation.
 
 The correlation functional is *fixed* (the 1D-LDA correlation for this world).
 The search only touches exchange, through the local ansatz
@@ -13,17 +12,18 @@ over a small fixed exponent menu. The exact LDA is the member c0 = 1, c_i = 0
 -- Stage 1 tests the machinery, and "the optimizer finds the known member" is
 the sanity check.
 
-Interaction constants are duplicated here (this module may not import
-``world``); they must stay in sync with ``world.A_INT`` / ``world.KAPPA``.
+Stage 1 duplicated the interaction constants here because ``functionals`` was
+forbidden from importing ``world``; both modules now live inside the same
+world package, so the constants have exactly one home (STAGE2.md 2.1a). They
+are the closed forms' own parameters -- eps_x_lda is *derived from* the
+interaction kernel -- so importing them is the honest dependency.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-# Must match world.A_INT and world.KAPPA.
-_A: float = 1.071295
-_KAPPA: float = 1.0 / 2.385345
+from .world import A_INT as _A, KAPPA as _KAPPA
 
 # Fixed exponent menu for the exchange ansatz (D6).
 EXPONENTS: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0)

@@ -14,7 +14,7 @@ exercised by run_stage1, not a fast unit test.
 import numpy as np
 import optuna
 
-from xcsearch.functionals import exc, EXPONENTS, LDA_THETA
+from xcsearch.worlds.exp1d.functionals import exc, EXPONENTS, LDA_THETA
 from xcsearch.evaluate import Record, loss
 from xcsearch.search import run_search, theta_from_params
 

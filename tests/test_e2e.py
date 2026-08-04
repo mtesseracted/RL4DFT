@@ -9,10 +9,10 @@ import numpy as np
 import optuna
 import pytest
 
-from xcsearch.world import System
-from xcsearch.dataset import solve_system
+from xcsearch.worlds.exp1d.world import System
+from xcsearch.worlds.exp1d.dataset import solve_system
 from xcsearch.evaluate import load_dataset, loss, report, format_report
-from xcsearch.functionals import LDA_THETA
+from xcsearch.worlds.exp1d.functionals import LDA_THETA
 from xcsearch.search import run_search, theta_from_params
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
