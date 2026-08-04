@@ -756,7 +756,7 @@ LAYERS = [
     (
         "candidate",
         "Candidate scoring",
-        ["functionals", "evaluators", "ranking"],
+        ["functionals", "evaluators", "ranking", "conditions"],
         "A theta in, a number out. The search hot loop -- structurally forbidden "
         "from importing the solver.",
     ),

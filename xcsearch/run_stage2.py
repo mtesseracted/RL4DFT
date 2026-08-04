@@ -21,12 +21,13 @@ import os
 import numpy as np
 
 from .driver import SearchDriver
-from .evaluators import FrozenDensityEvaluator
+from .evaluators import ConditionsEvaluator, FrozenDensityEvaluator
 from .optimizers.composed import FixedFormOptimizer
 from .optimizers.optuna_tpe import OptunaTPE
 from .ranking import MeanSquaredError
 from .records import SystemRecord
 from .store import SQLiteRecordStore
+from .worlds.exp1d.conditions import default_conditions
 from .worlds.exp1d.dataset import DATA_DIR, Exp1dDataset
 from .worlds.exp1d.functionals import LDA_THETA, LocalAnsatzForm
 
@@ -97,7 +98,12 @@ def main() -> None:
 
     form = LocalAnsatzForm()
     optimizer = FixedFormOptimizer(form, OptunaTPE(form.bounds(), seed=args.seed))
-    evaluators = [FrozenDensityEvaluator(systems)]
+    # Rung 0 first: it costs milliseconds and needs no system, so a candidate
+    # is measured against the exact conditions before anything is spent on it.
+    evaluators = [
+        ConditionsEvaluator(default_conditions()),
+        FrozenDensityEvaluator(systems),
+    ]
     policy = MeanSquaredError()
 
     store = SQLiteRecordStore(args.store)

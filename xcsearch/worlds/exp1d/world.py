@@ -32,6 +32,22 @@ def v_int(u: np.ndarray | float) -> np.ndarray | float:
     return A_INT * np.exp(-KAPPA * np.abs(u))
 
 
+def e_hartree(n: np.ndarray, x: np.ndarray, w: np.ndarray) -> float:
+    """Hartree energy ``(1/2) int int n(x) v(x-x') n(x') dx dx'``.
+
+    Takes arrays rather than a ``Grid`` so that a caller holding a probe
+    density -- a rung-0 condition, say -- can use it without constructing
+    grid machinery. It lives here, not in ``dataset``, because it is a
+    property of the interaction kernel and nothing else; ``dataset``
+    delegates. The alternative was a second copy in every module that needs
+    the self-interaction energy, which is the sync hazard 2.1a retired for the
+    interaction constants.
+    """
+    coupling = v_int(np.asarray(x)[:, None] - np.asarray(x)[None, :])
+    wn = np.asarray(w) * np.asarray(n)
+    return 0.5 * float(wn @ coupling @ wn)
+
+
 class Grid:
     """A 1D quadrature grid: nodes ``x``, weights ``w``, and a Laplacian.
 

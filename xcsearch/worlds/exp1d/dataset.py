@@ -22,7 +22,7 @@ import numpy as np
 
 from ...ports import Dataset
 from ...records import SystemRecord
-from .world import Grid, System, v_int
+from .world import Grid, System, v_int, e_hartree as world_e_hartree
 from .solver import solve_2e_singlet
 
 # Grid resolution for the reference solves. Converged then frozen (D2).
@@ -66,10 +66,11 @@ def t_vw(n: np.ndarray, grid: Grid) -> float:
 
 
 def e_hartree(n: np.ndarray, grid: Grid) -> float:
-    """Hartree energy ``(1/2) integral integral n(x) v(x-x') n(x') dx dx'``."""
-    coupling = v_int(grid.x[:, None] - grid.x[None, :])  # (N, N)
-    wn = grid.w * n
-    return 0.5 * float(wn @ coupling @ wn)
+    """Hartree energy ``(1/2) integral integral n(x) v(x-x') n(x') dx dx'``.
+
+    The grid-facing spelling of ``world.e_hartree``, which owns the formula.
+    """
+    return world_e_hartree(n, grid.x, grid.w)
 
 
 def v_ext_energy(n: np.ndarray, grid: Grid, system: System) -> float:
