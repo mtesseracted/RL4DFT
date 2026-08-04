@@ -20,14 +20,28 @@ classes, constructor injection in one composition script — no
   is required to use another. The full table with import rules is under
   Module layout below; the import rules are load-bearing, as in Stage 1.
 - **D10 — Candidate representation.** The candidate is a `Functional`
-  object, not a parameter vector:
-  - `Functional.exc(n, w) -> float` — the Stage 1 contract.
-  - `Functional.vxc(n, w) -> ndarray` — the functional derivative
-    δE_xc/δn on the grid. The *signature* is mandatory from day one
-    (feature 2a consumes it); the *implementation* is free per adapter:
-    analytic (the `LocalAnsatz` case — closed forms are simple), autograd,
-    or the shared finite-difference helper in `numerics.py`. No closed
-    form is ever demanded by the port.
+  object, not a parameter vector. Both evaluation methods take a single
+  extensible input object, `XCInput` — a plain dataclass in
+  `records.py`: required fields `n`, `w`; optional fields defaulting to
+  `None` (orbitals, external-potential data, …) populated only when a
+  candidate's meta tags (A2) require them. Adding an ingredient later
+  is an additive field, never a signature break; the evaluator is
+  responsible for populating the fields a candidate's tags declare, and
+  an evaluator that cannot populate them cannot evaluate that candidate
+  — the right failure mode. `SystemRecord` is deliberately *not* the
+  argument: it carries reference answers (`E_exact`, `E_xc_exact`) the
+  candidate must never see.
+  - `Functional.exc(x: XCInput) -> float` — the Stage 1 contract
+    (`LocalAnsatz` reads only `x.n`, `x.w`).
+  - `Functional.vxc(x: XCInput) -> ndarray` — the functional derivative
+    δE_xc/δn: the **multiplicative potential on the grid**,
+    `shape == x.n.shape`. Non-multiplicative (generalized-KS) operators
+    are a future port extension, not a reshape of this method. The
+    *signature* is mandatory from day one (feature 2a consumes it); the
+    *implementation* is free per adapter: analytic (the `LocalAnsatz`
+    case — closed forms are simple), autograd, or the shared
+    finite-difference helper in `numerics.py`. No closed form is ever
+    demanded by the port.
   - `Functional.fingerprint() -> ndarray` — the feature-1 near-duplicate
     key (for parametric forms: form id + θ).
   - `Functional.to_latex() -> str` — the feature-4 formula panel.
@@ -105,7 +119,7 @@ classes, constructor injection in one composition script — no
 | Module | Owns | May import |
 |---|---|---|
 | `ports.py` | **all** ABCs: `Functional`, `FunctionalForm`, `Optimizer`, `FormProposer`, `CoefficientOptimizer`, `Evaluator`, `RankingPolicy`, `Condition`, `RecordStore`, `Dataset` | records, numpy |
-| `records.py` | `EvaluationRecord`, `SystemRecord` dataclasses | numpy |
+| `records.py` | `EvaluationRecord`, `SystemRecord`, `XCInput` dataclasses | numpy |
 | `numerics.py` | finite-difference functional-derivative helper | numpy |
 | `ks.py` | one-body KS step on `(x, w, laplacian, v)` arrays | numpy, scipy |
 | `driver.py` | `SearchDriver` — the D12 loop | ports, records |
@@ -186,9 +200,9 @@ independently landable with the suite passing.
 - `ports.py`, `records.py`; `LocalAnsatz(Functional)` and
   `LocalAnsatzForm(FunctionalForm)` as wrappers over the existing
   functions, with the D6/D8 search box in `bounds()`.
-- **Acceptance**: (a) `LocalAnsatzForm.build(θ).exc(n, w)` equals the
-  Stage 1 `exc(n, w, θ)` bitwise for random θ; (b) `bounds()` matches the
-  D8 box; (c) the Stage 1 loop is untouched and green.
+- **Acceptance**: (a) `LocalAnsatzForm.build(θ).exc(XCInput(n, w))`
+  equals the Stage 1 `exc(n, w, θ)` bitwise for random θ; (b) `bounds()`
+  matches the D8 box; (c) the Stage 1 loop is untouched and green.
 
 #### 2.1c — The new loop beside the old
 
@@ -383,7 +397,11 @@ parts of each, or multiple parts of one kind — hybrids (semi-local part
 + non-local exact-exchange part) and range-separated functionals (parts
 split by interaction range) are the canonical examples. The
 representation (and therefore `fingerprint()` and the LSH featurization)
-must be able to express such composites, not just leaf forms.
+must be able to express such composites, not just leaf forms. On the
+call side, D10's `XCInput` is the mechanism that makes the taxonomy
+expressible: tags declare which optional `XCInput` fields a functional
+requires (orbitals for dependence ≥ 0, external-potential data for
+v_ext ≥ 1), and evaluators populate exactly those.
 
 **Composite identity and aggregation.** A composite's syntactic
 identity is the **multiset of its leaves**, each leaf a (form
