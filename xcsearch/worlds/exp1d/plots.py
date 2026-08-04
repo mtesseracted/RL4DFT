@@ -32,12 +32,7 @@ matplotlib.use("Agg")  # headless: figures go to files, never to a display.
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-from .dataset import (  # noqa: E402
-    geometry_is_consistent,
-    load_frozen,
-    separation,
-    system_for_record,
-)
+from .dataset import DATA_DIR, load_frozen, separation  # noqa: E402
 from ...records import SystemRecord  # noqa: E402
 from .functionals import LDA_THETA  # noqa: E402
 from .scf import solve_ks_robust  # noqa: E402
@@ -88,29 +83,21 @@ def _grid_of(record: SystemRecord) -> Grid:
     return Grid(record.x, record.w, dx)
 
 
-def _system_of(record: SystemRecord, grid: Grid) -> System:
-    """Reconstruct the wells behind a record from its name and its grid.
+def _system_of(record: SystemRecord) -> System:
+    """The wells behind a record -- carried by the record itself since 2.2.
 
-    The cache does store the geometry, but ``SystemRecord`` does not carry it
-    yet -- ``wells`` arrives with the systems table in 2.2, and the
-    reconstruction shim goes away in the same move. Until then this is the
-    only route, and ``geometry_is_consistent`` (below) is what keeps it
-    honest: a wrong reconstruction cannot reproduce the stored E_xc.
+    Stage 1's cache predated the geometry fields, so this used to reconstruct
+    the wells from the record name and the grid extent and then check the
+    guess against the stored E_xc. The cache carries them now, so there is
+    nothing to guess and nothing to check.
     """
-    return system_for_record(record.name, grid)
+    return System(list(record.wells), n_elec=record.n_elec, name=record.name)
 
 
 def evaluate_record(record: SystemRecord, theta: np.ndarray) -> Evaluated:
     """Solve LDA and theta self-consistently for one cached record."""
     grid = _grid_of(record)
-    system = _system_of(record, grid)
-    if not geometry_is_consistent(
-        system, grid, record.n_ref, record.e_exact, record.e_xc_exact
-    ):
-        raise ValueError(
-            f"{record.name}: reconstructed geometry does not reproduce the "
-            "stored E_xc; rebuild the dataset so the wells are cached."
-        )
+    system = _system_of(record)
     return Evaluated(
         record=record,
         system=system,
@@ -319,13 +306,15 @@ def make_plots(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stage 1 post-processing plots")
-    parser.add_argument("--data", default="data/stage1", help="dataset cache dir")
+    parser.add_argument("--data", default=DATA_DIR, help="dataset cache dir")
     parser.add_argument(
         "--theta",
-        default="data/stage1/best_theta_stage2.json",
+        default=os.path.join(DATA_DIR, "best_theta.json"),
         help="best-theta JSON written by run_stage2",
     )
-    parser.add_argument("--out", default="data/plots", help="output directory")
+    parser.add_argument(
+        "--out", default=os.path.join("data", "plots"), help="output directory"
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.theta):

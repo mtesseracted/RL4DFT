@@ -28,6 +28,11 @@ def _write_record(path, name, n, w, e_xc_exact, regime, split):
         regime_tag=regime,
         split=split,
         name=name,
+        well_z=np.array([1.0]),
+        well_x=np.array([0.0]),
+        R=0.0,
+        n_elec=2,
+        dx=1.0,
     )
 
 

@@ -31,9 +31,9 @@ _PKG = os.path.join(_ROOT, "xcsearch")
 
 # Plumbing every module may use: not architecture, just Python.
 _PLUMBING = {
-    "__future__", "abc", "argparse", "collections", "dataclasses", "glob",
-    "hashlib", "json", "math", "os", "pathlib", "platform", "sys", "tempfile",
-    "typing", "warnings",
+    "__future__", "abc", "argparse", "collections", "dataclasses", "datetime",
+    "glob", "hashlib", "json", "math", "os", "pathlib", "platform", "sys",
+    "tempfile", "typing", "warnings",
 }
 
 # The ownership table (STAGE2.md, "Module layout and ownership"). Keys are

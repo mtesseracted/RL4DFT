@@ -62,15 +62,16 @@ def test_the_composition_root_constructs_the_whole_stack(graph):
     entire assembled system hanging off one function."""
     calls = _targets(graph, "run_stage2.main", {"direct"})
     assert {
-        "dataset.build_dataset",
-        "dataset.load_frozen",
+        "dataset.Exp1dDataset",
         "functionals.LocalAnsatzForm",
         "optuna_tpe.OptunaTPE",
         "composed.FixedFormOptimizer",
         "evaluators.FrozenDensityEvaluator",
         "ranking.MeanSquaredError",
+        "store.SQLiteRecordStore",
         "driver.SearchDriver",
         "run_stage2.save_best_theta",
+        "run_stage2.format_heatmap",
     } <= calls
 
 
@@ -87,7 +88,10 @@ def test_the_loop_is_visible_through_the_ports(graph):
     ask = edges["self.optimizer.ask"]
     assert ask.kind == "ambiguous"
     assert {"ports.Optimizer.ask", "composed.FixedFormOptimizer.ask"} <= set(ask.candidates)
-    assert edges["self.store.add"].target == "ports.RecordStore.add"
+    store_add = edges["self.store.add"]
+    assert {"ports.RecordStore.add", "store.SQLiteRecordStore.add"} <= set(
+        store_add.candidates
+    )
 
 
 def test_method_calls_on_untyped_values_are_bound_by_name(graph):

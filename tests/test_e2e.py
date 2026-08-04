@@ -47,6 +47,11 @@ def _build(tmp_path):
             regime_tag=regime,
             split=split,
             name=system.name,
+            well_z=np.array([z for z, _ in system.wells]),
+            well_x=np.array([x for _, x in system.wells]),
+            R=0.0,
+            n_elec=system.n_elec,
+            dx=float(solved.grid.x[1] - solved.grid.x[0]),
         )
 
 

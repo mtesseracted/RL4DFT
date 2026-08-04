@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ...ports import Dataset
 from ...records import SystemRecord
 from .world import Grid, System, v_int
 from .solver import solve_2e_singlet
@@ -32,6 +33,20 @@ from .solver import solve_2e_singlet
 # search budget.
 DX: float = 0.1
 MARGIN: float = 25.0
+
+# Where the frozen cache lives. World-scoped rather than stage-scoped (2.2):
+# the same cache outlives plan iterations, and nothing about it is Stage 1's.
+DATA_DIR: str = os.path.join("data", "exp1d")
+
+# This world's name, stamped on every record it hands out. The store groups by
+# it; nothing downstream interprets it.
+WORLD: str = "exp1d"
+
+# Repo root, for turning cache paths into the repo-relative form the store
+# keeps (D13). xcsearch/worlds/exp1d/dataset.py -> four levels up.
+_REPO_ROOT: str = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 
 # Density floor below which 1/n terms are treated as zero.
 _N_FLOOR = 1e-12
@@ -245,45 +260,6 @@ def enumerate_systems() -> list[tuple[System, str, str, str]]:
     return records
 
 
-def system_for_record(name: str, grid: Grid) -> System:
-    """Rebuild the :class:`System` behind a cached record.
-
-    Post-processing (plots) needs the well positions and charges, which older
-    caches do not store. They are recoverable exactly: every builder puts its
-    first well at the origin and the rest at multiples of R, and ``_grid_for``
-    pads the well span by ``MARGIN`` on each side. So probing the builder at
-    R = 1 gives the span-per-R, and the grid's right edge gives the span.
-
-    Callers holding a cache that *does* store the geometry should use that;
-    this is the fallback, and ``geometry_is_consistent`` checks it.
-    """
-    if name.startswith("atom_Z"):
-        z = float(name[len("atom_Z"):])
-        return System([(z, 0.0)], n_elec=2, name=name)
-
-    molecule = name.split("_x")[0]
-    builders = _molecule_builders()
-    if molecule not in builders:
-        raise KeyError(f"no builder for molecule {molecule!r} (record {name!r})")
-    builder = builders[molecule]
-
-    span_per_r = max(x for _, x in builder(1.0).wells)
-    r = (float(grid.x.max()) - MARGIN) / span_per_r
-    return builder(r)
-
-
-def geometry_is_consistent(
-    system: System, grid: Grid, n: np.ndarray, e_exact: float, e_xc_exact: float
-) -> bool:
-    """Does ``system`` reproduce a record's stored E_xc from its stored density?
-
-    ``extract_exc`` runs the density against ``v_ext``, so it is sensitive to
-    every well charge and position. Agreement is strong evidence that a
-    reconstructed geometry is the one the record was built from.
-    """
-    return abs(extract_exc(e_exact, n, grid, system) - e_xc_exact) < 1e-8
-
-
 def separation(system: System) -> float:
     """Nearest-neighbour well spacing -- R for every builder here; 0 for atoms."""
     centers = sorted(x for _, x in system.wells)
@@ -292,7 +268,7 @@ def separation(system: System) -> float:
     return (centers[-1] - centers[0]) / (len(centers) - 1)
 
 
-def build_dataset(out_dir: str) -> int:
+def build_dataset(out_dir: str = DATA_DIR) -> int:
     """Build the D7 dataset, writing one ``.npz`` per system. Returns count."""
     os.makedirs(out_dir, exist_ok=True)
     records = enumerate_systems()
@@ -313,11 +289,30 @@ def build_dataset(out_dir: str) -> int:
             well_z=np.array([z for z, _ in system.wells]),
             well_x=np.array([x for _, x in system.wells]),
             R=separation(system),
+            n_elec=system.n_elec,
+            # Node spacing, for rebuilding a uniform Grid from the cache. The
+            # nodes themselves are stored too (`x`), which is what a
+            # nonuniform grid would be rebuilt from -- dx is a convenience for
+            # the uniform case, never an assumption anything integrates with.
+            dx=float(solved.grid.x[1] - solved.grid.x[0]),
         )
     return len(records)
 
 
-def load_frozen(path: str) -> list[SystemRecord]:
+def _repo_relative(path: str) -> str:
+    """A cache path as the store wants it: relative to the repo root (D13).
+
+    Absolute paths in a store are worthless the moment the store is read on
+    another machine. A path outside the repo (a temporary directory in a test)
+    has no repo-relative form and is kept absolute rather than turned into a
+    string of `..` that means nothing.
+    """
+    absolute = os.path.abspath(path)
+    relative = os.path.relpath(absolute, _REPO_ROOT)
+    return absolute if relative.startswith(os.pardir) else relative
+
+
+def load_frozen(path: str = DATA_DIR) -> list[SystemRecord]:
     """Read the frozen cache in ``path`` as world-free ``SystemRecord``s.
 
     This is the boundary the ``Dataset`` port exists to draw (2.2): everything
@@ -340,6 +335,43 @@ def load_frozen(path: str) -> list[SystemRecord]:
                 e_xc_exact=float(d["E_xc_exact"]),
                 regime=str(d["regime_tag"]),
                 split=str(d["split"]),
+                world=WORLD,
+                wells=tuple(
+                    (float(z), float(x)) for z, x in zip(d["well_z"], d["well_x"])
+                ),
+                n_elec=int(d["n_elec"]),
+                npz_path=_repo_relative(file),
             )
         )
     return records
+
+
+class Exp1dDataset(Dataset):
+    """The 1D exponential world behind the ``Dataset`` port (2.2).
+
+    The last component that may know this world. Build is where every second
+    of solver time in the project is spent; load is cheap and never builds --
+    an expensive side effect is not something a loader should do by surprise,
+    so a missing cache raises and says how to make one.
+    """
+
+    def __init__(self, path: str = DATA_DIR) -> None:
+        self.path = path
+
+    def _cached(self) -> list[str]:
+        return sorted(glob.glob(os.path.join(self.path, "*.npz")))
+
+    def build(self, force: bool = False) -> None:
+        if self._cached() and not force:
+            return
+        build_dataset(self.path)
+
+    def load(self) -> list[SystemRecord]:
+        if not self._cached():
+            raise FileNotFoundError(
+                f"no frozen cache in {self.path!r}. Build it first "
+                "(Exp1dDataset.build(), or `python -m xcsearch.run_stage2`, "
+                "which builds when the cache is absent) -- reference solves "
+                "take hours, so loading never triggers them silently."
+            )
+        return load_frozen(self.path)

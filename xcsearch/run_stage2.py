@@ -15,7 +15,6 @@ must reproduce Stage 1's numbers bitwise at the same seed.
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 
@@ -27,7 +26,8 @@ from .optimizers.composed import FixedFormOptimizer
 from .optimizers.optuna_tpe import OptunaTPE
 from .ranking import MeanSquaredError
 from .records import SystemRecord
-from .worlds.exp1d.dataset import build_dataset, load_frozen
+from .store import SQLiteRecordStore
+from .worlds.exp1d.dataset import DATA_DIR, Exp1dDataset
 from .worlds.exp1d.functionals import LDA_THETA, LocalAnsatzForm
 
 
@@ -56,34 +56,70 @@ def baseline_score(systems: list[SystemRecord]) -> float:
     return MeanSquaredError().score(records)
 
 
+def format_heatmap(store: SQLiteRecordStore, candidate_id: int, baseline_id: int) -> str:
+    """The per-regime table, now a store query rather than a Python report.
+
+    Stage 1 computed this in `evaluate.report`; it is one SQL statement over
+    the long-format `evaluations` table, which is exactly what the feature-4
+    heatmap renders (D13).
+    """
+    rows = store.heatmap(candidate_id, baseline_id)
+    header = f"{'regime':<16}{'metric':<18}{'candidate':>14}{'LDA':>14}{'delta':>14}"
+    lines = [header, "-" * len(header)]
+    for row in rows:
+        lines.append(
+            f"{row['bin']:<16}{row['metric']:<18}"
+            f"{row['value']:>14.3e}{row['baseline']:>14.3e}{row['delta']:>+14.3e}"
+        )
+    return "\n".join(lines)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stage 2 XC-functional search")
-    parser.add_argument("--data", default="data/stage1", help="dataset cache dir")
+    parser.add_argument("--data", default=DATA_DIR, help="dataset cache dir")
     parser.add_argument("--trials", type=int, default=3000, help="optimizer trials")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
-        "--out", default="data/stage1/best_theta_stage2.json",
+        "--store", default=os.path.join(DATA_DIR, "records.sqlite"),
+        help="record store (one file, many runs)",
+    )
+    parser.add_argument(
+        "--out", default=os.path.join(DATA_DIR, "best_theta.json"),
         help="where to write the best theta",
     )
     args = parser.parse_args()
 
-    if not glob.glob(os.path.join(args.data, "*.npz")):
-        print(f"Building dataset in {args.data} (one-time reference solves)...")
-        count = build_dataset(args.data)
-        print(f"  wrote {count} systems.")
-
     # --- the composition ---------------------------------------------------
-    systems = load_frozen(args.data)
+    dataset = Exp1dDataset(args.data)
+    dataset.build()  # no-op when the cache is there; hours when it is not
+    systems = dataset.load()
     print(f"Loaded {len(systems)} systems.")
 
     form = LocalAnsatzForm()
     optimizer = FixedFormOptimizer(form, OptunaTPE(form.bounds(), seed=args.seed))
     evaluators = [FrozenDensityEvaluator(systems)]
     policy = MeanSquaredError()
-    driver = SearchDriver(optimizer=optimizer, evaluators=evaluators, policy=policy)
+
+    store = SQLiteRecordStore(args.store)
+    store.register_systems(systems)
+    # The baseline is stored with its records, not just its formula: an
+    # unmeasured baseline is a comparison against nothing.
+    lda = form.build(LDA_THETA)
+    baseline_id = store.seed_baseline(
+        lda, [r for ev in evaluators for r in ev.evaluate(lda)]
+    )
+    run_id = store.begin_run("optuna_tpe", notes=f"seed={args.seed}")
+
+    driver = SearchDriver(
+        optimizer=optimizer,
+        evaluators=evaluators,
+        policy=policy,
+        store=store,
+        run_id=run_id,
+    )
     # -----------------------------------------------------------------------
 
-    print(f"Searching ({args.trials} trials)...")
+    print(f"Searching ({args.trials} trials, run {run_id} in {args.store})...")
     result = driver.run(args.trials)
 
     best_theta = result.best_functional.fingerprint()[1]
@@ -95,10 +131,13 @@ def main() -> None:
     print(f"Train MSE  LDA : {lda_mse:.4e}\n")
     print(result.best_functional.to_latex())
 
+    print("\n" + format_heatmap(store, result.best_candidate_id, baseline_id))
+
     save_best_theta(
         args.out, best_theta, result.best_score, lda_mse, args.trials, args.seed
     )
     print(f"\nWrote best theta to {args.out}")
+    store.close()
 
 
 if __name__ == "__main__":

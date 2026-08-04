@@ -159,7 +159,10 @@ def _system(name, split="train", regime="atom"):
     w = np.full_like(x, x[1] - x[0])
     n = np.exp(-0.5 * x**2)
     n *= 2.0 / np.sum(w * n)
-    return SystemRecord(name, x, w, n, -1.0, -0.4, regime, split)
+    return SystemRecord(
+        name, x, w, n, -1.0, -0.4, regime, split,
+        world="exp1d", wells=((1.0, 0.0),), n_elec=2, npz_path=None,
+    )
 
 
 def test_frozen_density_evaluator_emits_one_record_per_system():

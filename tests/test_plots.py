@@ -32,13 +32,13 @@ def _density(grid: Grid, centers) -> np.ndarray:
 
 def _write_record(
     out_dir, system: System, name: str, split="train", regime="equilibrium",
-    store_geometry=True, dx=0.5,
+    dx=0.5,
 ):
     """Write a synthetic but internally consistent record.
 
     E_xc is *derived* from the density via ``extract_exc``, so the record
-    satisfies the same identity a real reference solve would -- which is what
-    ``geometry_is_consistent`` checks -- without paying for a solve.
+    satisfies the same identity a real reference solve would, without paying
+    for a solve.
     """
     xmin, xmax = system.box(dataset.MARGIN)
     grid = Grid.uniform(xmin, xmax, dx)
@@ -49,13 +49,12 @@ def _write_record(
         E_exact=e_exact,
         E_xc_exact=extract_exc(e_exact, n, grid, system),
         regime_tag=regime, split=split, name=name,
+        well_z=np.array([z for z, _ in system.wells]),
+        well_x=np.array([x for _, x in system.wells]),
+        R=separation(system),
+        n_elec=system.n_elec,
+        dx=dx,
     )
-    if store_geometry:
-        fields.update(
-            well_z=np.array([z for z, _ in system.wells]),
-            well_x=np.array([x for _, x in system.wells]),
-            R=separation(system),
-        )
     os.makedirs(out_dir, exist_ok=True)
     np.savez(os.path.join(out_dir, f"{name}.npz"), **fields)
 
@@ -64,14 +63,13 @@ def _chain2(r: float) -> System:
     return System([(1.0, 0.0), (1.0, r)], n_elec=2, name=f"chain2_R{r:.3f}")
 
 
-def _tiny_dataset(path, store_geometry=True):
-    _write_record(path, _chain2(2.0), "chain2_x1.00", store_geometry=store_geometry)
+def _tiny_dataset(path):
+    _write_record(path, _chain2(2.0), "chain2_x1.00")
     _write_record(path, _chain2(3.0), "chain2_x1.50", split="holdout",
-                  regime="stretched", store_geometry=store_geometry)
+                  regime="stretched")
     _write_record(path, _chain2(5.0), "chain2_x2.50", split="extrapolation",
-                  regime="dissociating", store_geometry=store_geometry)
-    _write_record(path, System([(2.0, 0.0)], n_elec=2), "atom_Z2",
-                  regime="atom", store_geometry=store_geometry)
+                  regime="dissociating")
+    _write_record(path, System([(2.0, 0.0)], n_elec=2), "atom_Z2", regime="atom")
     return path
 
 
@@ -96,36 +94,16 @@ def test_make_plots_writes_one_energy_curve_per_multi_geometry_molecule(tmp_path
     assert sorted(os.listdir(out / "energy")) == ["chain2.png"]
 
 
-def test_geometry_is_recovered_from_the_record_name_and_grid(tmp_path):
-    # SystemRecord does not carry the wells yet (they arrive with the systems
-    # table in 2.2), so plots reconstructs them: every builder puts its first
-    # well at the origin and the rest at multiples of R, and the grid pads the
-    # well span by a known margin.
-    data = _tiny_dataset(tmp_path / "data", store_geometry=False)
+def test_the_wells_come_from_the_record_itself(tmp_path):
+    # Since 2.2 the geometry rides on the SystemRecord, so plots reads it
+    # rather than reconstructing it from the record name and grid extent.
+    data = _tiny_dataset(tmp_path / "data")
     records = {r.name: r for r in load_frozen(str(data))}
 
+    assert records["chain2_x1.50"].wells == ((1.0, 0.0), (1.0, 3.0))
     ev = evaluate_record(records["chain2_x1.50"], THETA)
     assert [x for _, x in ev.system.wells] == pytest.approx([0.0, 3.0])
     assert ev.r == pytest.approx(3.0)
-
-
-def test_evaluate_record_rejects_a_geometry_that_cannot_be_the_records_own(tmp_path):
-    # The reconstruction is keyed on the record name. Rename a chain2 record
-    # to a single Z = 1 well and the wells it rebuilds cannot reproduce the
-    # stored E_xc -- which is what keeps the reconstruction honest.
-    #
-    # Note what the check cannot see: it compares E_xc, so any geometry with
-    # the same integral(v_ext * n) passes. A Z = 2 well at the origin is
-    # exactly that for these synthetic densities, which are symmetric about
-    # the midpoint of the two Z = 1 wells. The guard catches a *wrong*
-    # reconstruction, not every conceivable one -- and it retires in 2.2, when
-    # SystemRecord carries the wells and nothing is reconstructed at all.
-    data = _tiny_dataset(tmp_path / "data")
-    record = {r.name: r for r in load_frozen(str(data))}["chain2_x1.00"]
-    record.name = "atom_Z1"
-
-    with pytest.raises(ValueError, match="does not reproduce"):
-        evaluate_record(record, THETA)
 
 
 def test_both_functionals_are_solved_and_differ_from_the_reference(tmp_path):

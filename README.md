@@ -78,16 +78,24 @@ caches it, and every later run reuses that cache.
 
 | flag | default | meaning |
 | --- | --- | --- |
-| `--data DIR` | `data/stage1` | dataset cache; built if no `.npz` are found |
-| `--trials N` | `3000` | TPE trials |
+| `--data DIR` | `data/exp1d` | dataset cache; built if no `.npz` are found |
+| `--trials N` | `3000` | optimizer trials |
 | `--seed N` | `0` | sampler seed (runs are reproducible) |
-| `--out PATH` | `data/stage1/best_theta_stage2.json` | where the best θ is written |
+| `--store PATH` | `data/exp1d/records.sqlite` | record store; one file holds many runs |
+| `--out PATH` | `data/exp1d/best_theta.json` | where the best θ is written |
 
-Output is the best θ, the LDA baseline, train MSE for both, and the winning
-functional's formula in LaTeX. The best θ is also saved as JSON, together with
-the baseline, both MSEs, the trial count and the seed — enough to interpret
-the vector without the run that produced it. (The per-regime error table Stage
-1 printed becomes a store query in sub-stage 2.2.)
+Output is the best θ, the LDA baseline, train MSE for both, the winning
+functional's formula in LaTeX, and a per-regime error table beside the LDA
+baseline. The best θ is also saved as JSON, together with the baseline, both
+MSEs, the trial count and the seed — enough to interpret the vector without
+the run that produced it.
+
+Every candidate and every measurement also goes into a SQLite record store
+(`--store`), in long format: one row per scalar, with the systems normalized
+into their own table. One store holds many runs, so runs stay comparable, and
+the per-regime table above is a single query against it rather than a report
+computed in Python. It is opened in WAL mode, so a reader — the Stage 2
+dashboard, or just `sqlite3` — can tail a search while it runs.
 
 Tests: `.venv/bin/pytest -m "not slow"` runs the fast suite; dropping the
 marker adds the slower cases that do real reference solves and a full

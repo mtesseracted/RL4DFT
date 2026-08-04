@@ -65,6 +65,13 @@ def build_dataset(path: str) -> None:
             regime_tag="equilibrium" if i % 2 else "stretched",
             split="train" if i < 6 else "holdout",
             name=f"sys{i:02d}",
+            # Descriptive fields (2.2). They do not enter the digest or the
+            # search: the pinned result is about the physics arrays only.
+            well_z=np.array([1.0]),
+            well_x=np.array([0.0]),
+            R=0.0,
+            n_elec=2,
+            dx=float(x[1] - x[0]),
         )
 
 

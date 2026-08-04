@@ -763,11 +763,12 @@ LAYERS = [
     (
         "driver",
         "Driver & diagnostics",
-        ["run_stage2", "driver", "composed", "optuna_tpe", "scf", "plots",
-         "__init__"],
-        "TPE over the ansatz parameters, the entry point that wires it together, "
-        "and the post-processing that re-checks a result with a self-consistent "
-        "KS solve.",
+        ["run_stage2", "driver", "store", "composed", "optuna_tpe", "scf",
+         "plots", "__init__"],
+        "The D12 loop, the optimizer adapters that feed it, the record store "
+        "that remembers what it measured, the composition root that wires them "
+        "together, and the post-processing that re-checks a result with a "
+        "self-consistent KS solve.",
     ),
 ]
 _LAYER_OF = {m: key for key, _, mods, _ in LAYERS for m in mods}

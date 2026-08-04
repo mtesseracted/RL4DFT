@@ -66,6 +66,17 @@ class SystemRecord:
     e_xc_exact: float
     regime: str
     split: str
+    # Descriptive fields, added in 2.2 for the store's `systems` table. They
+    # are what lets a record describe itself without anyone asking a world:
+    # `wells` is this system's geometry as (charge, position) pairs, and
+    # `npz_path` points at the cached density arrays, which never enter the
+    # store (D13: viz computes no physics, but everything it displays is in a
+    # record or reachable from one). `npz_path` is None for a system with no
+    # cache file behind it.
+    world: str
+    wells: tuple[tuple[float, float], ...]
+    n_elec: int
+    npz_path: str | None
 
 
 @dataclass

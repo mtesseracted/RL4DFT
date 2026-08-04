@@ -42,6 +42,10 @@ def _synthetic_systems(target, n_train=8, n_hold=3):
                 e_xc_exact=exc(n, w, target),
                 regime="equilibrium",
                 split="train" if i < n_train else "holdout",
+                world="exp1d",
+                wells=((1.0, 0.0),),
+                n_elec=2,
+                npz_path=None,
             )
         )
     return systems
