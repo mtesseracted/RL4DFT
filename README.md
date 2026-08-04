@@ -70,6 +70,7 @@ pipeline reproduces their numbers bitwise. `run_stage2.py` replaces them.
 
 ```bash
 uv sync --extra dev --extra plots    # or: pip install -e ".[dev,plots]"
+                                     # add --extra cmaes for the CMA-ES optimizer
 .venv/bin/python -m xcsearch.run_stage2
 ```
 

@@ -20,6 +20,9 @@ dev = ["pytest"]
 # neither matplotlib nor an SCF solve, so this is not a core dependency
 # (STAGE2.md 2.1a).
 plots = ["matplotlib"]
+# The D16 optimizer. Optional: the default TPE run never needs it, and only
+# xcsearch/optimizers/cmaes.py imports it.
+cmaes = ["cma"]
 
 [tool.setuptools]
 packages = [

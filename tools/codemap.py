@@ -763,8 +763,8 @@ LAYERS = [
     (
         "driver",
         "Driver & diagnostics",
-        ["run_stage2", "driver", "store", "composed", "optuna_tpe", "scf",
-         "plots", "__init__"],
+        ["run_stage2", "driver", "store", "composed", "optuna_tpe", "cmaes",
+         "scf", "plots", "__init__"],
         "The D12 loop, the optimizer adapters that feed it, the record store "
         "that remembers what it measured, the composition root that wires them "
         "together, and the post-processing that re-checks a result with a "
