@@ -732,11 +732,20 @@ def _text_node(graph: Graph, node: Node, out: list[str], rev) -> None:
 # ---------------------------------------------------------------------------
 # Layers -- the three-way split the colour encoding carries
 # ---------------------------------------------------------------------------
-# Three groups, because three is how many categorical hues stay distinguishable
-# to every reader at once (see the palette note in the header comment). The
-# module name is printed on every row regardless, so the colour reinforces the
-# grouping rather than carrying it.
+# Four groups: the three Stage 1 ones plus the world-free core that Stage 2's
+# ports-and-adapters refactor introduced. Four is the ceiling -- beyond it the
+# categorical hues stop being distinguishable at a glance. The module name is
+# printed on every row regardless, so the colour reinforces the grouping
+# rather than carrying it.
 LAYERS = [
+    (
+        "core",
+        "Core contracts",
+        ["ports", "records", "numerics"],
+        "World-free, third-party-free: the ABCs every adapter implements, the "
+        "data that crosses them, and the shared numerics. What an adapter "
+        "author reads, and all they should have to read.",
+    ),
     (
         "reference",
         "Reference truth",
@@ -1099,6 +1108,7 @@ CSS = """
   --ink-2:       #4a5460;
   --ink-3:       #79838f;
   --accent:      #2a78d6;
+  --layer-core:      #7c5cd6;
   --layer-reference: #2a78d6;
   --layer-candidate: #eb6834;
   --layer-driver:    #1baf7a;
@@ -1120,6 +1130,7 @@ CSS = """
     --ink-2:     #a9b3bf;
     --ink-3:     #7b8592;
     --accent:    #3987e5;
+    --layer-core:      #9179e0;
     --layer-reference: #3987e5;
     --layer-candidate: #d95926;
     --layer-driver:    #199e70;
@@ -1139,6 +1150,7 @@ CSS = """
   --ink-2:     #a9b3bf;
   --ink-3:     #7b8592;
   --accent:    #3987e5;
+  --layer-core:      #9179e0;
   --layer-reference: #3987e5;
   --layer-candidate: #d95926;
   --layer-driver:    #199e70;
@@ -1256,6 +1268,7 @@ li.collapsed > .row .twist::before { transform: rotate(0deg); }
   flex: none; width: 8px; height: 8px; border-radius: 2px;
   align-self: center; background: var(--layer-unknown);
 }
+.dot.layer-core      { background: var(--layer-core); }
 .dot.layer-reference { background: var(--layer-reference); }
 .dot.layer-candidate { background: var(--layer-candidate); }
 .dot.layer-driver    { background: var(--layer-driver); }
@@ -1322,6 +1335,7 @@ table.matrix th, table.matrix td { border: 1px solid var(--line-soft); padding: 
 table.matrix thead th span { writing-mode: vertical-rl; transform: rotate(180deg); font-weight: 500; color: var(--ink-2); }
 table.matrix th[scope="row"] { text-align: right; font-weight: 500; color: var(--ink-2); white-space: nowrap; }
 table.matrix td.hit { background: currentColor; }
+table.matrix td.hit.layer-core { color: var(--layer-core); }
 table.matrix td.hit.layer-reference { color: var(--layer-reference); }
 table.matrix td.hit.layer-candidate { color: var(--layer-candidate); }
 table.matrix td.hit.layer-driver { color: var(--layer-driver); }

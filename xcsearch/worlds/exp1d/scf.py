@@ -26,32 +26,21 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ...numerics import local_vxc
 from .world import Grid, System, v_int
 from .solver import solve_1e
-from .functionals import eps_x_ansatz, eps_c_lda, exc
+from .functionals import e_xc_density, exc
 from .dataset import t_vw, e_hartree, v_ext_energy
-
-# Central-difference step for dv_xc/dn. Densities here are O(0.1-1), so this
-# sits well above the float64 cancellation floor and well below any scale on
-# which eps_xc varies.
-_DN = 1e-7
-
-
-def _e_xc_density(n: np.ndarray, theta: np.ndarray) -> np.ndarray:
-    """XC energy *density* ``n * eps_xc(n; theta)`` (integrand of E_xc)."""
-    return n * (eps_x_ansatz(n, theta) + eps_c_lda(n))
 
 
 def v_xc(n: np.ndarray, theta: np.ndarray) -> np.ndarray:
     """XC potential ``d(n eps_xc)/dn``, by central differences.
 
-    The step is clipped at n = 0 so the one-sided difference there stays on
-    the physical branch; dividing by the *actual* span keeps it consistent.
+    Stage 1 declared the step and the difference here; both now live in
+    ``numerics`` (2.1b), so the step constant has exactly one home and this is
+    a delegation rather than a second copy.
     """
-    n = np.asarray(n, dtype=float)
-    lo = np.clip(n - _DN, 0.0, None)
-    hi = n + _DN
-    return (_e_xc_density(hi, theta) - _e_xc_density(lo, theta)) / (hi - lo)
+    return local_vxc(lambda density: e_xc_density(density, theta), n)
 
 
 @dataclass

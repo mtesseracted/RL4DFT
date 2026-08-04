@@ -23,6 +23,9 @@ from __future__ import annotations
 
 import numpy as np
 
+from ...numerics import local_vxc
+from ...ports import Functional, FunctionalForm
+from ...records import XCInput
 from .world import A_INT as _A, KAPPA as _KAPPA
 
 # Fixed exponent menu for the exchange ansatz (D6).
@@ -118,3 +121,84 @@ def exc(n: np.ndarray, w: np.ndarray, theta: np.ndarray) -> float:
     w = np.asarray(w, dtype=float)
     eps = eps_x_ansatz(n, theta) + eps_c_lda(n)
     return float(np.sum(w * n * eps))
+
+
+def e_xc_density(n: np.ndarray, theta: np.ndarray) -> np.ndarray:
+    """XC energy *density* ``n * eps_xc(n; theta)`` -- the integrand of E_xc."""
+    n = np.asarray(n, dtype=float)
+    return n * (eps_x_ansatz(n, theta) + eps_c_lda(n))
+
+
+# --------------------------------------------------------------------------
+# The D10 ports: this ansatz as a Functional, its family as a FunctionalForm.
+# Thin wrappers over the functions above -- the numbers are Stage 1's, bit for
+# bit, which is what the D15 equivalence gate asserts.
+# --------------------------------------------------------------------------
+FORM_KEY: str = "exp1d.local_ansatz"
+
+
+class LocalAnsatz(Functional):
+    """One member of the local exchange ansatz: a frozen theta (D10).
+
+    Reads only ``x.n`` and ``x.w`` from its ``XCInput`` -- the Stage 1
+    contract. In A2's terms this is semi-local, density-only, v_ext-blind, so
+    every optional field of the input goes untouched.
+    """
+
+    def __init__(self, theta: np.ndarray) -> None:
+        self.theta = np.asarray(theta, dtype=float)
+
+    def exc(self, x: XCInput) -> float:
+        return exc(x.n, x.w, self.theta)
+
+    def vxc(self, x: XCInput) -> np.ndarray:
+        """``d(n eps_xc)/dn`` by central differences (2.4 replaces this with
+        the closed form and keeps the difference as its cross-check)."""
+        return local_vxc(lambda n: e_xc_density(n, self.theta), x.n)
+
+    def fingerprint(self) -> tuple[str, np.ndarray]:
+        return FORM_KEY, self.theta.copy()
+
+    def to_latex(self) -> str:
+        terms = [rf"{self.theta[0]:+.4g}\,\epsilon_x^{{\mathrm{{LDA}}}}(n)"]
+        for coeff, p in zip(self.theta[1:], EXPONENTS):
+            terms.append(rf"{coeff:+.4g}\,n^{{{p:g}}}")
+        return (
+            r"\epsilon_{xc}(n) = "
+            + " ".join(terms)
+            + r" + \epsilon_c^{\mathrm{LDA}}(n)"
+        )
+
+
+class LocalAnsatzForm(FunctionalForm):
+    """The family: theta -> :class:`LocalAnsatz`, with the D8 search box.
+
+    The box (c0 in [0, 2], c_i in [-1, 1]) lived in Stage 1's search module,
+    which made it optuna's business. It belongs to the *form* -- every
+    coefficient optimizer needs it and none of them should own it.
+    """
+
+    @property
+    def n_params(self) -> int:
+        return 1 + len(EXPONENTS)
+
+    def bounds(self) -> list[tuple[float, float]]:
+        return [(0.0, 2.0)] + [(-1.0, 1.0)] * len(EXPONENTS)
+
+    def build(self, theta: np.ndarray) -> LocalAnsatz:
+        theta = np.asarray(theta, dtype=float)
+        if theta.shape != (self.n_params,):
+            raise ValueError(
+                f"theta has shape {theta.shape}, expected ({self.n_params},)"
+            )
+        return LocalAnsatz(theta)
+
+    def to_latex(self) -> str:
+        terms = [r"c_0\,\epsilon_x^{\mathrm{LDA}}(n)"]
+        for i, p in enumerate(EXPONENTS, start=1):
+            terms.append(rf"c_{{{i}}}\,n^{{{p:g}}}")
+        return (
+            r"\epsilon_{xc}(n) = "
+            + " + ".join(terms)
+            + r" + \epsilon_c^{\mathrm{LDA}}(n)"
+        )
