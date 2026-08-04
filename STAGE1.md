@@ -141,7 +141,10 @@ Visibility rules (the point of the table):
 - **Acceptance**: (a) for N = 1 single wells (solved specially here),
   `E_xc^exact + E_H[n] = 0` to grid precision — this validates the whole
   extraction pipeline; (b) E(R) curves have an interior minimum for every
-  molecule (else the system list is misconfigured).
+  *bound* molecule. Well sets with total nuclear charge well above 2 are
+  unbound at two electrons under the bounded exponential interaction —
+  their E(R) falls monotonically to dissociation, so they sample around a
+  nominal separation (`_NOMINAL_R`) instead of a located R_eq.
 
 ### 1.4 — `functionals.py`
 

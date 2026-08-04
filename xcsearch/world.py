@@ -112,7 +112,7 @@ class System:
             v -= z * A_INT * np.exp(-KAPPA * np.abs(grid.x - x0))
         return v
 
-    def box(self, margin: float = 15.0) -> tuple[float, float]:
+    def box(self, margin: float) -> tuple[float, float]:
         """Bounding interval ``[min X - margin, max X + margin]``."""
         centers = [x for _, x in self.wells]
         return min(centers) - margin, max(centers) + margin

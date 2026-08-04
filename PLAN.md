@@ -167,7 +167,8 @@ working versions land in Stage 2; mature versions in Stage 3+.
    that are well-behaved a priori:
    - **2a.** Derivatives must play nice for SCF and be physical (guards
      against pathological v_xc that an energy-only frozen-density loss
-     never sees — see critique 1 under Open questions). Possible solutions,
+     never sees — see Open questions › Beyond frozen densities). Possible
+     solutions,
      complementary to restricting the form itself:
      - *Derivative matching*: KS-invert the exact density to get the exact
        v_xc (standard practice in 1D), and include

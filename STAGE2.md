@@ -200,8 +200,8 @@ Visibility rules (the point of the table):
   the D14 one-body step is new, and it goes through `ks.py` on data.
 - Only `optimizers/optuna_tpe.py` imports optuna; only
   `optimizers/cmaes.py` imports cma. Backends are optional extras in
-  `pyproject.toml` (`[cmaes]`, `[viz]`); optuna stays a core dependency
-  as the default.
+  `pyproject.toml` (`[cmaes]`, `[viz]`, `[plots]` for matplotlib);
+  optuna stays a core dependency as the default.
 - `viz/` imports **no physics modules** — store, records, dash only. It
   renders what the record store contains, nothing else.
 - `ports.py`, `records.py`, `numerics.py`, `ks.py` are world-free and
@@ -220,6 +220,8 @@ Stage 1 → Stage 2 migration map:
 | `evaluate.py` | split: loading → `worlds/exp1d/dataset.py` (`load_frozen`), loss → `ranking.py`, report → a store query |
 | `search.py` | `optimizers/optuna_tpe.py` |
 | `run_stage1.py` | `run_stage2.py` |
+| `ks.py` (post-processing SCF, world-bound) | `worlds/exp1d/scf.py` — this world's self-consistent solve. The *core* `ks.py` (D14 one-body step, world-free) is a fresh, unrelated module; the name is reused, the code is not |
+| `plots.py` | `worlds/exp1d/plots.py` — a post-processing tool, not `viz/` (it runs SCF, and viz computes no physics). Keeps its own `python -m` entry; only the `run_stage1 --plots` flag dies with `run_stage1.py`. In 2.1d its `evaluate` import is repointed (loading → `load_frozen`, loss → `ranking`). Eventually superseded by 2.7 + the A1 protocols (SCF results become records, viz renders records) |
 
 `search.py`, `evaluate.py`, and `run_stage1.py` are deleted in sub-stage
 2.1d, once the D15 gate passes — no legacy shims. Tests migrate to mirror
@@ -243,9 +245,12 @@ independently landable with the suite passing.
 #### 2.1a — Relocation only
 
 - Move `world.py`, `solver.py`, `dataset.py`, `functionals.py` into
-  `worlds/exp1d/`; fix imports; `functionals` now imports the interaction
-  constants from `world` (removing Stage 1's duplicated `_A`/`_KAPPA`).
-  No behavior change of any kind.
+  `worlds/exp1d/`; move `ks.py` → `worlds/exp1d/scf.py` and `plots.py` →
+  `worlds/exp1d/plots.py` per the migration map; fix imports;
+  `functionals` now imports the interaction constants from `world`
+  (removing Stage 1's duplicated `_A`/`_KAPPA`); matplotlib is demoted
+  from core dependency to the `[plots]` extra. No behavior change of any
+  kind.
 - **Acceptance**: `run_stage1` runs and the full Stage 1 test suite
   passes with only import paths updated.
 
@@ -273,8 +278,10 @@ independently landable with the suite passing.
 
 #### 2.1d — Retire Stage 1
 
-- Delete `run_stage1.py`, `search.py`, `evaluate.py`; migrate their
-  remaining tests; add the import-audit test; pin the seeded D15 result
+- Delete `run_stage1.py`, `search.py`, `evaluate.py`; repoint
+  `worlds/exp1d/plots.py` off `evaluate` (loading → `load_frozen`, loss
+  → `ranking`); migrate their remaining tests; add the import-audit
+  test; pin the seeded D15 result
   (seed, best θ, train MSE, plus provenance versions per D15) as a
   checked-in regression fixture.
 - **Acceptance**: (a) the import audit — a pytest that greps each
@@ -285,10 +292,12 @@ independently landable with the suite passing.
 ### 2.2 — SQLite record store and system geometry
 
 - `store.py` per D13; `driver` writes through the `RecordStore` port.
-- The `.npz` cache gains `wells`, `n_elec`, `dx` (and keeps everything
-  Stage 1 wrote); the builder registers each system's row in `systems`.
-  Cache is rebuilt once — this fixes the Stage 1 gap that the frozen
-  record never stored the geometry the feature-4 detail view renders.
+- The `.npz` cache: geometry partially landed post-hoc in Stage 1
+  (`well_z`, `well_x`, `R`, plus a name-based recovery shim for caches
+  predating those fields). 2.2 standardizes: keep `well_z`/`well_x`/`R`,
+  add `n_elec` and `dx`, register each system's row in `systems`, and
+  delete the recovery shim — the cache is rebuilt once anyway, so no
+  pre-geometry cache survives to need it.
 - **Acceptance**: (a) after an N-trial run, that run has N `candidates`
   rows, and every candidate's set of `(system, metric)` evaluation rows
   is *identical* (evaluation shape is a property of the composed
