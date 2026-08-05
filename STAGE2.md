@@ -703,19 +703,111 @@ rediscover.
   `test_the_printed_heatmap_survives_a_baseline_with_narrower_coverage`, which
   reproduces the original `TypeError` against the pre-fix formatter.
 
-- **B8 — a seeded baseline is never re-measured when the system set grows.**
-  The root cause behind B7. `seed_baseline` is idempotent *on the label*
-  (`store.py:209`), so once an `LDA` row exists it returns early and never
-  notices that `register_systems` has since upserted systems it was never
-  measured on. A store opened mid-cache-build holds a baseline covering a
-  strict subset: the live `data/exp1d/records.sqlite` had 51 of 63, missing
-  the whole `atom` regime. Every heatmap column is then a comparison against a
-  different population than the candidate's, and — B7 aside — the dashboard
-  renders that as a blank cell rather than as a warning. Wanted: on re-open,
-  compare the baseline's system coverage against `systems` and measure the
-  difference, or refuse to serve a heatmap whose two sides disagree on
-  population. The data in the live store was repaired by hand (36 rows
+- **B8 — the store does not record which population a number was measured
+  over.** Surfaced as "a seeded baseline is never re-measured when the system
+  set grows", which is the narrowest visible case; the general defect is
+  larger, and the narrow fix does not close it.
+
+  *Population*, throughout this entry, is the statistical sense: the set of
+  systems a number was averaged over. Every figure the store reports is a mean
+  — `MeanSquaredError` over `exc_sq_error`, `heatmap` by regime × metric,
+  `best` and `history` over the train split — and a mean means nothing except
+  relative to the set it was taken over. Two scores computed over different
+  populations are not two measurements of the same quantity, however identical
+  their metric names. The live store's baseline was a mean over 51 systems
+  with no atoms; run 2's candidates were means over all 63. Both are "mean
+  `exc_sq_error`"; neither is wrong on its own terms; the gap between them is
+  not a property of the functionals.
+
+  *The immediate mechanism.* `seed_baseline` is idempotent *on the label*
+  (`store.py:209`): once an `LDA` row exists it returns the id and never looks
+  at what has happened since. `register_systems` (`store.py:168`) meanwhile
+  upserts, so a store opened while the cache was still building acquires the
+  remaining systems silently. The live `data/exp1d/records.sqlite` held a
+  baseline measured on 51 of 63 systems, missing the entire `atom` regime,
+  against candidates measured on all 63. Repaired by hand (36 rows
   backfilled); the code still has the hole.
+
+  *Why the baseline is only the visible case.* Nothing anywhere ties a
+  candidate to the population it was scored on. Coverage is *derivable*
+  (`SELECT DISTINCT system FROM evaluations WHERE candidate_id = ?`) but never
+  *checked*, so any two candidates added at different times may have been
+  measured over different populations, and every reduction the store offers —
+  `heatmap`, `best`, `history` — is a mean that silently spans whichever rows
+  exist. Two runs compared in the dashboard's run dropdown, or the 2.6
+  optimizer comparison that groups by run, are only meaningful if the system
+  sets happened to match. Nothing asserts that they did.
+
+  *The sharper hazard: system rows are mutable, evaluation rows are not.*
+  `register_systems` upserts keyed by `name` and overwrites `regime`, `split`,
+  `wells_json`, `n_elec` and `npz_path` in place. Per D13 the `evaluations`
+  table deliberately does *not* store `regime`/`split` — they "live normalized
+  in `systems` and come back by join". The consequence is that rewriting a
+  system row **retroactively changes the meaning of evaluations already
+  recorded**, with no write to `evaluations` at all. Demonstrated on a
+  two-system store: a candidate scoring 1.0 on the train split, after `b` is
+  re-registered from `holdout` to `train`, scores 5.0 — same stored rows,
+  different answer, nothing written. The score the optimizer was told at
+  `tell()` time came from the in-memory `EvaluationRecord.split`; the score the
+  dashboard shows comes from today's join. They are free to disagree, and only
+  the second one is visible.
+
+  The same argument applies to *content*. A cache rebuilt at a different grid
+  or with corrected physics keeps its system names, so old `exc_sq_error`
+  values — computed against the old `e_xc_exact` — sit in the same column as
+  new ones. That case does not even produce the missing cell that B7 crashed
+  on; it produces a plausible number. **Fixing B7 made this quieter**: what was
+  a crash is now a `--`, and the content-drift variant was never loud at all.
+
+  *Why the obvious fix is blocked.* "Re-measure the stale candidates" is not
+  available to the store: a candidate persists as `form_key` + `theta_json`,
+  and the store holds no mapping from `form_key` back to a `FunctionalForm`, so
+  it cannot rebuild a `Functional` to evaluate. Two separate rules put it there
+  and both are load-bearing. **D9** keeps core flat and world-free, so `store`
+  may not import `worlds/exp1d/functionals` and cannot reach `LocalAnsatzForm`
+  itself — the import audit enforces exactly this. And **PLAN.md's no-registry
+  rule** (PLAN.md:73, restated at the head of this document and under "Out of
+  scope") means there is no lookup from `form_key` to a form for anyone else to
+  consult either: the key is an opaque identifier, not a resolvable reference.
+  D9 alone would leave an escape hatch, since the composition root *does* know
+  the form and could pass one in — which is precisely why `seed_baseline`
+  works, and why it is the *only* entry point that can re-measure. What the
+  missing registry forecloses is resolving an *arbitrary* stored candidate,
+  whose form is not known in advance. So the general repair cannot be "the
+  store heals itself"; it has to be either the composition root's job or a
+  refusal.
+
+  Cost is not the obstacle. At the measured 2.50 ms/system for the full
+  three-metric evaluation, re-measuring one baseline across 63 systems is
+  ~0.16 s — noise beside a 3000-trial run's 510 s.
+
+  *The design space, none of it settled.*
+  1. **Give the population an identity.** Fingerprint the system set — the
+     sorted names plus a content witness per system (`e_xc_exact` is already a
+     reference answer that changes whenever the physics or grid does) — and
+     stamp it on the run, or on the candidate. Comparisons then *know*
+     whether they are comparing like with like, which is the precondition for
+     every other option.
+  2. **Top up on open.** Have the composition root diff the baseline's
+     coverage against the registered systems and measure the difference. Cheap
+     and it fixes the observed symptom, but it produces a baseline whose rows
+     come from two cache states, which is only sound if systems are immutable
+     — exactly what (3) would have to guarantee.
+  3. **Make systems immutable.** Treat a changed system as a new system:
+     either refuse an upsert whose content witness differs, or key systems by
+     `(name, content)` so a rebuilt cache yields new rows and old evaluations
+     stay attached to what they actually measured. The most correct option and
+     the most invasive; it makes `register_systems` able to fail, which
+     `run_stage2` currently assumes it cannot.
+  4. **Refuse at the reduction.** Make `heatmap`/`best`/`history` compare
+     coverage and raise, or return an explicit "populations differ" marker,
+     rather than averaging over whatever is there. Catches every variant
+     including content drift, at the cost of turning a silent wrong answer
+     into a loud failure in the middle of a dashboard callback.
+
+  My reading: (1) is a prerequisite whatever else is chosen, and (3)+(4) is
+  the honest end state — but (3) changes a signature that 2.2 acceptance leans
+  on, so it wants deciding before it is coded, not during.
 
 - **B6 — the dashboard's human endpoint is an unchecked contract.**
   `create_app(store_path, human=...)` duck-types its argument on `bounds` and
@@ -755,6 +847,35 @@ rediscover.
   is the kind that gets believed. Deriving the selection from a single source
   (a `dcc.Store` holding the resolved candidate id) removes both this and the
   numbering split at once.
+
+- **B10 — the store could not be used from the thread the driver runs on.
+  FIXED.** `--human` mode was broken end to end: `serve_human_session` gives
+  the main thread to the dashboard's server and runs `driver.run` on a worker,
+  so the thread *using* the connection was never the thread that opened it, and
+  sqlite3 refuses that by default —
+  `ProgrammingError: SQLite objects created in a thread can only be used in
+  that same thread`, raised from `store.add` on the first submitted candidate.
+  Fixed by opening the connection with `check_same_thread=False`. That flag is
+  a guard against the caller, not against SQLite: the module reports
+  `threadsafety == 3` (serialized) and the store commits per candidate, so one
+  thread at a time is safe. It does **not** make the store safe under genuinely
+  concurrent use; a future composition that writes from two threads needs
+  locking, not this flag, and the docstring at `store.py:139` says so.
+  `test_the_store_is_usable_from_the_thread_the_driver_runs_on` runs a driver
+  on a worker and reproduces the original `ProgrammingError` when the flag is
+  removed.
+
+  *Why it was invisible until a person ran it.* Two reasons, both worth
+  fixing separately. The suite never drove the loop off the main thread —
+  `test_viz` builds the app without a driver, and the human-optimizer tests
+  exercise the queue directly — so nothing constructed the one composition
+  that fails. And the failure mode hides itself: the worker is a daemon
+  thread whose exception is printed to stderr and then dropped, so
+  `serve_human_session` keeps serving a live dashboard in front of a dead
+  search. Submissions are accepted, the queue drains, and the store never
+  grows. Wanted: `serve_human_session` should notice a worker that has died
+  and say so in the UI rather than leaving a person to infer it from a
+  traceback that scrolled past.
 
 ## Features
 

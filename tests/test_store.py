@@ -402,3 +402,39 @@ def test_the_printed_heatmap_survives_a_baseline_with_narrower_coverage(systems)
     for regime in regimes:
         assert regime in table
     store.close()
+
+
+def test_the_store_is_usable_from_the_thread_the_driver_runs_on(systems, tmp_path):
+    """A regression: a human session drives the loop off the main thread.
+
+    ``serve_human_session`` gives the main thread to the dashboard's server and
+    runs ``driver.run`` on a worker, so the thread that *uses* the connection is
+    not the thread that opened it. sqlite3 refuses that by default, and the
+    refusal surfaced as ``ProgrammingError`` inside the worker -- which a thread
+    reports by dying quietly, so the session looked alive with a store that
+    never grew.
+    """
+    import threading
+
+    store = SQLiteRecordStore(str(tmp_path / "threaded.sqlite"))
+    store.register_systems(systems)
+    run_id = store.begin_run("threaded")
+    driver = _stack(systems, store, run_id)
+
+    failure: list[BaseException] = []
+
+    def run():
+        try:
+            driver.run(2)
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread
+            failure.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(timeout=120)
+
+    assert not worker.is_alive(), "the worker did not finish"
+    if failure:
+        raise AssertionError(f"the driver died on its own thread: {failure[0]!r}")
+    assert len(store.candidates(run_id)) == 2
+    store.close()

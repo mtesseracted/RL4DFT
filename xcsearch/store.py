@@ -136,7 +136,16 @@ class SQLiteRecordStore(RecordStore):
         self.path = path
         if path != ":memory:":
             os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-        self.connection = sqlite3.connect(path)
+        # check_same_thread=False: the composition root opens the store, but in
+        # a human session (`run_stage2.serve_human_session`) the driver runs on
+        # a worker thread while the dashboard holds the main one, so the thread
+        # that *uses* the connection is not the thread that made it. Python's
+        # guard is a guard against the caller, not against SQLite -- the module
+        # reports `threadsafety == 3` (serialized) here, and the store commits
+        # per candidate. What this does *not* buy is genuinely concurrent use:
+        # the composition hands the connection to one thread at a time, and a
+        # future one that does not would need locking, not just this flag.
+        self.connection = sqlite3.connect(path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         if path != ":memory:":
             # WAL: readers never block the writer, so the dashboard can tail a
