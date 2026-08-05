@@ -691,12 +691,70 @@ rediscover.
   `span == 0` case it degenerates to. It would not disturb the D15 gate, which
   compares frozen-density energies and never evaluates a potential.
 
+- **B7 — the printed heatmap crashed on a NULL cell. FIXED.** `AVG(CASE WHEN
+  ...)` returns NULL for a (regime, metric) group one of the two candidates has
+  no rows in, and `format_heatmap` formatted it with `:>14.3e`. The crash
+  landed *after* the search finished and *before* `save_best_theta`, so a
+  completed 20-trial run reached the store but never reached
+  `best_theta.json`. The dashboard's `figures.heatmap` already handled None;
+  only the CLI path did not, because nothing tested it — the sole reference to
+  `format_heatmap` in the suite was the codemap's ownership table. Fixed with
+  a `_cell` helper that prints `--`, plus
+  `test_the_printed_heatmap_survives_a_baseline_with_narrower_coverage`, which
+  reproduces the original `TypeError` against the pre-fix formatter.
+
+- **B8 — a seeded baseline is never re-measured when the system set grows.**
+  The root cause behind B7. `seed_baseline` is idempotent *on the label*
+  (`store.py:209`), so once an `LDA` row exists it returns early and never
+  notices that `register_systems` has since upserted systems it was never
+  measured on. A store opened mid-cache-build holds a baseline covering a
+  strict subset: the live `data/exp1d/records.sqlite` had 51 of 63, missing
+  the whole `atom` regime. Every heatmap column is then a comparison against a
+  different population than the candidate's, and — B7 aside — the dashboard
+  renders that as a blank cell rather than as a warning. Wanted: on re-open,
+  compare the baseline's system coverage against `systems` and measure the
+  difference, or refuse to serve a heatmap whose two sides disagree on
+  population. The data in the live store was repaired by hand (36 rows
+  backfilled); the code still has the hole.
+
 - **B6 — the dashboard's human endpoint is an unchecked contract.**
   `create_app(store_path, human=...)` duck-types its argument on `bounds` and
   `submit(theta)`; an object missing either fails at render time, inside a
   callback, rather than at construction. The duck-typing is deliberate — an
   import of an optimizer adapter would be the first crack in "viz imports no
   physics" — so the fix is a shape check at `create_app`, not an import.
+
+- **B9 — the run panel and the heatmap number candidates differently.**
+  Selecting a candidate in the run panel and reading the heatmap's tooltip
+  shows two different numbers for what is one candidate. Neither is wrong; they
+  are different quantities presented as if they were the same one. The
+  scrubber's value is the **trial index** — `history()` enumerates a run's
+  candidates from 0 (`viz/data.py:86,91`) — while the formula panel and the
+  heatmap's hover text print the **global candidate id**, which is a store-wide
+  primary key. The two differ by however many candidates precede the run,
+  including the seeded LDA baseline: in `data/exp1d/records.sqlite`, run 2's
+  trials 0–19 are candidate ids 2–21, a constant offset of 2, so trial 2 reads
+  as "candidate 4".
+  The heatmap's *data* is not the wrong candidate, and the tooltip is not
+  lying. `_candidate` (`viz/app.py:167`) resolves `candidate_id` once and uses
+  that single value for both the query (`data.heatmap(...)`) and the label
+  (`candidate_label=f"candidate {candidate_id}"`), so the panel cannot show
+  one candidate's numbers under another's name — they are returned by the same
+  callback from the same variable. What disagrees is the scrubber beside it.
+  Fix by making the numbering explicit rather than by renumbering: label the
+  scrubber "trial", and print both identities together
+  (`trial 2 / candidate 4`) wherever a candidate is named.
+
+  A second, genuinely transient defect sits in the same callback. `run` is an
+  `Input` to both `_history` and `_candidate`, and Dash fires them
+  concurrently — so on a run switch `_candidate` runs with the *new* `run_id`
+  and the *previous* run's scrubber index, since `_history`'s new scrubber
+  value has not propagated yet. `min(trial, len(rows) - 1)` keeps it in range,
+  so it resolves to a real candidate of the new run rather than crashing, and
+  the next callback round corrects it. It is a wrong-but-plausible frame, which
+  is the kind that gets believed. Deriving the selection from a single source
+  (a `dcc.Store` holding the resolved candidate id) removes both this and the
+  numbering split at once.
 
 ## Features
 
@@ -719,3 +777,96 @@ rediscover.
   and `one_step_density`, so the error is measured where it is *used* —
   unweighted, in the Hamiltonian — and the crossover is asserted at the step
   rather than at a margin far above it.
+
+## Performance against Stage 1
+
+Measured 2026-08-05, Stage 1 at `2cb8c3e` against Stage 2 at `354a0f4`, each
+in its own worktree so that each run imports its own package. Single-threaded
+(`OMP_NUM_THREADS=1`), the 63-system frozen cache, seed 0. Timings on a shared
+box drift by tens of percent between runs, so every comparison below is either
+interleaved A/B or measured inside one process; cross-run numbers are only
+quoted where the effect is larger than the drift.
+
+**Stage 2 is slower, and the D15 gate is what makes that statement mean
+something.** Because the gate stack reproduces Stage 1 bitwise, the two
+implementations can be timed on identical arithmetic:
+
+| trials | Stage 1 | Stage 2, energy metric only | |
+|---|---|---|---|
+| 300 | 4.3 s | 7.5 s | +74% |
+| 1500 | 44.5 s | 62.5 s | +40% |
+
+The Stage 2 column is the D15 arithmetic carrying everything the loop does
+unconditionally — rung 0, the store, the index — on a cache with no potential
+data, so it is the whole stack minus 2.4's derivative criteria, which are
+priced separately below. Interleaved, five reps each at 300 trials: 4.93 s
+against 8.36 s wall. The ratio *falls* with trial count because TPE's `ask`
+grows with history — ~12 ms/trial averaged over the first 300, ~80 ms by
+trial 3000 — and it is the same sampler in both, so a Stage 2 overhead that is
+constant per trial is diluted by a Stage 1 cost that is not.
+
+**Where the ~12 ms/trial goes.** Every component below was measured to be flat
+in run length; nothing in the Stage 2 loop scales with the number of
+candidates already stored.
+
+- **+7.7 ms — evaluating every system rather than the training split.** Stage
+  1's `evaluate.loss` filtered on `split` *before* calling `exc`, so it paid
+  for 23 records. `FrozenDensityEvaluator.evaluate` (`evaluators.py:69`) scores
+  all 63 and `MeanSquaredError` (`ranking.py:37`) filters afterwards. This is
+  3c — never collapse a measurement before recording it — priced: 2.7× the
+  `exc` evaluations, in exchange for the holdout and extrapolation numbers
+  landing in the store on every trial instead of being recomputed for one
+  final report.
+- **+1.7 ms** — the rung-0 conditions (`run_stage2.py:155`). The "costs
+  milliseconds" claim in 2.3 holds.
+- **+0.96 ms** — the optimizer port over bare optuna ask/tell. Measured
+  head-to-head in a single process against the same trial history, which is
+  the only way to see a number this small; rebuilding the distributions dict
+  each `ask` is 4.3 µs of it.
+- **+0.54 ms** — `SQLiteRecordStore.add`.
+- **+0.5 ms** — the near-duplicate index (`near` + `add`).
+
+**The architecture itself is free.** Per-system evaluation costs 0.239 ms in
+Stage 2 against 0.252 ms in Stage 1 — the `XCInput`/`EvaluationRecord`
+construction, the port dispatch and the driver do not appear above the noise.
+Every millisecond of the difference is Stage 2 measuring more, not Stage 2
+measuring the same thing more expensively — worth stating plainly, since the
+indirection is the thing a reader would suspect first and it is not what
+costs.
+
+**The default composition is 3.3× Stage 1.** At the default 3000 trials, Stage
+1 finishes in 154.9 s; the Stage 2 stack of `run_stage2.py:155-156` runs at
+170.2 ms/trial, i.e. 510.6 s. Per-trial breakdown at that scale: `ask` 41.3
+ms, `frozen` 125.5 ms, `cond` 1.5 ms, `store` 0.92 ms, `index` 0.60 ms, `tell`
+0.26 ms, `rank` 0.06 ms. A run leaves a 37.3 MB store behind.
+
+Three quarters of a trial is the 2.4 derivative criteria, and within them it is
+one line: the one-step KS eigensolve (`_one_step_dn`, `evaluators.py:117` →
+`one_step_density`, `ks.py:94`) costs ~2 ms per system, 128 ms/trial across
+the cache. `vxc` itself is 16 ms/trial and `_vxc_l2_error` 0.8 ms. 2.4's
+promise was that the criterion "cannot cost more than one eigensolve" — true,
+and one eigensolve per system per candidate is 63 of them per trial.
+
+Nothing consults `one_step_dn` today: `MeanSquaredError` selects on
+`EXC_SQ_ERROR` alone, so the eigensolve is paid on every candidate and read by
+no one until a policy or a Stage 3 proposer wants it. If the cost ever bites,
+the lever is rung gating — spend rung 1's derivative metrics only on
+candidates that survive rung 0 and the energy criterion — which is A1's
+evaluation cube used as a schedule rather than as a taxonomy. Not queued as a
+feature: a 3000-trial run is eight minutes, and paying it buys a complete
+record for every candidate, which is the property the store exists to have.
+
+**Unchanged: dataset build and startup.** The exact solve dominates the build
+at 16.5 s/system; 2.4's additions (`v_ext`, `v_hartree`, the KS inversion and
+the CSR Laplacian) total 6.1 ms/system, 0.04% of one solve. Import time is
+~1.3 s in both, all of it numpy and optuna.
+
+Two caveats on method. The 3000-trial default figure was measured with
+synthesized potential arrays, because rebuilding the real 63-system cache
+takes hours of solver time; the substitution was validated against four
+systems built with real potentials, where the full three-metric evaluation
+costs 2.50 ms/system against the synthesized 2.44 — 2.5% apart, the
+eigensolve's cost being a property of the operator's size rather than of the
+potential's values. The energy-only runs read the Stage 1 cache through a
+small adapter into `SystemRecord`, since a Stage-1-format cache carries no
+`n_elec` and `load_frozen` rightly refuses it.

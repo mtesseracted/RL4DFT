@@ -70,9 +70,25 @@ def format_heatmap(store: SQLiteRecordStore, candidate_id: int, baseline_id: int
     for row in rows:
         lines.append(
             f"{row['bin']:<16}{row['metric']:<18}"
-            f"{row['value']:>14.3e}{row['baseline']:>14.3e}{row['delta']:>+14.3e}"
+            f"{_cell(row['value'])}{_cell(row['baseline'])}{_cell(row['delta'], sign=True)}"
         )
     return "\n".join(lines)
+
+
+def _cell(value: float | None, sign: bool = False) -> str:
+    """One heatmap cell, tolerating the NULL the query can legitimately return.
+
+    ``AVG(CASE WHEN ...)`` is NULL for a (regime, metric) group that one of the
+    two candidates has no rows in -- which happens whenever the baseline was
+    seeded against a smaller system set than the candidate was measured on. The
+    dashboard's figure already renders that as "no data"; this printed the same
+    query and formatted NULL as a float, so the report crashed *after* the
+    search had finished but *before* the best theta was written to disk.
+    Missing is a fact about the store, not an error in the run.
+    """
+    if value is None:
+        return f"{'--':>14}"
+    return f"{value:>+14.3e}" if sign else f"{value:>14.3e}"
 
 
 def serve_human_session(driver: SearchDriver, human, args) -> None:

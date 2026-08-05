@@ -360,3 +360,45 @@ def test_a_candidate_with_an_empty_fingerprint_vector_stores_null_theta(tmp_path
     assert row["theta_json"] is None
     assert row["fingerprint"] == "symbolic.some_tree"
     store.close()
+
+
+def test_the_printed_heatmap_survives_a_baseline_with_narrower_coverage(systems):
+    """A regression: NULL is a legitimate answer from the heatmap query.
+
+    ``seed_baseline`` is idempotent on the label, so a store whose systems
+    grew after the baseline was seeded holds a baseline measured on a *subset*.
+    ``AVG(CASE WHEN ...)`` is then NULL for any (regime, metric) the baseline
+    has no rows in, and the printed report formatted that NULL as a float --
+    crashing after the search had finished but before the best theta reached
+    disk. The dashboard's figure already tolerated it; only the CLI did not.
+    """
+    from xcsearch.run_stage2 import format_heatmap
+
+    form = LocalAnsatzForm()
+    functional = form.build(LDA_THETA)
+    evaluator = FrozenDensityEvaluator(systems)
+    full = evaluator.evaluate(functional)
+    regimes = {record.regime for record in full}
+    assert len(regimes) > 1, "the fixture needs two regimes for this to bite"
+
+    dropped = sorted(regimes)[0]
+    narrow = [record for record in full if record.regime != dropped]
+
+    store = SQLiteRecordStore(":memory:")
+    store.register_systems(systems)
+    baseline_id = store.seed_baseline(functional, narrow)
+    run_id = store.begin_run("test")
+    candidate_id = store.add(functional, full, run_id=run_id)
+
+    rows = store.heatmap(candidate_id, baseline_id)
+    assert any(row["baseline"] is None for row in rows), (
+        "the setup did not actually produce a NULL baseline cell"
+    )
+
+    table = format_heatmap(store, candidate_id, baseline_id)
+    assert dropped in table
+    assert "--" in table, "a missing cell should be shown as missing, not omitted"
+    # Every row still present: a NULL must not drop the regime from the report.
+    for regime in regimes:
+        assert regime in table
+    store.close()
