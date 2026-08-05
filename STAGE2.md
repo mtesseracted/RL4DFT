@@ -686,10 +686,73 @@ rediscover.
   takes the offer gets an FD potential, and `one_step_density` puts it into
   the KS Hamiltonian *unweighted*. Shrinking `DN` is not the fix — it buys one
   decade of range per two decades of step while approaching the float64
-  cancellation floor from the other side. A relative step
-  (`h = max(DN, ε·n)`) fixes the scaling; `fd_vxc:79` already guards the
-  `span == 0` case it degenerates to. It would not disturb the D15 gate, which
-  compares frozen-density energies and never evaluates a potential.
+  cancellation floor from the other side. Whatever replaces it does not disturb
+  the D15 gate, which compares frozen-density energies and never evaluates a
+  potential.
+
+  *Correction: the fix proposed above was wrong, and the two helpers need
+  different fixes.* The original entry proposed `h = max(DN, ε·n)` and cited
+  `fd_vxc:79`'s `span == 0` guard as the degenerate case it falls back to.
+  Those are two different fixes, and neither statement survives contact:
+
+  - `max(DN, ε·n)` keeps `h ≥ DN` everywhere, so for every `n < DN/ε` the
+    arithmetic is **bit-identical to today** — the clip still fires and the
+    `b·√DN` floor survives at exactly the densities B5 is about. With
+    `ε = 1e−3` the step is unchanged for all `n < 1e−4`, which contains the
+    entire breakdown region. Verified: the step array is `==` to the fixed-step
+    one at every probe point at or below `1e−6`.
+  - `max(DN, ε·n)` can never produce a zero span. Only a *pure* relative step
+    `h = ε·n` can, at `n = 0`. The formula and its footnote described different
+    schemes.
+
+  **`local_vxc` — a pure relative step `h = ε·n` fixes it completely.** The
+  cancellation is against `e(nᵢ)` itself, which vanishes with the density, so
+  the noise-to-signal ratio is a uniform `~eps/ε` at every `n`; there is no
+  floor and none is wanted. Measured relative error against the closed form,
+  across fourteen decades of density (`e(n) = 0.35n² − 0.2n^1.5`):
+
+  | n | fixed `DN` | `h = 1e−3·n` | `h = 6e−6·n` |
+  |---|---|---|---|
+  | 1e−14 | 2.1e+03 | 4.2e−08 | 4.0e−12 |
+  | 1e−08 | 1.2e+00 | 4.2e−08 | 2.1e−12 |
+  | 1e−06 | 4.2e−04 | 4.2e−08 | 1.6e−12 |
+  | 1e−02 | 5.4e−08 | 5.4e−08 | 2.7e−12 |
+  | 1e+00 | 3.1e−08 | 3.1e−08 | 2.3e−12 |
+
+  Flat, at every scale, which is the property a fixed step cannot have. At
+  `n = 0` the span is zero and the answer is `0`, the true limit for all three
+  term types. **Implementation note:** `local_vxc` has *no* `span == 0` guard
+  today — only `fd_vxc:79` does — so the pure relative step requires adding
+  one there, not merely relying on it. `ε ≈ eps^(1/3) ≈ 6e−6` balances
+  truncation against round-off and is three orders better than `1e−3`.
+
+  **`fd_vxc` — a pure relative step is *worse*, and no step schedule fixes
+  it.** The signal in `E[n + h·eᵢ] − E[n − h·eᵢ]` is `~wᵢ·vᵢ·2h`, but the
+  round-off is `~eps·|E_total|`, which does **not** shrink with `nᵢ`. Dividing
+  noise that stays fixed by a span that goes to zero is the whole problem.
+  Measured on a 201-point grid with a Gaussian tail spanning `2e−24 … 0.98`,
+  `E_total = 0.2308`, `eps·|E_total| = 5.1e−17`:
+
+  | band | points | fixed `DN` | `h = 1e−3·n` | `h = 6e−6·n` |
+  |---|---|---|---|---|
+  | `1e−12 … 1e−8` | 32 | **6.3e−05** | 1.9e−04 | 2.9e−05 |
+  | `n < 1e−12` | 40 | 6.3e−05 | 2.7e−07 | 2.7e−07 |
+
+  In the band that matters the pure relative step is ~3× *worse* than the
+  floor it was meant to remove. Two honest qualifications on the numbers,
+  since the original estimate was `O(0.01–0.1)` Hartree: the measured damage is
+  ~`1e−4`, an order or two milder, and below `1e−12` the relative step scores
+  *better* — but only because `E(a) − E(b)` underflows to exactly zero, so the
+  helper returns `0` for a degenerate reason rather than a resolved one. The
+  mechanism is as described; the magnitude depends on `ε`, `wᵢ` and where
+  underflow takes over.
+
+  So the generic helper has an **intrinsic vacuum floor set by differencing a
+  total energy**, and that is a property of the method, not a bug in the step.
+  `max(DN, ε·n)` is a defensible compromise *for this helper only* — it keeps
+  the deterministic floor where the signal is unresolvable and gains relative
+  accuracy where it is — but it must be documented as "the generic path keeps a
+  vacuum floor by nature", never as a fix for B5.
 
 - **B7 — the printed heatmap crashed on a NULL cell. FIXED.** `AVG(CASE WHEN
   ...)` returns NULL for a (regime, metric) group one of the two candidates has
