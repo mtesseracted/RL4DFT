@@ -642,3 +642,80 @@ One sequencing change: 2.2's cache rebuild and 2.4's were run as a single
 build. 2.2's had written no files when 2.4 landed, and the end state is
 identical — the plan's "one cache rebuild" per sub-stage is about the cache's
 content, not about how many times the solver is paid for.
+
+# Post implementation tasks (2026-08-05)
+
+Raised after 2.1–2.7 landed and the full 63-system cache was rebuilt. None of
+these block the stage; they are the things a reader would otherwise have to
+rediscover.
+
+## Bugs
+
+- **B1 — `begin_run` fires on every launch.** `run_stage2.py:152` opens a run
+  row immediately after opening the store, before any candidate exists. A
+  `--human` session that is opened and abandoned therefore leaves a run with
+  zero candidates behind, and the dashboard's run dropdown lists it forever.
+  Make the run lazy: create it when the first candidate is recorded, so that
+  what the store contains is searches that happened rather than processes that
+  started.
+
+- **B2 — the store has no delete or prune API.** `SQLiteRecordStore` can
+  `begin_run` and `add` but never remove, so clearing B1's debris means
+  hand-written SQL against a live file. Wanted: `delete_run(run_id)` that
+  cascades in dependency order (`duplicate_buckets` → `evaluations` →
+  `candidates` → `runs`, since the schema declares no `ON DELETE CASCADE` and
+  SQLite does not enforce foreign keys by default), and a `--delete-run N`
+  flag. The one invariant it must hold: **never touch `candidates` rows with
+  `run_id IS NULL`** — that is the seeded LDA baseline, which belongs to no run
+  on purpose and is what every heatmap column is measured against.
+
+- **B5 — the finite-difference `v_xc` silently flattens in the vacuum.** For
+  the `p = ½` basis function the energy density carries an `n^(3/2)` term whose
+  second derivative is unbounded at the origin, so no fixed step resolves it.
+  With the lower point clipped at zero (`numerics.py:50`) the difference over
+  `[0, n+h]` returns `b·√(n+h)` instead of `1.5·b·√n`, i.e. the potential
+  settles onto a floor of `b·√DN` rather than decaying with the density, where
+  `b` is θ₁, the coefficient of the `p = ½` term. Measured on
+  `e(n) = 0.35n² − 0.2n^1.5`: the floor is −6.3246e−05 = `b·√(1e−7)`, the
+  crossover sits at `n ≈ DN = 1e−7`, relative error is 4.2e−04 at `n = 1e−6`
+  and 4.3e−08 at `n = 1e−4`. It fails *silently* — finite, smooth, plausible
+  on a plot. Nothing in the search path calls these helpers today
+  (`LocalAnsatz.vxc` is analytic and `scf.py` delegates to it), and 2.4's
+  potential error is density-weighted so the vacuum drops out. The exposure is
+  D10's promise that a form need not supply a closed form: the first one that
+  takes the offer gets an FD potential, and `one_step_density` puts it into
+  the KS Hamiltonian *unweighted*. Shrinking `DN` is not the fix — it buys one
+  decade of range per two decades of step while approaching the float64
+  cancellation floor from the other side. A relative step
+  (`h = max(DN, ε·n)`) fixes the scaling; `fd_vxc:79` already guards the
+  `span == 0` case it degenerates to. It would not disturb the D15 gate, which
+  compares frozen-density energies and never evaluates a potential.
+
+- **B6 — the dashboard's human endpoint is an unchecked contract.**
+  `create_app(store_path, human=...)` duck-types its argument on `bounds` and
+  `submit(theta)`; an object missing either fails at render time, inside a
+  callback, rather than at construction. The duck-typing is deliberate — an
+  import of an optimizer adapter would be the first crack in "viz imports no
+  physics" — so the fix is a shape check at `create_app`, not an import.
+
+## Features
+
+- **F1 — revamp the app.** Stub, to be specified. `viz/app.py` grew panel by
+  panel alongside 2.7 and its layout, polling model (`_POLL_MS`, a blanket
+  3 s re-read of every panel) and single-page structure were never designed as
+  a whole. Scope to be settled before any code moves; the constraint that
+  survives any redesign is D13 — every number on the screen is in a record or
+  reachable from one, and the dashboard imports no physics module.
+
+- **F2 — tests that exercise the finite-difference `v_xc` path and surface
+  B5.** The helpers are currently asserted only where they agree with the
+  closed forms: the masks are `n > 1e−3` (`test_numerics.py:44`) and
+  `n > 1e−4` (`test_derivatives.py:111,122`), roughly 1000× more conservative
+  than the real breakdown at `n ≈ 1e−7`, so the tests would not notice the
+  onset creeping up two decades.
+  `test_the_vacuum_is_where_a_finite_step_gives_up` pins the floor's value but
+  not its consequences. Wanted: a functional whose `vxc` is the FD helper
+  rather than a closed form, driven end to end through `FrozenDensityEvaluator`
+  and `one_step_density`, so the error is measured where it is *used* —
+  unweighted, in the Hamiltonian — and the crossover is asserted at the step
+  rather than at a margin far above it.
