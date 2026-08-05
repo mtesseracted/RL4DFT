@@ -17,6 +17,17 @@ changing them is what a research instrument is for. The fix is a provenance
 spine, not a patch: kilobytes per run, never megabytes — the arrays stay in
 `.npz` where D13 put them.
 
+*Population*, used throughout this document, is the statistical sense: the set
+of systems a number was averaged over. Every figure the store reports is a mean
+— `MeanSquaredError` over `exc_sq_error`, `heatmap` by regime × metric, `best`
+and `history` over the train split — and a mean means nothing except relative
+to the set it was taken over. Two scores computed over different populations
+are not two measurements of the same quantity, however identical their metric
+names. The live store's baseline was a mean over 51 systems with no atoms; run
+2's candidates were means over all 63. Both are "mean `exc_sq_error`"; neither
+is wrong on its own terms; the gap between them is not a property of the
+functionals.
+
 ## The assumption audit — why B8 happened
 
 Five assumptions, each written down somewhere as a deliberate decision,
@@ -37,6 +48,26 @@ jointly produced B8:
    (D13); reads reconstitute them by join. Normalization to a dimension
    table is sound only if the dimension is append-only — and
    `register_systems` overwrites.
+
+   Demonstrated on a two-system store. Systems `a` (`train`) and `b`
+   (`holdout`); one candidate with two rows, `a → 1.0` and `b → 9.0`.
+   `store.best(run, "exc_sq_error")` filters `s.split = 'train'` by join, so
+   it sees `a` alone and returns **1.0**. Then `register_systems` is called
+   again with `b` marked `train` — a rebuild that reshuffled the splits.
+   Nothing else happens: no evaluation written, no candidate added, no
+   functional re-run. The same call now returns **5.0**, because the join
+   pulls both rows into the train split and `(1.0 + 9.0)/2 = 5.0`.
+
+       best(train) right after the run : (1, 1.0)
+       best(train) after re-registering: (1, 5.0)
+       -> the same stored rows, a different score, no write to evaluations
+
+   The sharp edge: the number the optimizer was *told* at `tell()` time came
+   from the in-memory `EvaluationRecord.split`, captured at evaluation time
+   and correct. The number the dashboard shows comes from today's join. They
+   are free to disagree, and only the second one is visible. This is what
+   makes B8 a provenance defect rather than a missing-rows bug, and it is the
+   case D17's append-only `systems` table exists to make impossible.
 4. **Aggregation needs no population.** Every reduction is an `AVG` over
    whatever rows exist.
 5. **Score semantics live in code, three times.** The score — mean
@@ -229,12 +260,11 @@ original doc keep meaning.
   cells remain legal (metric-set differences) and the formatter keeps
   tolerating them.
 - **B8 — the store does not record which population a number was measured
-  over. RESOLVED BY DESIGN — D17–D20.** The audit above and D17–D20 carry
-  the conclusions; the long-form analysis this replaced — the worked
-  demonstration that re-registering a system silently re-scores stored
-  evaluations (1.0 → 5.0 on the same rows), and the four design options the
-  review chose between — is at `4bb6d36`. The mechanism in one paragraph:
-  `seed_baseline` is
+  over. RESOLVED BY DESIGN — D17–D20.** The audit above carries the
+  conclusions and the worked demonstration (assumption 3); D17–D20 carry the
+  repair. The only part of the long-form analysis this replaced that is not
+  reproduced here is the four design options the review chose between, at
+  `4bb6d36`. The mechanism in one paragraph: `seed_baseline` is
   idempotent on its label while `register_systems` upserts by name, so the
   live store held a baseline measured over 51 systems beside candidates
   measured over 63; more sharply, rewriting a system row retroactively
