@@ -255,7 +255,9 @@ def test_the_driver_records_duplicate_hits_without_acting_on_them(store):
     systems = _systems()
     index = NearDuplicateIndex(store.connection, seed=0, width=1.0)
     form = LocalAnsatzForm()
-    run_id = store.begin_run("optuna_tpe")
+    run_id = store.begin_run(
+        "optuna_tpe", population_id=store.open_population(systems)
+    )
     driver = SearchDriver(
         optimizer=FixedFormOptimizer(form, OptunaTPE(form.bounds(), seed=0)),
         evaluators=[FrozenDensityEvaluator(systems)],

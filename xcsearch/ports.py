@@ -193,6 +193,17 @@ class Evaluator(ABC):
     def evaluate(self, functional: Functional) -> list[EvaluationRecord]:
         """Records for this candidate, with ``candidate_id`` left ``None``."""
 
+    def describe(self) -> dict:
+        """What this evaluator is, for the run's protocol row (D18).
+
+        Concrete rather than abstract: an adapter that says nothing still
+        lands in the protocol under its class name, and a protocol row with a
+        thin entry is better than an adapter that will not construct. Override
+        to add what actually determines the numbers -- above all the metric
+        list, since a stack that gained a metric is a different protocol.
+        """
+        return {"evaluator": type(self).__name__}
+
 
 class RankingPolicy(ABC):
     """Reduces a candidate's records to the one number the optimizer sees."""
@@ -230,12 +241,33 @@ class RecordStore(ABC):
         """Open a run and return its id. The entire run API -- no lifecycle."""
 
     @abstractmethod
-    def register_systems(self, systems: list[SystemRecord]) -> None:
-        """Idempotent upsert of the system table, keyed by name.
+    def register_systems(self, systems: list[SystemRecord]) -> dict[str, int]:
+        """Insert-if-new-version of the system table, keyed by content (D17).
 
         Called by the composition root after ``Dataset.load()`` and before the
         run starts. The store serializes what a ``SystemRecord`` carries and
         never sees a world module.
+
+        Returns name -> system version id. The mapping is the point: a store
+        that keyed systems by name could answer "which system" but not "which
+        version of it", and every stored number is a measurement against a
+        specific version. Registration is append-only, so it can neither
+        overwrite an earlier version nor fail.
+        """
+
+    @abstractmethod
+    def open_population(self, systems: list[SystemRecord]) -> int:
+        """Register these systems and freeze the set they form (D19).
+
+        A population is *among what* a number was measured: which system
+        versions, each with the split and regime this run assigned it. Every
+        reduction the store answers -- a mean, a heatmap cell, a best-so-far
+        -- is a mean over a population, and a mean over an unstated set is not
+        a measurement of anything.
+
+        This is what the composition root calls instead of
+        ``register_systems``; a run and a baseline are opened over the id it
+        returns.
         """
 
     @abstractmethod

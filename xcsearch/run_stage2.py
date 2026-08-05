@@ -24,11 +24,12 @@ from .driver import SearchDriver
 from .evaluators import ConditionsEvaluator, FrozenDensityEvaluator
 from .optimizers.composed import FixedFormOptimizer
 from .optimizers.optuna_tpe import OptunaTPE
+from .provenance import protocol_payload
 from .ranking import MeanSquaredError
 from .records import SystemRecord
 from .store import NearDuplicateIndex, SQLiteRecordStore
 from .worlds.exp1d.conditions import default_conditions
-from .worlds.exp1d.dataset import DATA_DIR, Exp1dDataset
+from .worlds.exp1d.dataset import DATA_DIR, Exp1dDataset, protocol as world_protocol
 from .worlds.exp1d.functionals import LDA_THETA, LocalAnsatzForm
 
 
@@ -65,14 +66,31 @@ def format_heatmap(store: SQLiteRecordStore, candidate_id: int, baseline_id: int
     heatmap renders (D13).
     """
     rows = store.heatmap(candidate_id, baseline_id)
+    scope = store.heatmap_scope(candidate_id, baseline_id)
     header = f"{'regime':<16}{'metric':<18}{'candidate':>14}{'LDA':>14}{'delta':>14}"
-    lines = [header, "-" * len(header)]
+    lines = [_scope_line(scope), header, "-" * len(header)]
     for row in rows:
         lines.append(
             f"{row['bin']:<16}{row['metric']:<18}"
             f"{_cell(row['value'])}{_cell(row['baseline'])}{_cell(row['delta'], sign=True)}"
         )
     return "\n".join(lines)
+
+
+def _scope_line(scope: dict) -> str:
+    """What population this comparison is over (D19, 2B.2 acceptance (c)).
+
+    Printed above the table rather than left implicit, because a candidate and
+    a baseline drawn from different populations are compared over the systems
+    they share, and a mean whose set is unstated is exactly the defect B8 was.
+    """
+    n = scope["shared_systems"]
+    if scope["same_population"]:
+        return f"over population {scope['candidate_population']} ({n} systems)"
+    return (
+        f"over the {n} shared systems of populations "
+        f"{scope['candidate_population']} and {scope['baseline_population']}"
+    )
 
 
 def _cell(value: float | None, sign: bool = False) -> str:
@@ -91,6 +109,25 @@ def _cell(value: float | None, sign: bool = False) -> str:
     return f"{value:>+14.3e}" if sign else f"{value:>14.3e}"
 
 
+def run_capturing_failures(driver: SearchDriver, trials: int, status: list) -> None:
+    """``driver.run``, with its outcome appended to ``status`` either way (B10).
+
+    The thread body of a human session. A daemon thread that raises dies
+    quietly -- which is exactly what happened when the store refused a
+    cross-thread connection: the dashboard stayed up, the sliders kept
+    working, and every submission went into a queue nobody was reading. The
+    exception is re-raised after being recorded, so the thread still dies; the
+    difference is that the dashboard can say so.
+    """
+    try:
+        driver.run(trials)
+    except BaseException as exc:  # noqa: BLE001 - recorded, then re-raised
+        status.append(f"the search worker died: {type(exc).__name__}: {exc}")
+        raise
+    else:
+        status.append(f"the search worker finished its {trials} proposals")
+
+
 def serve_human_session(driver: SearchDriver, human, args) -> None:
     """Run the loop in the background and serve the dashboard in front of it.
 
@@ -98,16 +135,38 @@ def serve_human_session(driver: SearchDriver, human, args) -> None:
     a theta on its queue, so the "optimizer" here is a person with sliders and
     everything else in the loop is unchanged -- which is the whole point of
     the port. Their candidates land in the store beside any other run's.
+
+    The worker's fate is captured rather than lost (B10). A daemon thread that
+    raises dies quietly: the dashboard stays up, the sliders keep working, and
+    every submission vanishes into a queue nobody is reading. So the exception
+    lands in a cell the dashboard polls -- the session says it is dead instead
+    of looking alive.
     """
     import threading
 
     from .viz.app import create_app
 
-    worker = threading.Thread(target=driver.run, args=(args.trials,), daemon=True)
+    # One cell, written by the worker, read by the interval callback. A list
+    # rather than a Queue because there is exactly one terminal state and the
+    # reader wants the latest, not the next.
+    status: list[str] = []
+    worker = threading.Thread(
+        target=run_capturing_failures, args=(driver, args.trials, status), daemon=True
+    )
     worker.start()
     print(f"Human session: {args.trials} proposals, run {driver.run_id}.")
+    print("(the run appears in the store when its first candidate is stored)")
     print(f"Open http://127.0.0.1:{args.port} and submit candidates.")
-    create_app(args.store, human=human).run(host="127.0.0.1", port=args.port)
+
+    def worker_status() -> str:
+        """What the dashboard's watchdog line shows. Called on every poll."""
+        if status:
+            return status[-1]
+        return "" if worker.is_alive() else "the search worker is gone"
+
+    create_app(args.store, human=human, status=worker_status).run(
+        host="127.0.0.1", port=args.port
+    )
 
 
 def main() -> None:
@@ -129,7 +188,19 @@ def main() -> None:
         "--out", default=os.path.join(DATA_DIR, "best_theta.json"),
         help="where to write the best theta",
     )
+    parser.add_argument(
+        "--delete-run", type=int, default=None, metavar="N",
+        help="delete run N and its candidates from the store, then exit "
+             "(the LDA baseline belongs to no run and is never touched)",
+    )
     args = parser.parse_args()
+
+    if args.delete_run is not None:
+        store = SQLiteRecordStore(args.store)
+        removed = store.delete_run(args.delete_run)
+        store.close()
+        print(f"Deleted run {args.delete_run} and its {removed} candidates.")
+        return
 
     # --- the composition ---------------------------------------------------
     dataset = Exp1dDataset(args.data)
@@ -158,15 +229,46 @@ def main() -> None:
     policy = MeanSquaredError()
 
     store = SQLiteRecordStore(args.store)
-    store.register_systems(systems)
+    # The population (D19): which system versions this run measures over, and
+    # how each is assigned. Everything downstream -- the run, the baseline,
+    # every reduction -- is scoped to it, so a rebuilt cache produces a new
+    # population beside the old one rather than silently re-interpreting it.
+    population_id = store.open_population(systems)
     # The baseline is stored with its records, not just its formula: an
-    # unmeasured baseline is a comparison against nothing.
+    # unmeasured baseline is a comparison against nothing. Keyed by (label,
+    # population), so a relaunch over a changed cache gets its own baseline
+    # instead of comparing against one measured over a different set.
     lda = form.build(LDA_THETA)
+    lda_records = [r for ev in evaluators for r in ev.evaluate(lda)]
     baseline_id = store.seed_baseline(
-        lda, [r for ev in evaluators for r in ev.evaluate(lda)]
+        lda,
+        lda_records,
+        population_id=population_id,
+        # Scored through the same policy the run will use (D20): the
+        # composition root already holds the records, and a baseline scored by
+        # a different definition is a comparison against a different question.
+        score=policy.score(lda_records),
+    )
+    # The protocol (D18): *how* every number in this run was measured. The
+    # composition root is the only place that can see the world's constants,
+    # the evaluator stack and the libraries at once, which is why the payload
+    # is assembled here and handed to the store as data.
+    protocol_id = store.register_protocol(
+        protocol_payload(
+            world=world_protocol(),
+            evaluators=evaluators,
+            extra={
+                "ranking_policy": type(policy).__name__,
+                "optimizer": "human" if args.human else "optuna_tpe",
+                "seed": args.seed,
+            },
+        )
     )
     run_id = store.begin_run(
-        "human" if args.human else "optuna_tpe", notes=f"seed={args.seed}"
+        "human" if args.human else "optuna_tpe",
+        notes=f"seed={args.seed}",
+        protocol_id=protocol_id,
+        population_id=population_id,
     )
 
     driver = SearchDriver(

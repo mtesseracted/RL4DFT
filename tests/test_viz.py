@@ -68,15 +68,16 @@ def finished_run(tmp_path):
     systems = _systems(tmp_path)
     path = str(tmp_path / "records.sqlite")
     store = SQLiteRecordStore(path)
-    store.register_systems(systems)
+    population = store.open_population(systems)
 
     evaluators = [ConditionsEvaluator(default_conditions()),
                   FrozenDensityEvaluator(systems)]
     lda = FORM.build(LDA_THETA)
     baseline_id = store.seed_baseline(
-        lda, [r for ev in evaluators for r in ev.evaluate(lda)]
+        lda, [r for ev in evaluators for r in ev.evaluate(lda)],
+        population_id=population,
     )
-    run_id = store.begin_run("optuna_tpe", notes="seed=0")
+    run_id = store.begin_run("optuna_tpe", notes="seed=0", population_id=population)
     SearchDriver(
         optimizer=FixedFormOptimizer(FORM, OptunaTPE(FORM.bounds(), seed=0)),
         evaluators=evaluators,
@@ -230,8 +231,8 @@ def test_panels_update_while_a_search_is_running(tmp_path):
     systems = _systems(tmp_path)
     path = str(tmp_path / "live.sqlite")
     store = SQLiteRecordStore(path)
-    store.register_systems(systems)
-    run_id = store.begin_run("optuna_tpe")
+    population = store.open_population(systems)
+    run_id = store.begin_run("optuna_tpe", population_id=population)
     driver = SearchDriver(
         optimizer=FixedFormOptimizer(FORM, OptunaTPE(FORM.bounds(), seed=0)),
         evaluators=[FrozenDensityEvaluator(systems)],
@@ -260,11 +261,11 @@ def test_a_human_session_leaves_records_shaped_like_tpes(tmp_path):
     systems = _systems(tmp_path)
     path = str(tmp_path / "human.sqlite")
     store = SQLiteRecordStore(path)
-    store.register_systems(systems)
+    population = store.open_population(systems)
     evaluators = [ConditionsEvaluator(default_conditions()),
                   FrozenDensityEvaluator(systems)]
 
-    tpe_run = store.begin_run("optuna_tpe")
+    tpe_run = store.begin_run("optuna_tpe", population_id=population)
     SearchDriver(
         optimizer=FixedFormOptimizer(FORM, OptunaTPE(FORM.bounds(), seed=0)),
         evaluators=evaluators, policy=MeanSquaredError(),
@@ -272,7 +273,7 @@ def test_a_human_session_leaves_records_shaped_like_tpes(tmp_path):
     ).run(3)
 
     human = HumanOptimizer(FORM.bounds(), timeout=10.0)
-    human_run = store.begin_run("human")
+    human_run = store.begin_run("human", population_id=population)
     driver = SearchDriver(
         optimizer=FixedFormOptimizer(FORM, human),
         evaluators=evaluators, policy=MeanSquaredError(),

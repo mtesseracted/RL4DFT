@@ -78,6 +78,16 @@ class SystemRecord:
     wells: tuple[tuple[float, float], ...]
     n_elec: int
     npz_path: str | None
+    # The identity of this system's *physics content* (D17), computed by
+    # `provenance.system_content_hash` at cache-build time and carried here so
+    # that the store can version rather than overwrite. `None` means "not
+    # computed yet" -- the store fills it in from the arrays rather than
+    # refusing, which is what lets a cache built before 2B.1 be registered.
+    #
+    # It is not part of the four descriptive fields above by accident: those
+    # describe the system, this one *identifies* it, and the difference is the
+    # whole of B8.
+    content_hash: str | None = None
     # Frozen potential data (2.4), for the derivative criteria of feature 2a.
     # All candidate-independent and computed once, at build time: the grid's
     # Laplacian, the external potential, the Hartree potential of the

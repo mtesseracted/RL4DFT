@@ -38,6 +38,39 @@ def _card(title: str, *children) -> html.Div:
     )
 
 
+# What a human endpoint has to provide (B6). Duck-typed, but checked: the
+# dashboard renders records and feeds a queue, and importing an optimizer
+# adapter to type-check it would be the first crack in "viz imports no
+# physics". `bounds` is read by the layout builder, so a missing one already
+# fails at create_app; `submit` and `pending_submissions` are read inside the
+# submit callback, which is the wrong place to discover a contract violation
+# -- a person clicks the button, the callback raises into the browser
+# console, and the session looks alive.
+_HUMAN_CONTRACT = ("bounds", "submit", "pending_submissions")
+
+
+def check_human_endpoint(human) -> None:
+    """Fail at ``create_app`` if the human endpoint cannot serve the panel.
+
+    All three attributes, not just the one that happens to be read first, and
+    at construction rather than on click.
+    """
+    missing = [name for name in _HUMAN_CONTRACT if not hasattr(human, name)]
+    if missing:
+        raise TypeError(
+            f"{type(human).__name__} is missing {missing}: a human endpoint "
+            f"needs {list(_HUMAN_CONTRACT)} -- `bounds` to lay the sliders "
+            "out, `submit(theta)` to queue a proposal, and "
+            "`pending_submissions` to say how many are waiting. "
+            "HumanOptimizer is one."
+        )
+    if not callable(getattr(human, "submit")):
+        raise TypeError(
+            f"{type(human).__name__}.submit is not callable: the submit "
+            "button calls it with a theta and expects the accepted theta back."
+        )
+
+
 def build_layout(store_path: str, human=None) -> html.Div:
     run_options = [
         {"label": f"run {r['id']} - {r['optimizer']} ({r['candidates']} candidates)",
@@ -55,6 +88,16 @@ def build_layout(store_path: str, human=None) -> html.Div:
         html.H1("xcsearch", style={"fontSize": "20px", "marginBottom": "2px"}),
         html.Div(os.path.abspath(store_path), style={"color": "#7a828c", "fontSize": "12px"}),
         dcc.Interval(id="tick", interval=_POLL_MS),
+        # The watchdog line (B10). Empty while the session is healthy, so it
+        # costs nothing to look at and means something when it is not.
+        html.Div(id="worker-status",
+                 style={"color": "#b3261e", "fontSize": "13px", "margin": "4px 0"}),
+        # The resolved candidate id, in one place (B9). The scrubber's value
+        # is a *trial index*; every dependent panel needs the *candidate id*
+        # that index resolves to, and each one resolving it separately meant
+        # three reads of the same history per poll and a race on a run switch
+        # -- a callback could fire with the new run and the old index.
+        dcc.Store(id="selected"),
         _card(
             "run",
             dcc.Dropdown(
@@ -64,11 +107,16 @@ def build_layout(store_path: str, human=None) -> html.Div:
             ),
             dcc.Graph(id="history", config={"displayModeBar": False}),
             html.Div(
-                [html.Span("candidate", style={"marginRight": "8px"}),
+                # "trial", because that is what the slider's value is. It was
+                # labelled "candidate" while carrying the trial index, so the
+                # UI was actively wrong rather than merely ambiguous (B9).
+                [html.Span("trial", style={"marginRight": "8px"}),
                  dcc.Slider(id="scrubber", min=0, max=0, step=1, value=0,
                             tooltip={"placement": "bottom"})],
                 style={"marginTop": "6px"},
             ),
+            html.Div(id="selection", style={"fontSize": "12px", "color": "#4a525c",
+                                            "marginTop": "2px"}),
         ),
         _card("formula", dcc.Markdown(id="formula", mathjax=True), html.Div(id="theta")),
         _card(
@@ -77,6 +125,11 @@ def build_layout(store_path: str, human=None) -> html.Div:
                 id="baseline", options=baseline_options,
                 value=data.default_baseline(store_path), clearable=False,
             ),
+            # What set the two means were taken over (D19). A comparison
+            # across populations is over their intersection, and saying so is
+            # part of the comparison rather than a footnote to it.
+            html.Div(id="heatmap-scope",
+                     style={"fontSize": "12px", "color": "#7a828c", "margin": "2px 0"}),
             dcc.Graph(id="heatmap", config={"displayModeBar": False}),
         ),
         _card(
@@ -93,6 +146,7 @@ def build_layout(store_path: str, human=None) -> html.Div:
     ]
 
     if human is not None:
+        check_human_endpoint(human)
         panels.append(
             _card(
                 "propose a functional",
@@ -128,8 +182,33 @@ def build_layout(store_path: str, human=None) -> html.Div:
     )
 
 
-def create_app(store_path: str, human=None) -> Dash:
-    """Build the app. Every callback re-reads the store, so panels live-tail."""
+def scope_label(scope: dict) -> str:
+    """One line naming the population a comparison was taken over (D19).
+
+    The dashboard's counterpart to the CLI's ``_scope_line``: same sentence,
+    same reason. A cross-population heatmap is computed over the systems both
+    candidates were measured on, and the reader is told how many that was.
+    """
+    n = scope["shared_systems"]
+    if scope["candidate_population"] is None:
+        return "no population recorded for this candidate"
+    if scope["same_population"]:
+        return f"over population {scope['candidate_population']} ({n} systems)"
+    return (
+        f"over the {n} shared systems of populations "
+        f"{scope['candidate_population']} and {scope['baseline_population']}"
+    )
+
+
+def create_app(store_path: str, human=None, status=None) -> Dash:
+    """Build the app. Every callback re-reads the store, so panels live-tail.
+
+    ``status`` is an optional zero-argument callable returning a line to show
+    above the panels -- ``serve_human_session`` passes one that reports a dead
+    search worker (B10). A callable rather than a queue or an object: the
+    dashboard polls it, and everything it knows about the search stays "a
+    string someone else computed".
+    """
     app = Dash(__name__)
     app.title = "xcsearch"
     app.layout = build_layout(store_path, human)
@@ -138,38 +217,54 @@ def create_app(store_path: str, human=None) -> Dash:
         Output("scrubber", "max"),
         Output("scrubber", "value"),
         Output("history", "figure"),
+        Output("selected", "data"),
+        Output("selection", "children"),
         Input("run", "value"),
         Input("tick", "n_intervals"),
         State("scrubber", "value"),
     )
     def _history(run_id, _tick, current):
+        """The one place a trial index becomes a candidate id (B9).
+
+        Reads the history once per poll and publishes both the figure and the
+        resolved id, so the dependent panels neither re-read it nor re-resolve
+        it -- and cannot resolve it against a different run than this one.
+        """
         if run_id is None:
-            return 0, 0, figures.history_strip([])
+            return 0, 0, figures.history_strip([]), None, ""
         rows = data.history(store_path, run_id)
         if not rows:
-            return 0, 0, figures.history_strip([])
+            return 0, 0, figures.history_strip([]), None, ""
         last = len(rows) - 1
         # A scrubber sitting at the end follows the run; one a person has
         # dragged back stays where they put it.
         value = last if current is None or current >= last else current
-        selected = rows[value]["candidate_id"]
-        return last, value, figures.history_strip(rows, selected)
+        row = rows[value]
+        selected = row["candidate_id"]
+        return (
+            last,
+            value,
+            figures.history_strip(rows, selected),
+            {"run_id": run_id, "trial": value, "candidate_id": selected,
+             "score": row["score"]},
+            # Both identities, together: they are different numbers and the
+            # panels below name the candidate one.
+            f"trial {value} / candidate {selected}",
+        )
 
     @app.callback(
         Output("formula", "children"),
         Output("theta", "children"),
         Output("heatmap", "figure"),
-        Input("run", "value"),
-        Input("scrubber", "value"),
+        Output("heatmap-scope", "children"),
+        Input("selected", "data"),
         Input("baseline", "value"),
         Input("tick", "n_intervals"),
     )
-    def _candidate(run_id, trial, baseline_id, _tick):
-        rows = data.history(store_path, run_id) if run_id is not None else []
-        if not rows or baseline_id is None:
-            return "*no candidate selected*", "", figures.heatmap([])
-        trial = min(trial or 0, len(rows) - 1)
-        candidate_id = rows[trial]["candidate_id"]
+    def _candidate(selected, baseline_id, _tick):
+        if not selected or baseline_id is None:
+            return "*no candidate selected*", "", figures.heatmap([]), ""
+        candidate_id = selected["candidate_id"]
 
         record = data.candidate(store_path, candidate_id) or {}
         baseline = data.candidate(store_path, baseline_id) or {}
@@ -181,7 +276,9 @@ def create_app(store_path: str, human=None) -> Dash:
                 [
                     html.Span(f"candidate {candidate_id}", style={"fontWeight": 600}),
                     html.Span(f"  theta = [{theta}]", style={"color": "#4a525c"}),
-                    html.Span(f"  score = {rows[trial]['score']:.4e}",
+                    # The stored score: the number the optimizer was told
+                    # (D20), not a re-derivation of it.
+                    html.Span(f"  score = {selected['score']:.4e}",
                               style={"color": "#4a525c"}),
                 ],
                 style={"fontSize": "13px", "fontFamily": "monospace"},
@@ -191,6 +288,7 @@ def create_app(store_path: str, human=None) -> Dash:
                 candidate_label=f"candidate {candidate_id}",
                 baseline_label=baseline.get("label") or f"candidate {baseline_id}",
             ),
+            scope_label(data.heatmap_scope(store_path, candidate_id, baseline_id)),
         )
 
     @app.callback(
@@ -198,11 +296,10 @@ def create_app(store_path: str, human=None) -> Dash:
         Output("density", "figure"),
         Output("potential", "figure"),
         Input("system", "value"),
-        Input("run", "value"),
-        Input("scrubber", "value"),
+        Input("selected", "data"),
         Input("tick", "n_intervals"),
     )
-    def _system(system, run_id, trial, _tick):
+    def _system(system, selected, _tick):
         if system is None:
             return "", figures.density_figure(None, [], ""), figures.potential_figure(None, "")
 
@@ -212,10 +309,10 @@ def create_app(store_path: str, human=None) -> Dash:
         arrays = data.density(store_path, system)
 
         metrics_text = ""
-        rows = data.history(store_path, run_id) if run_id is not None else []
-        if rows:
-            trial = min(trial or 0, len(rows) - 1)
-            metrics = data.system_metrics(store_path, rows[trial]["candidate_id"], system)
+        if selected:
+            metrics = data.system_metrics(
+                store_path, selected["candidate_id"], system
+            )
             metrics_text = "   ".join(f"{k} = {v:.4e}" for k, v in sorted(metrics.items()))
 
         return (
@@ -223,6 +320,14 @@ def create_app(store_path: str, human=None) -> Dash:
             figures.density_figure(arrays, wells, system),
             figures.potential_figure(arrays, system),
         )
+
+    @app.callback(
+        Output("worker-status", "children"),
+        Input("tick", "n_intervals"),
+    )
+    def _worker_status(_tick):
+        """The watchdog line (B10). Silent unless there is something to say."""
+        return status() if status is not None else ""
 
     if human is not None:
         @app.callback(

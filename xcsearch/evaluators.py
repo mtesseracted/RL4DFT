@@ -66,6 +66,24 @@ class FrozenDensityEvaluator(Evaluator):
             )
         self.derivative_metrics = bool(with_potentials)
 
+    def describe(self) -> dict:
+        """The protocol entry for this evaluator (D18).
+
+        The metric list is conditional on the systems, which is the point:
+        the same evaluator class over a cache with no potential data is a
+        different measurement protocol, and a run's row has to say which one
+        it was.
+        """
+        metrics = [EXC_SQ_ERROR]
+        if self.derivative_metrics:
+            metrics += [VXC_L2_ERROR, ONE_STEP_DN]
+        return {
+            "evaluator": type(self).__name__,
+            "rung": 1,
+            "metrics": metrics,
+            "n_systems": len(self.systems),
+        }
+
     def evaluate(self, functional: Functional) -> list[EvaluationRecord]:
         records: list[EvaluationRecord] = []
         for system in self.systems:
@@ -156,6 +174,14 @@ class ConditionsEvaluator(Evaluator):
             # each other in every per-metric query the store answers.
             raise ValueError(f"duplicate condition names: {sorted(duplicates)}")
         self.conditions = list(conditions)
+
+    def describe(self) -> dict:
+        """The protocol entry: which conditions, by the metric names they write."""
+        return {
+            "evaluator": type(self).__name__,
+            "rung": 0,
+            "metrics": [c.name for c in self.conditions],
+        }
 
     def evaluate(self, functional: Functional) -> list[EvaluationRecord]:
         return [

@@ -22,6 +22,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from ...ports import Dataset
+from ...provenance import record_content_hash, system_content_hash
 from ...records import SystemRecord
 from .world import Grid, System, v_int, e_hartree as world_e_hartree
 from .solver import solve_2e_singlet
@@ -367,8 +368,25 @@ def build_dataset(out_dir: str = DATA_DIR) -> int:
         vxc_ref = invert_vxc(solved.n, solved.grid, v_ext_array, v_h)
         laplacian = solved.grid.laplacian().tocsr()
 
+        # The content hash (D17), computed here because here is where the
+        # content is made. Stored in the `.npz` beside the arrays it covers,
+        # so a cache file carries its own identity and a store can be asked
+        # "is this the system those evaluations were measured against?"
+        # without re-deriving anything.
+        digest = system_content_hash(
+            x=solved.grid.x,
+            w=solved.grid.w,
+            n_ref=solved.n,
+            e_xc_exact=solved.e_xc_exact,
+            v_ext=v_ext_array,
+            v_hartree=v_h,
+            vxc_ref=vxc_ref,
+            laplacian=laplacian,
+        )
+
         np.savez(
             path,
+            content_hash=digest,
             x=solved.grid.x,
             w=solved.grid.w,
             n=solved.n,
@@ -436,29 +454,57 @@ def load_frozen(path: str = DATA_DIR) -> list[SystemRecord]:
             if "lap_data" in stored
             else None
         )
-        records.append(
-            SystemRecord(
-                name=str(d["name"]),
-                x=d["x"],
-                w=d["w"],
-                n_ref=d["n"],
-                e_exact=float(d["E_exact"]),
-                e_xc_exact=float(d["E_xc_exact"]),
-                regime=str(d["regime_tag"]),
-                split=str(d["split"]),
-                world=WORLD,
-                wells=tuple(
-                    (float(z), float(x)) for z, x in zip(d["well_z"], d["well_x"])
-                ),
-                n_elec=int(d["n_elec"]),
-                npz_path=_repo_relative(file),
-                laplacian=laplacian,
-                v_ext=d["v_ext"] if "v_ext" in stored else None,
-                v_hartree=d["v_hartree"] if "v_hartree" in stored else None,
-                vxc_ref=d["vxc_ref"] if "vxc_ref" in stored else None,
-            )
+        record = SystemRecord(
+            name=str(d["name"]),
+            x=d["x"],
+            w=d["w"],
+            n_ref=d["n"],
+            e_exact=float(d["E_exact"]),
+            e_xc_exact=float(d["E_xc_exact"]),
+            regime=str(d["regime_tag"]),
+            split=str(d["split"]),
+            world=WORLD,
+            wells=tuple(
+                (float(z), float(x)) for z, x in zip(d["well_z"], d["well_x"])
+            ),
+            n_elec=int(d["n_elec"]),
+            npz_path=_repo_relative(file),
+            laplacian=laplacian,
+            v_ext=d["v_ext"] if "v_ext" in stored else None,
+            v_hartree=d["v_hartree"] if "v_hartree" in stored else None,
+            vxc_ref=d["vxc_ref"] if "vxc_ref" in stored else None,
         )
+        # The hash the build wrote, or the same arithmetic over the same
+        # arrays for a cache built before 2B.1 (D17). Recomputing rather than
+        # refusing is deliberate: an old cache's *content* is not in doubt,
+        # only whether anyone had written its identity down yet.
+        record.content_hash = (
+            str(d["content_hash"]) if "content_hash" in stored
+            else record_content_hash(record)
+        )
+        records.append(record)
     return records
+
+
+def protocol() -> dict:
+    """This world's measurement context, as data for a ``protocols`` row (D18).
+
+    Every constant here determines stored numbers: change the grid spacing or
+    the density floor and every ``e_xc_exact`` in the cache moves. Stage 2 left
+    them as code constants only, which is assumption 2 of the audit -- the
+    fix is not to freeze them (they *should* move; changing them is what a
+    research instrument is for) but to record which values a run used.
+
+    Handed over as a plain dict so the store still never imports a world.
+    """
+    return {
+        "world": WORLD,
+        "dx": DX,
+        "margin": MARGIN,
+        "n_floor": _N_FLOOR,
+        "vxc_floor": VXC_FLOOR,
+        "vxc_anchor_window": list(VXC_ANCHOR_WINDOW),
+    }
 
 
 class Exp1dDataset(Dataset):

@@ -1,21 +1,36 @@
-"""The record store: SQLite from the start (D13).
+"""The record store: SQLite from the start (D13), versioned from 2B.1 (D17).
 
-Four tables, and the shape of each is a decision:
+The tables, and the shape of each is a decision:
 
 * ``runs`` -- one row per search run. Opening a run is the entire run API:
   no status lifecycle, no config blob. One store holds many runs, which is
   what makes optimizer comparison (2.6) a GROUP BY and a human session just a
-  run whose optimizer is ``'human'``.
+  run whose optimizer is ``'human'``. A run points at the ``protocol`` it was
+  measured under.
 * ``candidates`` -- one row per proposal, with everything about it *derived
   from the port*: ``fingerprint()`` and ``to_latex()``. No component reaches
   past ``Functional`` for a theta, this one included.
 * ``evaluations`` -- **long format**, one row per scalar. A wide table would
   need a migration every time an evaluator learns a new metric; long format
-  turns the feature-4 heatmap into a single GROUP BY and costs nothing.
-* ``systems`` -- the descriptive fields of a ``SystemRecord``, upserted by
-  name. ``regime`` and ``split`` live here, normalized: the store drops the
-  denormalized copies each ``EvaluationRecord`` carries and reconstitutes them
-  by join on read. It is the only component that knows both shapes.
+  turns the feature-4 heatmap into a single GROUP BY and costs nothing. Each
+  row names a *system version*, not a system name.
+* ``systems`` -- **append-only** (D17). A surrogate id is the key and
+  ``(name, content_hash)`` is unique, so a rebuilt cache whose numbers moved
+  inserts a new row and leaves every earlier evaluation pointing at the system
+  it was actually measured against. ``register_systems`` is
+  insert-if-new-version: it cannot overwrite and it cannot fail.
+* ``protocols`` -- one row per distinct measurement configuration (D18):
+  grid parameters, floors, the anchor window, the evaluator stack and its
+  metric list, library versions, the git commit. Hash-keyed, written once,
+  about a kilobyte.
+
+Why versioning rather than policing: Stage 2's schema consulted mutable fields
+at read time to interpret stored numbers, so re-registering a system silently
+re-scored evaluations already written (B8, and the worked demonstration in
+STAGE2B.md). The rule that replaced it -- *any field consulted at read time to
+interpret a stored measurement must be either immutable or versioned* -- is
+structural here rather than enforced by convention: there is no UPDATE
+statement in this module.
 
 Density-sized arrays never enter SQLite -- they stay in the ``.npz`` cache and
 the store keeps paths. WAL mode, so a live-tailing reader (the 2.7 dashboard)
@@ -32,6 +47,12 @@ from datetime import datetime, timezone
 import numpy as np
 
 from .ports import Functional, RecordStore
+from .provenance import (
+    canonical_json,
+    population_hash,
+    protocol_hash,
+    record_content_hash,
+)
 from .records import EvaluationRecord, SystemRecord
 
 # The LDA baseline is reference furniture: it belongs to no run, and the
@@ -39,36 +60,80 @@ from .records import EvaluationRecord, SystemRecord
 LDA_LABEL = "LDA"
 
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS runs (
+CREATE TABLE IF NOT EXISTS protocols (
     id         INTEGER PRIMARY KEY,
-    optimizer  TEXT NOT NULL,
-    started_at TEXT NOT NULL,
-    notes      TEXT
+    hash       TEXT NOT NULL UNIQUE,
+    json       TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS runs (
+    id            INTEGER PRIMARY KEY,
+    optimizer     TEXT NOT NULL,
+    started_at    TEXT NOT NULL,
+    notes         TEXT,
+    protocol_id   INTEGER REFERENCES protocols(id),
+    population_id INTEGER REFERENCES populations(id)
+);
+
+-- Append-only (D17). The surrogate id is what evaluations point at; the
+-- (name, content_hash) pair is what makes a rebuild insert instead of
+-- overwrite. `regime` and `split` are absent on purpose: they are assignment,
+-- not identity, and they live in `population_systems` (D19).
 CREATE TABLE IF NOT EXISTS systems (
-    name       TEXT PRIMARY KEY,
-    world      TEXT NOT NULL,
-    wells_json TEXT NOT NULL,
-    n_elec     INTEGER NOT NULL,
-    regime     TEXT NOT NULL,
-    split      TEXT NOT NULL,
-    npz_path   TEXT
+    id           INTEGER PRIMARY KEY,
+    name         TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    world        TEXT NOT NULL,
+    wells_json   TEXT NOT NULL,
+    n_elec       INTEGER NOT NULL,
+    npz_path     TEXT,
+    created_at   TEXT NOT NULL,
+    UNIQUE (name, content_hash)
 );
 
+-- The population: *among what* a number was measured (D19). A table rather
+-- than a fingerprint on the run, because the difference between two
+-- populations is then visible and their intersection is an ordinary join --
+-- which is what a cross-population comparison has to state to mean anything.
+CREATE TABLE IF NOT EXISTS populations (
+    id         INTEGER PRIMARY KEY,
+    hash       TEXT NOT NULL UNIQUE,
+    n_systems  INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS population_systems (
+    population_id     INTEGER NOT NULL REFERENCES populations(id),
+    system_version_id INTEGER NOT NULL REFERENCES systems(id),
+    split             TEXT,
+    regime            TEXT,
+    PRIMARY KEY (population_id, system_version_id)
+);
+
+-- `population_id` on a candidate, not only on its run: the LDA baseline
+-- belongs to no run (D13) and is still a measurement over a stated set. It is
+-- also what makes a reduction scopeable without a join through `runs`.
+-- `score` is the number `tell()` received, recorded once and never
+-- re-derived (D20). The RankingPolicy is the canonical definition; this
+-- column is its output, written in the same transaction as the records it
+-- was computed from. NULL only for a candidate stored without one -- a
+-- driver with no policy, a test.
 CREATE TABLE IF NOT EXISTS candidates (
-    id          INTEGER PRIMARY KEY,
-    run_id      INTEGER REFERENCES runs(id),
-    label       TEXT,
-    fingerprint TEXT NOT NULL,
-    form_latex  TEXT NOT NULL,
-    theta_json  TEXT,
-    created_at  TEXT NOT NULL
+    id            INTEGER PRIMARY KEY,
+    run_id        INTEGER REFERENCES runs(id),
+    population_id INTEGER REFERENCES populations(id),
+    label         TEXT,
+    fingerprint   TEXT NOT NULL,
+    form_latex    TEXT NOT NULL,
+    theta_json    TEXT,
+    score         REAL,
+    created_at    TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS evaluations (
     candidate_id INTEGER NOT NULL REFERENCES candidates(id),
-    system       TEXT REFERENCES systems(name),
+    system_id    INTEGER REFERENCES systems(id),
     rung         INTEGER NOT NULL,
     metric       TEXT NOT NULL,
     value        REAL NOT NULL
@@ -91,6 +156,8 @@ CREATE TABLE IF NOT EXISTS duplicate_index_meta (
 CREATE INDEX IF NOT EXISTS evaluations_candidate
     ON evaluations(candidate_id);
 CREATE INDEX IF NOT EXISTS candidates_run ON candidates(run_id);
+CREATE INDEX IF NOT EXISTS population_systems_lookup
+    ON population_systems(population_id, system_version_id);
 -- The lookup index for near(): (form_key, bucket_hash) is the whole query, so
 -- a bucket probe is a b-tree search rather than a scan of every candidate
 -- ever proposed. That is the property 2.5 acceptance (c) asserts.
@@ -105,19 +172,55 @@ CREATE INDEX IF NOT EXISTS duplicate_buckets_lookup
 # `system IS NULL` by contract, and an inner join would drop them silently --
 # the violated-conditions column would simply not appear, which is the worst
 # way for a dashboard to be wrong.
+#
+# `regime` comes from each candidate's *own* population (D19), not from a
+# global dimension table: the bin a number falls in is part of how it was
+# interpreted when it was taken, and Stage 2 reconstituted it by join against
+# whatever the table said today (B8).
+#
+# The `:restrict` clause is the cross-population comparison, made explicit.
+# When the two candidates were measured over different populations, comparing
+# their means over their own sets compares two different questions; the query
+# then restricts to the systems both populations contain, and the caller is
+# expected to say so (`heatmap_scope`). Rung-0 rows have no system and are
+# never restricted -- a condition is measured against no population at all.
 HEATMAP_SQL = """
-SELECT COALESCE(s.regime, 'conditions') AS bin,
-       e.metric                         AS metric,
+SELECT COALESCE(ps.regime, 'conditions') AS bin,
+       e.metric                          AS metric,
        AVG(CASE WHEN e.candidate_id = :candidate THEN e.value END) AS value,
        AVG(CASE WHEN e.candidate_id = :baseline  THEN e.value END) AS baseline,
        AVG(CASE WHEN e.candidate_id = :candidate THEN e.value END)
      - AVG(CASE WHEN e.candidate_id = :baseline  THEN e.value END) AS delta
   FROM evaluations e
-  LEFT JOIN systems s ON s.name = e.system
+  JOIN candidates c ON c.id = e.candidate_id
+  LEFT JOIN population_systems ps
+         ON ps.population_id = c.population_id
+        AND ps.system_version_id = e.system_id
  WHERE e.candidate_id IN (:candidate, :baseline)
+   AND (e.system_id IS NULL OR :restrict = 0 OR e.system_id IN (
+            SELECT a.system_version_id FROM population_systems a
+             WHERE a.population_id = (SELECT population_id FROM candidates
+                                       WHERE id = :candidate)
+            INTERSECT
+            SELECT b.system_version_id FROM population_systems b
+             WHERE b.population_id = (SELECT population_id FROM candidates
+                                       WHERE id = :baseline)))
  GROUP BY bin, e.metric
  ORDER BY bin, e.metric
 """
+
+# What a store built before 2B.1 looks like, and how to say so. There is no
+# migration: the old schema cannot express which version of a system a row was
+# measured against, so inventing one would mean guessing exactly the fact the
+# stage exists to stop guessing.
+_LEGACY_SCHEMA_MESSAGE = (
+    "this store predates Stage 2B: its `systems` table is keyed by name and "
+    "its `evaluations` rows name a system rather than a system *version*. "
+    "There is no migration, because the missing fact -- which version of a "
+    "system each stored number was measured against -- is not recoverable "
+    "from the rows. Move the file aside and start a new store; the old one "
+    "stays readable with any Stage 2 checkout."
+)
 
 
 def _now() -> str:
@@ -151,8 +254,30 @@ class SQLiteRecordStore(RecordStore):
             # WAL: readers never block the writer, so the dashboard can tail a
             # running search. Meaningless for :memory:, which has one connection.
             self.connection.execute("PRAGMA journal_mode=WAL")
+        self._refuse_legacy_schema()
         self.connection.executescript(_SCHEMA)
         self.connection.commit()
+        # population id -> {system name: version id}. A population is frozen,
+        # so this is a cache of an immutable fact rather than a shadow copy of
+        # mutable state -- see `_population_system_ids`.
+        self._population_systems: dict[int, dict[str, int]] = {}
+        # Runs whose id has been reserved but whose row is not written yet
+        # (B1): id -> (optimizer, started_at, notes, protocol_id,
+        # population_id). See `begin_run`.
+        self._pending_runs: dict[int, tuple] = {}
+
+    def _refuse_legacy_schema(self) -> None:
+        """Fail on a pre-2B store rather than half-creating a new schema.
+
+        ``CREATE TABLE IF NOT EXISTS`` is a no-op against an old table, so
+        without this check a Stage 2 store would open cleanly and then fail
+        one INSERT at a time, deep inside a search.
+        """
+        row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'systems'"
+        ).fetchone()
+        if row is not None and "content_hash" not in (row["sql"] or ""):
+            raise ValueError(_LEGACY_SCHEMA_MESSAGE)
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:
@@ -165,61 +290,293 @@ class SQLiteRecordStore(RecordStore):
         self.close()
 
     # -- writes ------------------------------------------------------------
-    def begin_run(self, label: str, notes: str | None = None) -> int:
-        """Open a run named after the optimizer that will drive it."""
+    def register_protocol(self, payload: dict) -> int:
+        """Insert-if-new the measurement configuration a run was made under (D18).
+
+        Hash-keyed, so the hundredth run under an unchanged configuration adds
+        no row and every one of them points at the same protocol. What goes in
+        the payload is the composition root's call -- it is the only place that
+        can see the grid constants, the evaluator stack and the libraries at
+        once (see ``provenance.protocol_payload``).
+        """
+        digest = protocol_hash(payload)
+        existing = self.connection.execute(
+            "SELECT id FROM protocols WHERE hash = ?", (digest,)
+        ).fetchone()
+        if existing is not None:
+            return int(existing["id"])
         cursor = self.connection.execute(
-            "INSERT INTO runs (optimizer, started_at, notes) VALUES (?, ?, ?)",
-            (label, _now(), notes),
+            "INSERT INTO protocols (hash, json, created_at) VALUES (?, ?, ?)",
+            (digest, canonical_json(payload), _now()),
         )
         self.connection.commit()
         return int(cursor.lastrowid)
 
-    def register_systems(self, systems: list[SystemRecord]) -> None:
-        """Idempotent upsert keyed by name. Serializes fields, never a world."""
+    def begin_run(
+        self,
+        label: str,
+        notes: str | None = None,
+        protocol_id: int | None = None,
+        population_id: int | None = None,
+    ) -> int:
+        """Open a run named after the optimizer that will drive it.
+
+        **The row appears when the first candidate does** (B1). Launching the
+        dashboard and closing the tab used to leave a zero-candidate run in
+        the store, which the run list then offered forever; the store should
+        contain searches that *happened*. The id is reserved here so callers
+        that want to print it can (``serve_human_session`` does), and the
+        INSERT is carried out inside the first ``add`` -- one transaction with
+        the candidate, so an interrupt cannot leave a run row with nothing in
+        it or a candidate pointing at a run that is not there.
+
+        Reserving the id assumes one writer per store, which is what the whole
+        module already assumes (see ``check_same_thread`` above). A colliding
+        id fails loudly on the INSERT rather than overwriting anything.
+
+        ``protocol_id`` and ``population_id`` are optional so a throwaway run
+        (a test, a REPL) still opens in one call, but a run that means
+        anything later has both: they are the only record of *how* and *among
+        what* its numbers were produced, and neither is recoverable
+        afterwards.
+        """
+        row = self.connection.execute(
+            "SELECT COALESCE(MAX(id), 0) AS last FROM runs"
+        ).fetchone()
+        run_id = max(int(row["last"]), *self._pending_runs) + 1 if self._pending_runs \
+            else int(row["last"]) + 1
+        # started_at is stamped now, not at the first candidate: the run was
+        # opened when the person opened it, whatever the search did next.
+        self._pending_runs[run_id] = (
+            label, _now(), notes, protocol_id, population_id
+        )
+        return run_id
+
+    def _materialize_run(self, run_id: int | None) -> None:
+        """Write a reserved run row, once, on its first candidate (B1)."""
+        if run_id is None or run_id not in self._pending_runs:
+            return
+        label, started_at, notes, protocol_id, population_id = self._pending_runs.pop(
+            run_id
+        )
+        self.connection.execute(
+            "INSERT INTO runs (id, optimizer, started_at, notes, protocol_id, "
+            "population_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (run_id, label, started_at, notes, protocol_id, population_id),
+        )
+
+    def run_population(self, run_id: int | None) -> int | None:
+        """The population a run was opened over, or ``None``.
+
+        Reads the reservation as well as the table: a run that has not written
+        a candidate yet still knows what it was opened over, and its first
+        candidate has to be stored against that population.
+        """
+        if run_id is None:
+            return None
+        if run_id in self._pending_runs:
+            return self._pending_runs[run_id][4]
+        row = self.connection.execute(
+            "SELECT population_id FROM runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        return None if row is None or row["population_id"] is None else int(
+            row["population_id"]
+        )
+
+    def register_systems(self, systems: list[SystemRecord]) -> dict[str, int]:
+        """Insert-if-new-version, keyed by ``(name, content_hash)`` (D17).
+
+        Returns name -> system version id for exactly the systems handed in,
+        which is what the caller needs to know *which* versions this run is
+        about to measure against.
+
+        Three properties, and they are the whole of D17:
+
+        * **Relaunching over an unchanged cache inserts nothing.** The hashes
+          match, the existing ids come back, and the store is byte-identical.
+        * **A content-changed system creates a new row.** Older evaluations
+          keep pointing at the old version and keep reading back identically:
+          nothing they were measured against has moved, because rows do not
+          move.
+        * **The call cannot fail.** Immutability here is not a refusal -- the
+          old objection to append-only systems was that it would make
+          registration fallible, and versioning is what dissolves it.
+
+        A record with no ``content_hash`` gets one computed from its arrays,
+        so a cache built before 2B.1 registers exactly like a fresh one.
+        """
         rows = [
             (
                 s.name,
+                s.content_hash or record_content_hash(s),
                 s.world,
                 json.dumps([[float(z), float(x)] for z, x in s.wells]),
                 int(s.n_elec),
-                s.regime,
-                s.split,
                 s.npz_path,
+                _now(),
             )
             for s in systems
         ]
         self.connection.executemany(
             """
-            INSERT INTO systems (name, world, wells_json, n_elec, regime, split, npz_path)
+            INSERT INTO systems
+                (name, content_hash, world, wells_json, n_elec, npz_path,
+                 created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(name) DO UPDATE SET
-                world=excluded.world, wells_json=excluded.wells_json,
-                n_elec=excluded.n_elec, regime=excluded.regime,
-                split=excluded.split, npz_path=excluded.npz_path
+            ON CONFLICT (name, content_hash) DO NOTHING
             """,
             rows,
         )
         self.connection.commit()
+
+        ids: dict[str, int] = {}
+        for name, digest, *_ in rows:
+            row = self.connection.execute(
+                "SELECT id FROM systems WHERE name = ? AND content_hash = ?",
+                (name, digest),
+            ).fetchone()
+            ids[name] = int(row["id"])
+        return ids
+
+    def open_population(self, systems: list[SystemRecord]) -> int:
+        """Register these systems and freeze the set they form (D19).
+
+        The population is *among what* every number this run produces will be
+        averaged: which system versions, each with the split and regime it was
+        assigned *here*. Hash-keyed like a protocol, so two runs over the same
+        cache share one population row and comparing them needs no argument
+        about whether they are comparable.
+
+        This is the call the composition root makes instead of
+        ``register_systems``. The split and regime enter the population's hash
+        even though they stay out of a system's content hash, and that
+        asymmetry is the fix: a rebuild that reshuffles splits leaves every
+        system version untouched and produces a *new population*, so the old
+        run's numbers keep the meaning they were taken with and the new run
+        gets its own baseline (B8).
+        """
+        ids = self.register_systems(systems)
+        members = [(ids[s.name], s.split, s.regime) for s in systems]
+        digest = population_hash(members)
+
+        existing = self.connection.execute(
+            "SELECT id FROM populations WHERE hash = ?", (digest,)
+        ).fetchone()
+        if existing is not None:
+            return int(existing["id"])
+
+        # One transaction: a population row without its members would be a set
+        # that claims a size it cannot enumerate, and every reduction scoped to
+        # it would silently be a reduction over nothing.
+        with self.connection:
+            cursor = self.connection.execute(
+                "INSERT INTO populations (hash, n_systems, created_at) "
+                "VALUES (?, ?, ?)",
+                (digest, len(members), _now()),
+            )
+            population_id = int(cursor.lastrowid)
+            self.connection.executemany(
+                """
+                INSERT INTO population_systems
+                    (population_id, system_version_id, split, regime)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (population_id, version_id, split, regime)
+                    for version_id, split, regime in members
+                ],
+            )
+        return population_id
+
+    def _population_system_ids(self, population_id: int | None) -> dict[str, int]:
+        """Name -> system version id *within one population*.
+
+        Names are unique inside a population, so resolution here is
+        unambiguous by construction -- which is the reason records name a
+        system and candidates name a population rather than the other way
+        round. Cached because the search loop resolves the same names on every
+        trial, and a population is frozen.
+        """
+        if population_id is None:
+            return {}
+        if population_id not in self._population_systems:
+            rows = self.connection.execute(
+                """
+                SELECT s.name AS name, s.id AS id
+                  FROM population_systems ps
+                  JOIN systems s ON s.id = ps.system_version_id
+                 WHERE ps.population_id = ?
+                """,
+                (population_id,),
+            )
+            self._population_systems[population_id] = {
+                row["name"]: int(row["id"]) for row in rows
+            }
+        return self._population_systems[population_id]
+
+    def _system_id(self, name: str, population_id: int | None) -> int:
+        """The version id a record's system name refers to, in this population.
+
+        An unresolvable name is an error rather than a guess: once a system
+        has two versions, "the system called ``atom_Z1``" has two right
+        answers, and picking the newest would be B8 committed in a new place.
+        """
+        ids = self._population_system_ids(population_id)
+        if name in ids:
+            return ids[name]
+        if population_id is None:
+            raise ValueError(
+                f"a record about system {name!r} was stored against no "
+                "population: open one with open_population(systems) and pass "
+                "its id (a candidate's population is what its numbers are a "
+                "mean over)"
+            )
+        raise ValueError(
+            f"system {name!r} is not in population {population_id}: this "
+            "candidate was evaluated over systems the run was not opened "
+            "over, so its records cannot be interpreted as a measurement "
+            "over that population"
+        )
 
     def seed_baseline(
         self,
         functional: Functional,
         records: list[EvaluationRecord] | None = None,
         label: str = LDA_LABEL,
+        population_id: int | None = None,
+        score: float | None = None,
     ) -> int:
         """Store a labelled reference candidate that belongs to no run.
 
-        Idempotent: the label is the identity, so re-opening a store does not
-        accumulate baselines. Pass the baseline's records too -- a baseline
-        with no measurements makes the heatmap's baseline column empty, which
-        is a comparison against nothing.
+        Idempotent on **(label, population)**, not on the label alone (D19).
+        That is the repair for the live incident: a baseline is a measurement
+        over a stated set of systems, so a store seeded over 51 systems and
+        then relaunched over 63 gets a *second* baseline rather than keeping
+        the first one and quietly comparing 51 systems' worth of mean against
+        63. The old idempotence closed the store to a second baseline exactly
+        when a second baseline was the right answer.
+
+        Pass the baseline's records too -- a baseline with no measurements
+        makes the heatmap's baseline column empty, which is a comparison
+        against nothing -- and its ``score`` through the same policy the run
+        uses (D20): the baseline is the number every candidate is read
+        against, so a baseline scored by a different definition is a
+        comparison against a different question.
         """
         existing = self.connection.execute(
-            "SELECT id FROM candidates WHERE label = ?", (label,)
+            "SELECT id FROM candidates WHERE label = ? AND population_id IS ?",
+            (label, population_id),
         ).fetchone()
         if existing is not None:
             return int(existing["id"])
-        return self.add(functional, list(records or []), run_id=None, label=label)
+        return self.add(
+            functional,
+            list(records or []),
+            run_id=None,
+            label=label,
+            population_id=population_id,
+            score=score,
+        )
 
     def add(
         self,
@@ -227,8 +584,27 @@ class SQLiteRecordStore(RecordStore):
         records: list[EvaluationRecord],
         run_id: int | None,
         label: str | None = None,
+        population_id: int | None = None,
+        score: float | None = None,
     ) -> int:
-        """Store one candidate and its records; returns the candidate id."""
+        """Store one candidate, its records and its score; returns the id.
+
+        The candidate's population defaults to its run's: a run is opened over
+        a population and every candidate in it is measured over that same set,
+        which is what makes the run's history a comparable series at all.
+
+        ``score`` is exactly the number the ``RankingPolicy`` returned and the
+        optimizer was told (D20). It is written here, in the same transaction
+        as the records, because it is otherwise unrecoverable: SQLite's
+        row-order ``AVG`` and numpy's pairwise mean can disagree in the last
+        bits and flip a near-tie's "best", and a policy that is not a mean at
+        all cannot be re-derived from the rows by any query.
+        """
+        if population_id is None:
+            population_id = self.run_population(run_id)
+        # The run row, if this is its first candidate (B1). Inside the same
+        # transaction as the candidate below.
+        self._materialize_run(run_id)
         form_key, vector = functional.fingerprint()
         vector = np.asarray(vector, dtype=float)
         theta_json = json.dumps([float(v) for v in vector]) if vector.size else None
@@ -236,10 +612,14 @@ class SQLiteRecordStore(RecordStore):
         cursor = self.connection.execute(
             """
             INSERT INTO candidates
-                (run_id, label, fingerprint, form_latex, theta_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (run_id, population_id, label, fingerprint, form_latex,
+                 theta_json, score, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (run_id, label, form_key, functional.to_latex(), theta_json, _now()),
+            (
+                run_id, population_id, label, form_key, functional.to_latex(),
+                theta_json, None if score is None else float(score), _now(),
+            ),
         )
         candidate_id = int(cursor.lastrowid)
 
@@ -249,25 +629,151 @@ class SQLiteRecordStore(RecordStore):
             record.candidate_id = candidate_id
         self.connection.executemany(
             """
-            INSERT INTO evaluations (candidate_id, system, rung, metric, value)
+            INSERT INTO evaluations (candidate_id, system_id, rung, metric, value)
             VALUES (?, ?, ?, ?, ?)
             """,
-            # regime and split are dropped here on purpose: they live
-            # normalized in `systems` and come back by join.
+            # The system *name* is resolved to a version id within this
+            # candidate's population (D17, D19): a row records which system
+            # version this number was measured against, not which name it went
+            # by at the time. regime and split are dropped as before -- they
+            # live in the population and come back by join.
             [
-                (candidate_id, r.system, int(r.rung), r.metric, float(r.value))
+                (
+                    candidate_id,
+                    self._system_id(r.system, population_id)
+                    if r.system is not None else None,
+                    int(r.rung),
+                    r.metric,
+                    float(r.value),
+                )
                 for r in records
             ],
         )
         self.connection.commit()
         return candidate_id
 
+    def delete_run(self, run_id: int) -> int:
+        """Delete a run and everything that belongs to it. Returns candidates removed.
+
+        Cascades in dependency order -- ``duplicate_buckets`` ->
+        ``evaluations`` -> ``candidates`` -> ``runs`` -- because no ``ON
+        DELETE CASCADE`` is declared and SQLite does not enforce foreign keys
+        by default anyway (B2). One transaction, so an interrupt cannot leave
+        a half-cascaded store: orphaned evaluation rows pointing at a
+        candidate that no longer exists are worse than the run staying.
+
+        Two things it deliberately does not touch:
+
+        * **``run_id IS NULL`` candidates.** The LDA baseline belongs to no
+          run and is reference furniture for every other run in the store.
+          The risk lives in any future bulk variant (``delete_runs_before``,
+          "prune empty runs"), where a ``WHERE run_id NOT IN (...)`` would
+          sweep the baselines up silently -- so the invariant is stated here
+          for it to inherit: *a delete keyed by run never matches a candidate
+          with no run.*
+        * **Populations and protocols.** They are shared by construction --
+          hash-keyed, so two runs over the same cache point at the same rows
+          -- and deleting one run's would delete another run's. They are
+          kilobytes, and a population nothing references any more is a
+          historical fact about a store, not garbage.
+        """
+        with self.connection:  # one transaction; rolls back on any exception
+            self._pending_runs.pop(run_id, None)
+            candidates = [
+                int(row["id"])
+                for row in self.connection.execute(
+                    "SELECT id FROM candidates WHERE run_id = ?", (run_id,)
+                )
+            ]
+            if candidates:
+                marks = ",".join("?" for _ in candidates)
+                self.connection.execute(
+                    f"DELETE FROM duplicate_buckets WHERE candidate_id IN ({marks})",
+                    candidates,
+                )
+                self.connection.execute(
+                    f"DELETE FROM evaluations WHERE candidate_id IN ({marks})",
+                    candidates,
+                )
+            # `run_id = ?` and never `run_id IS NULL`: see the docstring.
+            self.connection.execute(
+                "DELETE FROM candidates WHERE run_id = ?", (run_id,)
+            )
+            self.connection.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+        return len(candidates)
+
     # -- reads -------------------------------------------------------------
+    def candidate_population(self, candidate_id: int) -> int | None:
+        row = self.connection.execute(
+            "SELECT population_id FROM candidates WHERE id = ?", (candidate_id,)
+        ).fetchone()
+        return None if row is None or row["population_id"] is None else int(
+            row["population_id"]
+        )
+
+    def shared_systems(self, first: int | None, second: int | None) -> int:
+        """How many system versions two populations have in common (D19).
+
+        An ordinary join, which is the argument for the junction table: with a
+        population reduced to a fingerprint hash this question would have no
+        answer at all, only "same" or "different".
+        """
+        if first is None or second is None:
+            return 0
+        if first == second:
+            row = self.connection.execute(
+                "SELECT n_systems AS c FROM populations WHERE id = ?", (first,)
+            ).fetchone()
+            return int(row["c"]) if row else 0
+        row = self.connection.execute(
+            """
+            SELECT COUNT(*) AS c FROM (
+                SELECT system_version_id FROM population_systems WHERE population_id = ?
+                INTERSECT
+                SELECT system_version_id FROM population_systems WHERE population_id = ?
+            )
+            """,
+            (first, second),
+        ).fetchone()
+        return int(row["c"])
+
+    def heatmap_scope(self, candidate_id: int, baseline_id: int) -> dict:
+        """What population a heatmap comparison is over, and how wide it is.
+
+        Returned beside the rows rather than folded into them because it is a
+        statement *about* the comparison: two candidates measured over
+        different populations can still be compared, but only over the systems
+        both were measured on, and a reader has to be told that is what they
+        are looking at ("over the N shared systems").
+        """
+        candidate_population = self.candidate_population(candidate_id)
+        baseline_population = self.candidate_population(baseline_id)
+        same = candidate_population == baseline_population
+        return {
+            "candidate_population": candidate_population,
+            "baseline_population": baseline_population,
+            "same_population": same,
+            "shared_systems": self.shared_systems(
+                candidate_population, baseline_population
+            ),
+        }
+
     def heatmap(self, candidate_id: int, baseline_id: int) -> list[sqlite3.Row]:
-        """The feature-4 heatmap, as one statement (2.2 acceptance (b))."""
+        """The feature-4 heatmap, as one statement (2.2 acceptance (b)).
+
+        Restricted to the shared systems when the two candidates come from
+        different populations -- see ``heatmap_scope`` for the count a caller
+        should print beside it.
+        """
+        scope = self.heatmap_scope(candidate_id, baseline_id)
         return list(
             self.connection.execute(
-                HEATMAP_SQL, {"candidate": candidate_id, "baseline": baseline_id}
+                HEATMAP_SQL,
+                {
+                    "candidate": candidate_id,
+                    "baseline": baseline_id,
+                    "restrict": 0 if scope["same_population"] else 1,
+                },
             )
         )
 
@@ -284,10 +790,14 @@ class SQLiteRecordStore(RecordStore):
         """Records as the evaluator emitted them: regime and split rejoined."""
         rows = self.connection.execute(
             """
-            SELECT e.candidate_id, e.system, e.rung, e.metric, e.value,
-                   s.regime, s.split
+            SELECT e.candidate_id, s.name AS system, e.rung, e.metric, e.value,
+                   ps.regime AS regime, ps.split AS split
               FROM evaluations e
-              LEFT JOIN systems s ON s.name = e.system
+              JOIN candidates c ON c.id = e.candidate_id
+              LEFT JOIN systems s ON s.id = e.system_id
+              LEFT JOIN population_systems ps
+                     ON ps.population_id = c.population_id
+                    AND ps.system_version_id = e.system_id
              WHERE e.candidate_id = ?
              ORDER BY e.rowid
             """,
@@ -306,20 +816,39 @@ class SQLiteRecordStore(RecordStore):
             for row in rows
         ]
 
-    def best(self, run_id: int, metric: str, rung: int = 1, split: str = "train"):
-        """The lowest mean ``metric`` in a run: (candidate_id, score) or None."""
+    def population_members(self, population_id: int) -> list[sqlite3.Row]:
+        """The systems a population is made of, with their assignment (D19)."""
+        return list(
+            self.connection.execute(
+                """
+                SELECT s.id AS id, s.name AS name, s.content_hash AS content_hash,
+                       ps.split AS split, ps.regime AS regime
+                  FROM population_systems ps
+                  JOIN systems s ON s.id = ps.system_version_id
+                 WHERE ps.population_id = ?
+                 ORDER BY s.name
+                """,
+                (population_id,),
+            )
+        )
+
+    def best(self, run_id: int):
+        """The best candidate of a run: ``(candidate_id, score)`` or ``None``.
+
+        ``ORDER BY score``, and nothing else (D20). This used to re-derive the
+        score with its own ``AVG`` -- a third independent definition of what
+        "best" meant, beside the policy's and the dashboard's, with nothing
+        enforcing agreement. The stored score is the policy's own output, so
+        there is now one definition and two readers.
+        """
         row = self.connection.execute(
             """
-            SELECT e.candidate_id AS id, AVG(e.value) AS score
-              FROM evaluations e
-              JOIN candidates c ON c.id = e.candidate_id
-              LEFT JOIN systems s ON s.name = e.system
-             WHERE c.run_id = ? AND e.rung = ? AND e.metric = ? AND s.split = ?
-             GROUP BY e.candidate_id
-             ORDER BY score ASC
+            SELECT id, score FROM candidates
+             WHERE run_id = ? AND score IS NOT NULL
+             ORDER BY score ASC, id ASC
              LIMIT 1
             """,
-            (run_id, rung, metric, split),
+            (run_id,),
         ).fetchone()
         return (int(row["id"]), float(row["score"])) if row else None
 

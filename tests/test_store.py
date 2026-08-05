@@ -62,13 +62,14 @@ def _stack(systems, store, run_id, seed=0):
 def finished_run(tmp_path, systems):
     """A store holding one seeded baseline and one finished N-trial run."""
     store = SQLiteRecordStore(str(tmp_path / "records.sqlite"))
-    store.register_systems(systems)
+    population = store.open_population(systems)
     form = LocalAnsatzForm()
     lda = form.build(LDA_THETA)
     baseline_id = store.seed_baseline(
-        lda, FrozenDensityEvaluator(systems).evaluate(lda)
+        lda, FrozenDensityEvaluator(systems).evaluate(lda),
+        population_id=population,
     )
-    run_id = store.begin_run("optuna_tpe", notes="test")
+    run_id = store.begin_run("optuna_tpe", notes="test", population_id=population)
     result = _stack(systems, store, run_id).run(TRIALS)
     yield store, run_id, baseline_id, result
     store.close()
@@ -96,7 +97,12 @@ def test_every_candidate_has_the_same_evaluation_shape(finished_run):
         return {
             (r["system"], r["metric"])
             for r in store.connection.execute(
-                "SELECT system, metric FROM evaluations WHERE candidate_id = ?",
+                """
+                SELECT s.name AS system, e.metric AS metric
+                  FROM evaluations e
+                  LEFT JOIN systems s ON s.id = e.system_id
+                 WHERE e.candidate_id = ?
+                """,
                 (candidate_id,),
             )
         }
@@ -142,17 +148,31 @@ def test_regime_and_split_are_stored_once_and_rejoined_on_read(finished_run, sys
         assert record.candidate_id == result.best_candidate_id
 
 
-def test_registering_systems_twice_updates_rather_than_duplicates(tmp_path, systems):
-    store = SQLiteRecordStore(str(tmp_path / "s.sqlite"))
-    store.register_systems(systems)
-    systems[0].split = "holdout"
-    store.register_systems(systems)
+def test_registering_systems_twice_writes_nothing_the_second_time(tmp_path, systems):
+    """D17: registration is insert-if-new-*version*, and a split is not content.
 
+    Stage 2 upserted by name here, which is the mechanism behind B8: a
+    re-registration rewrote the row that every stored evaluation was read
+    through. Now a split reassignment is not a content change at all, so the
+    second call inserts nothing and the first call's row is still the row --
+    the same numbers keep meaning the same thing.
+    """
+    store = SQLiteRecordStore(str(tmp_path / "s.sqlite"))
+    first = store.register_systems(systems)
+    systems[0].split = "holdout"
+    second = store.register_systems(systems)
+
+    assert second == first, "a split reassignment is not a new system version"
     rows = list(store.connection.execute("SELECT * FROM systems ORDER BY name"))
     assert len(rows) == len(systems)
-    assert rows[0]["split"] == "holdout"
     assert json.loads(rows[0]["wells_json"]) == [[1.0, 0.0]]
     assert rows[0]["npz_path"].endswith(".npz")
+    assert rows[0]["content_hash"]
+    # The split is not on the row at all any more: it is assignment, and it
+    # lives in the population that made it (D19).
+    assert "split" not in {r[1] for r in store.connection.execute(
+        "PRAGMA table_info(systems)"
+    )}
     store.close()
 
 
@@ -185,15 +205,16 @@ def test_the_heatmap_is_a_single_statement_including_the_conditions_bin(
     tmp_path, systems
 ):
     store = SQLiteRecordStore(str(tmp_path / "s.sqlite"))
-    store.register_systems(systems)
+    population = store.open_population(systems)
     form = LocalAnsatzForm()
     evaluators = [FrozenDensityEvaluator(systems), _OneCondition()]
 
     lda = form.build(LDA_THETA)
     baseline_id = store.seed_baseline(
-        lda, [r for ev in evaluators for r in ev.evaluate(lda)]
+        lda, [r for ev in evaluators for r in ev.evaluate(lda)],
+        population_id=population,
     )
-    run_id = store.begin_run("optuna_tpe")
+    run_id = store.begin_run("optuna_tpe", population_id=population)
     driver = SearchDriver(
         optimizer=FixedFormOptimizer(form, OptunaTPE(form.bounds(), seed=0)),
         evaluators=evaluators,
@@ -241,8 +262,8 @@ def _count_in_another_process(path):
 def test_a_second_process_sees_rows_while_the_run_is_still_going(tmp_path, systems):
     path = str(tmp_path / "live.sqlite")
     store = SQLiteRecordStore(path)
-    store.register_systems(systems)
-    run_id = store.begin_run("optuna_tpe")
+    population = store.open_population(systems)
+    run_id = store.begin_run("optuna_tpe", population_id=population)
     driver = _stack(systems, store, run_id)
 
     assert store.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
@@ -267,8 +288,8 @@ def test_routing_records_through_the_store_changes_no_number(tmp_path, dataset):
     systems = load_frozen(dataset)
 
     store = SQLiteRecordStore(str(tmp_path / "d15.sqlite"))
-    store.register_systems(systems)
-    run_id = store.begin_run("optuna_tpe")
+    population = store.open_population(systems)
+    run_id = store.begin_run("optuna_tpe", population_id=population)
     driver = _stack(systems, store, run_id, seed=fx.SEED)
     result = driver.run(fx.TRIALS)
 
@@ -277,7 +298,7 @@ def test_routing_records_through_the_store_changes_no_number(tmp_path, dataset):
     assert result.best_score == pinned["train_mse"]
 
     # And the store's own idea of the best candidate agrees with the driver's.
-    best_id, best_score = store.best(run_id, "exc_sq_error")
+    best_id, best_score = store.best(run_id)
     assert best_id == result.best_candidate_id
     assert best_score == pytest.approx(result.best_score)
     store.close()
@@ -285,10 +306,10 @@ def test_routing_records_through_the_store_changes_no_number(tmp_path, dataset):
 
 def test_a_store_holds_many_runs(tmp_path, systems):
     store = SQLiteRecordStore(str(tmp_path / "many.sqlite"))
-    store.register_systems(systems)
-    first = store.begin_run("optuna_tpe", notes="seed=0")
+    population = store.open_population(systems)
+    first = store.begin_run("optuna_tpe", notes="seed=0", population_id=population)
     _stack(systems, store, first, seed=0).run(3)
-    second = store.begin_run("human")
+    second = store.begin_run("human", population_id=population)
     _stack(systems, store, second, seed=1).run(2)
 
     assert [len(store.candidates(r)) for r in (first, second)] == [3, 2]
@@ -308,8 +329,8 @@ def test_the_store_file_is_created_where_asked(tmp_path, systems):
 
 def test_an_in_memory_store_works_for_a_throwaway_run(systems):
     store = SQLiteRecordStore(":memory:")
-    store.register_systems(systems)
-    run_id = store.begin_run("optuna_tpe")
+    population = store.open_population(systems)
+    run_id = store.begin_run("optuna_tpe", population_id=population)
     _stack(systems, store, run_id).run(2)
     assert len(store.candidates(run_id)) == 2
     store.close()
@@ -318,14 +339,17 @@ def test_an_in_memory_store_works_for_a_throwaway_run(systems):
 def test_the_schema_survives_reopening_the_same_file(tmp_path, systems):
     path = str(tmp_path / "reopen.sqlite")
     store = SQLiteRecordStore(path)
-    store.register_systems(systems)
+    population = store.open_population(systems)
     lda = LocalAnsatzForm().build(LDA_THETA)
-    first_id = store.seed_baseline(lda)
+    first_id = store.seed_baseline(lda, population_id=population)
     store.close()
 
     reopened = SQLiteRecordStore(path)
-    # Idempotent: re-opening does not accumulate baselines.
-    assert reopened.seed_baseline(lda) == first_id
+    # Idempotent on (label, population): re-opening the same store over the
+    # same cache does not accumulate baselines. A *changed* cache does get a
+    # second one, which is the whole of D19 -- see test_populations.py.
+    assert reopened.open_population(systems) == population
+    assert reopened.seed_baseline(lda, population_id=population) == first_id
     assert len(reopened.candidates()) == 1
     reopened.close()
 
@@ -362,33 +386,41 @@ def test_a_candidate_with_an_empty_fingerprint_vector_stores_null_theta(tmp_path
     store.close()
 
 
-def test_the_printed_heatmap_survives_a_baseline_with_narrower_coverage(systems):
+def test_the_printed_heatmap_survives_a_missing_baseline_cell(systems):
     """A regression: NULL is a legitimate answer from the heatmap query.
 
-    ``seed_baseline`` is idempotent on the label, so a store whose systems
-    grew after the baseline was seeded holds a baseline measured on a *subset*.
-    ``AVG(CASE WHEN ...)`` is then NULL for any (regime, metric) the baseline
-    has no rows in, and the printed report formatted that NULL as a float --
-    crashing after the search had finished but before the best theta reached
-    disk. The dashboard's figure already tolerated it; only the CLI did not.
+    ``AVG(CASE WHEN ...)`` is NULL for any (regime, metric) group one of the
+    two candidates has no rows in, and the printed report formatted that NULL
+    as a float -- crashing after the search had finished but before the best
+    theta reached disk. The dashboard's figure already tolerated it; only the
+    CLI did not.
+
+    The *original* trigger was a baseline seeded over a smaller system set
+    than the candidates were measured on, which D19 makes impossible: a
+    baseline is now keyed by the population it was measured over. Missing
+    cells stay legal for the other reason -- a baseline seeded under a
+    narrower evaluator stack has no rows in the metrics that stack never
+    emitted -- so the formatter still has to tolerate them, and this asserts
+    it against the case that survives.
     """
     from xcsearch.run_stage2 import format_heatmap
 
     form = LocalAnsatzForm()
     functional = form.build(LDA_THETA)
-    evaluator = FrozenDensityEvaluator(systems)
-    full = evaluator.evaluate(functional)
-    regimes = {record.regime for record in full}
+    energy_only = FrozenDensityEvaluator(systems).evaluate(functional)
+    regimes = {record.regime for record in energy_only}
     assert len(regimes) > 1, "the fixture needs two regimes for this to bite"
-
-    dropped = sorted(regimes)[0]
-    narrow = [record for record in full if record.regime != dropped]
+    # The candidate's stack gained a rung-0 condition after the baseline was
+    # seeded: same population, wider metric set.
+    with_condition = energy_only + _OneCondition().evaluate(functional)
 
     store = SQLiteRecordStore(":memory:")
-    store.register_systems(systems)
-    baseline_id = store.seed_baseline(functional, narrow)
-    run_id = store.begin_run("test")
-    candidate_id = store.add(functional, full, run_id=run_id)
+    population = store.open_population(systems)
+    baseline_id = store.seed_baseline(
+        functional, energy_only, population_id=population
+    )
+    run_id = store.begin_run("test", population_id=population)
+    candidate_id = store.add(functional, with_condition, run_id=run_id)
 
     rows = store.heatmap(candidate_id, baseline_id)
     assert any(row["baseline"] is None for row in rows), (
@@ -396,6 +428,7 @@ def test_the_printed_heatmap_survives_a_baseline_with_narrower_coverage(systems)
     )
 
     table = format_heatmap(store, candidate_id, baseline_id)
+    dropped = "conditions"
     assert dropped in table
     assert "--" in table, "a missing cell should be shown as missing, not omitted"
     # Every row still present: a NULL must not drop the regime from the report.
@@ -417,8 +450,8 @@ def test_the_store_is_usable_from_the_thread_the_driver_runs_on(systems, tmp_pat
     import threading
 
     store = SQLiteRecordStore(str(tmp_path / "threaded.sqlite"))
-    store.register_systems(systems)
-    run_id = store.begin_run("threaded")
+    population = store.open_population(systems)
+    run_id = store.begin_run("threaded", population_id=population)
     driver = _stack(systems, store, run_id)
 
     failure: list[BaseException] = []

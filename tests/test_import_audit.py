@@ -44,11 +44,22 @@ ALLOWED: dict[str, set[str]] = {
     "records": {"numpy", "scipy.sparse"},
     "numerics": {"numpy"},
     "ks": {"numpy", "scipy"},
+    # Stage 2B's provenance spine (D17, D18). World-free and record-free: it
+    # hashes arrays and assembles a protocol payload, so it is a leaf beside
+    # `numerics` and `ks` rather than a layer above them. `subprocess` is
+    # declared because it is architectural -- reading the git commit is the
+    # one place this package shells out, and it is deliberately best-effort.
+    # (STAGE2.md's printed table predates this module; its row is D17/D18.)
+    "provenance": {"numpy", "subprocess"},
     # `store` for the near-duplicate index the driver feeds (2.5). It is the
     # index's *type*, not a second persistence path: the driver still writes
     # through the RecordStore port.
     "driver": {"ports", "records", "store"},
-    "store": {"ports", "records", "sqlite3", "numpy"},
+    # `provenance` for the content hash a system version is keyed by and the
+    # hash a protocol row is keyed by (D17, D18). The store computes neither
+    # itself: identity is a decision about physics content, and it is made in
+    # one place so that the cache builder and the store cannot disagree.
+    "store": {"ports", "records", "provenance", "sqlite3", "numpy"},
     "ranking": {"ports", "records", "evaluators", "numpy"},
     "evaluators": {"ports", "records", "ks", "numerics", "numpy"},
     "composed": {"ports", "records", "numpy"},
@@ -63,7 +74,12 @@ ALLOWED: dict[str, set[str]] = {
     "functionals": {"ports", "records", "numerics", "world", "numpy"},
     # scipy.sparse: the cache stores the Laplacian the reference was computed
     # with (2.4), and rebuilding it on load is this module's job.
-    "dataset": {"world", "solver", "ports", "records", "numpy", "scipy.sparse"},
+    # `provenance`: the content hash is computed where the content is made
+    # (D17), written into the `.npz` beside the arrays it covers.
+    "dataset": {
+        "world", "solver", "ports", "records", "provenance", "numpy",
+        "scipy.sparse",
+    },
     "scf": {"world", "solver", "functionals", "dataset", "numerics", "numpy"},
     "plots": {
         "world", "dataset", "functionals", "scf", "ranking", "records",

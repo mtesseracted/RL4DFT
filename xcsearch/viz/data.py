@@ -61,26 +61,30 @@ def runs(path: str) -> list[dict]:
     ]
 
 
-def history(path: str, run_id: int, metric: str = "exc_sq_error",
-            rung: int = 1, split: str = "train") -> list[dict]:
+def history(path: str, run_id: int) -> list[dict]:
     """One row per candidate in a run: its id, its score, and the best so far.
 
-    The scrubber scrubs over this and the strip plots it. Best-so-far is
-    computed here rather than in the figure so that the panel and any other
-    consumer agree on what "best" meant at trial k.
+    The score is the **stored** one -- the number the ranking policy returned
+    and the optimizer was told (D20). This used to re-derive it here with its
+    own ``AVG`` over the train split, which was a second definition of the
+    search's objective living in the dashboard: it disagreed with numpy's
+    pairwise mean in the last bits, and it silently assumed the objective was
+    a mean of ``exc_sq_error`` at all. A run driven by any other policy is now
+    rendered correctly with no change here, because there is nothing here to
+    change.
+
+    Best-so-far is computed in this function rather than in the figure so that
+    the panel and any other consumer agree on what "best" meant at trial k.
     """
     rows = _rows(
         path,
         """
-        SELECT c.id AS candidate_id, AVG(e.value) AS score
-          FROM candidates c
-          JOIN evaluations e ON e.candidate_id = c.id
-          LEFT JOIN systems s ON s.name = e.system
-         WHERE c.run_id = ? AND e.rung = ? AND e.metric = ? AND s.split = ?
-         GROUP BY c.id
-         ORDER BY c.id
+        SELECT id AS candidate_id, score
+          FROM candidates
+         WHERE run_id = ? AND score IS NOT NULL
+         ORDER BY id
         """,
-        (run_id, rung, metric, split),
+        (run_id,),
     )
     out, best = [], float("inf")
     for index, row in enumerate(rows):
@@ -147,17 +151,57 @@ def heatmap(path: str, candidate_id: int, baseline_id: int) -> list[dict]:
 
     Rung-0 condition rows have no system, so they arrive in their own
     ``conditions`` bin rather than being dropped -- see the query in store.py.
+    Cross-population comparisons are restricted to the shared systems; ask
+    ``heatmap_scope`` for the count to display beside them.
     """
+    scope = heatmap_scope(path, candidate_id, baseline_id)
     return [
         dict(row)
         for row in _rows(
-            path, HEATMAP_SQL, {"candidate": candidate_id, "baseline": baseline_id}
+            path,
+            HEATMAP_SQL,
+            {
+                "candidate": candidate_id,
+                "baseline": baseline_id,
+                "restrict": 0 if scope["same_population"] else 1,
+            },
         )
     ]
 
 
-def systems(path: str) -> list[dict]:
-    rows = _rows(path, "SELECT * FROM systems ORDER BY name")
+def systems(path: str, population_id: int | None = None) -> list[dict]:
+    """The system versions in a population, or every version in the store.
+
+    ``regime`` and ``split`` come from the population, because they are what
+    that population assigned -- the same system version can sit in the train
+    split of one and the holdout of another, and the store no longer pretends
+    otherwise (D19).
+    """
+    if population_id is None:
+        rows = _rows(
+            path,
+            """
+            SELECT s.*, ps.split AS split, ps.regime AS regime,
+                   ps.population_id AS population_id
+              FROM systems s
+              LEFT JOIN population_systems ps ON ps.system_version_id = s.id
+             GROUP BY s.id
+             ORDER BY s.name, s.id
+            """,
+        )
+    else:
+        rows = _rows(
+            path,
+            """
+            SELECT s.*, ps.split AS split, ps.regime AS regime,
+                   ps.population_id AS population_id
+              FROM population_systems ps
+              JOIN systems s ON s.id = ps.system_version_id
+             WHERE ps.population_id = ?
+             ORDER BY s.name
+            """,
+            (population_id,),
+        )
     out = []
     for row in rows:
         entry = dict(row)
@@ -166,10 +210,80 @@ def systems(path: str) -> list[dict]:
     return out
 
 
-def system_metrics(path: str, candidate_id: int, system: str) -> dict[str, float]:
+def run_population(path: str, run_id: int) -> int | None:
+    rows = _rows(path, "SELECT population_id FROM runs WHERE id = ?", (run_id,))
+    return rows[0]["population_id"] if rows else None
+
+
+def heatmap_scope(path: str, candidate_id: int, baseline_id: int) -> dict:
+    """Which populations a heatmap spans, and how many systems they share.
+
+    The dashboard states this beside the figure for the same reason the CLI
+    prints it: a candidate and a baseline from different populations are
+    compared over their intersection, and a mean whose set is unstated is the
+    defect this stage exists to remove.
+    """
     rows = _rows(
         path,
-        "SELECT metric, value FROM evaluations WHERE candidate_id = ? AND system = ?",
+        """
+        SELECT id, population_id FROM candidates WHERE id IN (?, ?)
+        """,
+        (candidate_id, baseline_id),
+    )
+    populations = {int(row["id"]): row["population_id"] for row in rows}
+    candidate_population = populations.get(candidate_id)
+    baseline_population = populations.get(baseline_id)
+    same = candidate_population == baseline_population
+
+    if candidate_population is None or baseline_population is None:
+        shared = 0
+    elif same:
+        counted = _rows(
+            path, "SELECT n_systems AS c FROM populations WHERE id = ?",
+            (candidate_population,),
+        )
+        shared = int(counted[0]["c"]) if counted else 0
+    else:
+        counted = _rows(
+            path,
+            """
+            SELECT COUNT(*) AS c FROM (
+                SELECT system_version_id FROM population_systems
+                 WHERE population_id = ?
+                INTERSECT
+                SELECT system_version_id FROM population_systems
+                 WHERE population_id = ?
+            )
+            """,
+            (candidate_population, baseline_population),
+        )
+        shared = int(counted[0]["c"])
+
+    return {
+        "candidate_population": candidate_population,
+        "baseline_population": baseline_population,
+        "same_population": same,
+        "shared_systems": shared,
+    }
+
+
+def system_metrics(path: str, candidate_id: int, system: str) -> dict[str, float]:
+    """This candidate's metrics for one system, by name.
+
+    Joined through ``system_id``: the rows say which *version* they measured,
+    and the panel asks by the name a person picked from a dropdown. A name
+    with two versions in the store resolves to whichever the candidate was
+    actually measured against, because the join runs through the candidate's
+    own rows rather than through the systems table.
+    """
+    rows = _rows(
+        path,
+        """
+        SELECT e.metric AS metric, e.value AS value
+          FROM evaluations e
+          JOIN systems s ON s.id = e.system_id
+         WHERE e.candidate_id = ? AND s.name = ?
+        """,
         (candidate_id, system),
     )
     return {row["metric"]: float(row["value"]) for row in rows}
@@ -183,7 +297,14 @@ def density(path: str, system: str, root: str | None = None) -> dict | None:
     a store copied away from its data is a normal situation, and the panel says
     so instead of failing.
     """
-    rows = _rows(path, "SELECT npz_path FROM systems WHERE name = ?", (system,))
+    rows = _rows(
+        path,
+        # The most recent version of that name: the arrays a viewer wants are
+        # the ones on disk now, and a name with several versions differs in
+        # exactly the numbers the panel is drawing.
+        "SELECT npz_path FROM systems WHERE name = ? ORDER BY id DESC LIMIT 1",
+        (system,),
+    )
     if not rows or not rows[0]["npz_path"]:
         return None
     npz_path = rows[0]["npz_path"]

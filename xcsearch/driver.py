@@ -61,15 +61,22 @@ class SearchDriver:
     duplicate_hits: int = field(default=0, init=False)
 
     def step(self) -> tuple[Functional, list[EvaluationRecord], float]:
-        """One candidate through the whole loop. The D12 five lines, exactly."""
+        """One candidate through the whole loop. The D12 five lines, exactly.
+
+        Ranking happens *before* the store write rather than after it (D20):
+        the score is the number the optimizer will be told, and it is written
+        with the records it was computed from, in one transaction. Nothing
+        else moves -- the policy still sees the full record set, and the store
+        still receives every record uncollapsed.
+        """
         functional = self.optimizer.ask()
         records = [r for ev in self.evaluators for r in ev.evaluate(functional)]
+        score = self.policy.score(records)
         candidate_id = (
-            self.store.add(functional, records, self.run_id)
+            self.store.add(functional, records, self.run_id, score=score)
             if self.store is not None
             else None
         )
-        score = self.policy.score(records)
         self.optimizer.tell(functional, records, score)
 
         if self.index is not None and candidate_id is not None:
