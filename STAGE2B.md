@@ -132,6 +132,78 @@ versioned.** The Stage 2 schema guaranteed neither.
   what the search optimized; and the tell-time number otherwise lives
   nowhere and is unrecoverable.
 
+## Module layout and ownership — updated
+
+Supersedes `STAGE2.md`'s table, which predates `provenance.py`. Reproduced in
+full rather than as a delta, because the table's whole value is being the one
+place a reader learns what a module may import — two partial tables would be
+the `_A`/`_KAPPA` hazard applied to documentation.
+
+Three rows change for Stage 2B reasons and one is new (**bold**). Several
+others differ from `STAGE2.md`'s *printed* table for reasons that predate this
+stage, and are marked nowhere because they were never Stage 2B's doing: `ks`
+for `solver` and `sqlite3` for `viz/data.py` (the amendments `STAGE2.md`'s
+implementation notes record), `store` for `driver` (2.5's near-duplicate
+index — the index's *type*, not a second persistence path), `evaluators` for
+`ranking` (the metric-name constants are the record contract), and `numerics`
+for `functionals` (2.1b's one home for the step constant). This table is the
+*enforced* state rather than a second copy of the printed one.
+
+Two conventions it does not spell out per row, both from `STAGE2.md`'s notes:
+`records` and `numerics` are granted wherever `ports` is — a module
+implementing a port cannot avoid the data that port's signatures are written
+in — and stdlib plumbing (`os`, `json`, `hashlib`, …) is allowed everywhere,
+which is why only the architectural stdlib choices (`sqlite3`, `queue`,
+`subprocess`) appear at all.
+
+The import audit (`tests/test_import_audit.py`) enforces this table, so a row
+and the code cannot drift apart silently.
+
+| Module | Owns | May import |
+|---|---|---|
+| `ports.py` | **all** ABCs: `Functional`, `FunctionalForm`, `Optimizer`, `FormProposer`, `CoefficientOptimizer`, `Evaluator`, `RankingPolicy`, `Condition`, `RecordStore`, `Dataset` | records, numpy |
+| `records.py` | `EvaluationRecord`, `SystemRecord`, `XCInput` dataclasses | numpy, scipy.sparse |
+| `numerics.py` | the two finite-difference functional-derivative helpers — `local_vxc` (relative step, no vacuum floor) and `fd_vxc` (fixed floor, intrinsic vacuum limit); the step constants `DN` and `REL_DN` | numpy |
+| `ks.py` | one-body KS step on `(x, w, laplacian, v)` arrays | numpy, scipy |
+| **`provenance.py`** | **the identities a measurement is versioned by (D17, D18, D19): `system_content_hash`, `protocol_payload`/`protocol_hash`, `population_hash`, plus `git_commit` and `library_versions`** | **numpy, subprocess** |
+| `driver.py` | `SearchDriver` — the D12 loop | ports, records, store |
+| **`store.py`** | `SQLiteRecordStore`; `NearDuplicateIndex` (feature 1) | ports, records, **provenance**, sqlite3, numpy |
+| `ranking.py` | `MeanSquaredError(RankingPolicy)` | ports, records, evaluators, numpy |
+| `evaluators.py` | `FrozenDensityEvaluator` (rung 1), `ConditionsEvaluator` (rung 0) | ports, records, ks, numerics, numpy |
+| `optimizers/composed.py` | `FixedFormOptimizer(Optimizer)`; later `TwoLevelOptimizer` | ports, numpy |
+| `optimizers/optuna_tpe.py` | `OptunaTPE(CoefficientOptimizer)` | ports, optuna, numpy |
+| `optimizers/cmaes.py` | `CMAES(CoefficientOptimizer)` | ports, cma, numpy |
+| `optimizers/human.py` | `HumanOptimizer(CoefficientOptimizer)` — `ask()` blocks on a queue fed by the viz | ports, stdlib queue, numpy |
+| `worlds/exp1d/world.py` | `Grid`, `v_int`, `System` (+ geometry serialization) | numpy, scipy.sparse |
+| `worlds/exp1d/solver.py` | reference exact diagonalization | world, ks, numpy, scipy |
+| `worlds/exp1d/functionals.py` | `eps_x_lda`, `eps_c_lda`, `LocalAnsatz(Functional)`, `LocalAnsatzForm(FunctionalForm)` | ports, world, numerics, numpy |
+| **`worlds/exp1d/dataset.py`** | D7 system lists, E_xc extraction, v_xc inversion (2.4), `.npz` cache builder (now writing each system's content hash), `load_frozen`, `Exp1dDataset(Dataset)`, `protocol()` | world, solver, ports, records, **provenance**, numpy, scipy.sparse |
+| `worlds/exp1d/scf.py` | post-processing self-consistent KS solve for this world (`solve_ks_robust`) | world, solver, functionals, dataset, numerics, numpy |
+| `worlds/exp1d/plots.py` | post-processing comparison plots, own `python -m` entry | world, dataset, functionals, scf, ranking, records, matplotlib, numpy |
+| `worlds/exp1d/conditions.py` | the 1D exponential world's `Condition` set | ports, world, functionals, numpy |
+| `viz/` | the feature-4 Dash app (observer + human endpoints) | store, records, dash (+ sqlite3 in `data.py`, plotly in `figures.py`) |
+| `run_stage2.py` | composition root: construct everything explicitly, inject, run | everything |
+
+Why `provenance.py` is a **core** module and not a layer above the store:
+
+- It is world-free and third-party-free (numpy and the standard library), so
+  it sits beside `records`, `numerics` and `ks` — a leaf, not a dependency of
+  the search loop. Nothing in it knows what a system *is*; it hashes arrays.
+- Both the cache builder and the store need the same identity for the same
+  arrays. Computing it in either one would make the other import a module it
+  has no business importing — the store would learn a world, or the world
+  would learn the store. A leaf both may speak is the only placement that
+  keeps `Dataset` and `RecordStore` meeting only as data (2.2).
+- `subprocess` is declared because it is architectural rather than plumbing:
+  reading the git commit is the one place this package shells out, and it is
+  deliberately best-effort — a protocol row that could abort a search would be
+  a breadcrumb worth less than the crumb.
+
+The visibility rules of `STAGE2.md` are unchanged, and the new module weakens
+none of them: the store still imports no world, the viz still imports no
+physics, and `provenance` is reachable from both sides precisely because it
+knows nothing about either.
+
 ## Sub-stages
 
 ### 2B.1 — System versions and protocol rows (D17, D18)

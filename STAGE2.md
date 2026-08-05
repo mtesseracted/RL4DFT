@@ -642,3 +642,31 @@ One sequencing change: 2.2's cache rebuild and 2.4's were run as a single
 build. 2.2's had written no files when 2.4 landed, and the end state is
 identical — the plan's "one cache rebuild" per sub-stage is about the cache's
 content, not about how many times the solver is paid for.
+
+## Continued in `STAGE2B.md`
+
+Sub-stages 2.1–2.7 landed and then the implementation turned up problems this
+document could not have anticipated, because they are what running the thing
+teaches. `STAGE2B.md` is the continuation, and it starts from what they had in
+common: every number in `evaluations` is a measurement, and a measurement's
+meaning is a four-tuple — *what* was measured, *against what*, *how*, and
+*among what*. The schema above made the first coordinate first-class and left
+the other three implicit, so when one of them moved — a rebuilt cache, a
+reshuffled split, a grown system set — stored numbers silently changed meaning
+(B8). Grids, tolerances, splits and caches will all move, routinely, because
+changing them is what a research instrument is for.
+
+What that means for reading this document:
+
+- **The plan sections above stay fixed.** They record what was decided, and
+  Stage 2B does not rewrite them by hindsight; it continues the sequence
+  (D17–D20). Where a later decision changes how an earlier one is
+  *implemented* — D19's population junction changes where D13's deliberately
+  dropped `regime`/`split` come back from — the later document governs.
+- **The tail is superseded.** "Post implementation tasks (2026-08-05)" and
+  everything after it moved to `STAGE2B.md`, merged with what the B8 design
+  review settled. The bug ledger, the feature list and the Stage 1 performance
+  comparison live there now.
+- **The ownership table above is superseded** by `STAGE2B.md`'s updated one,
+  which adds `provenance.py` and records the grants that had accumulated in
+  the import audit without ever reaching this page.

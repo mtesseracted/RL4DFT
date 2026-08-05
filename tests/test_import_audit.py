@@ -1,4 +1,7 @@
-"""The STAGE2.md ownership table, as a test (sub-stage 2.1d acceptance (a)).
+"""The ownership table, as a test (sub-stage 2.1d acceptance (a)).
+
+The table this transcribes is the updated one in ``STAGE2B.md`` -- it
+supersedes ``STAGE2.md``'s printed table, which predates ``provenance.py``.
 
 The import rules are load-bearing, exactly as they were in Stage 1: they are
 what makes "the evaluator cannot run a reference solve" and "the dashboard
@@ -49,7 +52,8 @@ ALLOWED: dict[str, set[str]] = {
     # `numerics` and `ks` rather than a layer above them. `subprocess` is
     # declared because it is architectural -- reading the git commit is the
     # one place this package shells out, and it is deliberately best-effort.
-    # (STAGE2.md's printed table predates this module; its row is D17/D18.)
+    # Its row is in STAGE2B.md's updated ownership table, which supersedes
+    # STAGE2.md's printed one.
     "provenance": {"numpy", "subprocess"},
     # `store` for the near-duplicate index the driver feeds (2.5). It is the
     # index's *type*, not a second persistence path: the driver still writes
