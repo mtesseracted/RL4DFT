@@ -600,6 +600,57 @@ def test_every_panel_carries_an_explanation(finished_run):
     assert "SCF" in hints["hint-system"] and "plots" in hints["hint-system"]
 
 
+def test_the_submitted_line_stops_saying_waiting_once_it_is_not(finished_run):
+    """It reported the queue depth at the one instant it is certainly one.
+
+    Written at the click and never again, so it said "1 waiting" for the rest
+    of the session -- including long after the trial had been evaluated and
+    stored.
+    """
+    human = HumanOptimizer(FORM.bounds())
+    theta = human.submit([1.0, 0.0, 0.0, 0.0, 0.0])
+    last = {"clicks": 1, "theta": [float(c) for c in theta], "index": 0}
+
+    # Queued and not yet picked up.
+    assert "1 waiting" in app_module.submission_line(human, last)
+
+    # The worker has taken it but has not finished: the queue is empty and
+    # the history has not grown, which is neither "waiting" nor "done".
+    human.ask()
+    line = app_module.submission_line(human, last)
+    assert "waiting" not in line and "evaluating" in line
+
+    # Told: the line reports the score the session was given (D20).
+    human.tell(theta, 1.25e-3)
+    line = app_module.submission_line(human, last)
+    assert "waiting" not in line and "1.2500e-03" in line
+    assert "1.0000" in line, "and still says what was submitted"
+
+
+def test_the_submitted_line_tracks_the_submission_it_was_told_about():
+    """A second submission reports its own result, not the first one's."""
+    human = HumanOptimizer(FORM.bounds())
+    for value, score in ((1.0, 5.0), (0.5, 2.0)):
+        theta = human.submit([value, 0.0, 0.0, 0.0, 0.0])
+        last = {"clicks": 1, "theta": [float(c) for c in theta],
+                "index": len(human.history)}
+        human.tell(human.ask(), score)
+        assert f"{score:.4e}" in app_module.submission_line(human, last)
+
+
+def test_an_endpoint_with_no_history_still_gets_a_true_line():
+    """``history`` is not in the contract; the line degrades, it does not lie."""
+    class Minimal:
+        bounds = [(0.0, 2.0)]
+        pending_submissions = 1
+
+        def submit(self, theta):
+            return theta
+
+    line = app_module.submission_line(Minimal(), {"theta": [1.0], "index": 0})
+    assert "1 waiting" in line
+
+
 def test_the_proposal_panel_is_explained_too(finished_run):
     path, _, _ = finished_run
     human = HumanOptimizer(FORM.bounds())

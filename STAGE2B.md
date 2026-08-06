@@ -7,7 +7,7 @@ by this document, which merges those items with the design decisions the
 review settled. Decision numbering continues from D16.
 
 **Status: implemented**, except F1, which is still a stub awaiting scope —
-seven self-contained usability items have landed under it, listed there. The
+eight self-contained usability items have landed under it, listed there. The
 decisions below are written in the voice they were settled in; where the
 built shape differs from the decision as drafted, an *as built* note says how
 and why, rather than quietly editing the decision to match the code. The
@@ -288,7 +288,7 @@ the test that holds it, so a clause with no test is a clause not met.
 | 2B.4 | `b2c78d5` | `test_repairs.py` |
 | B5, F2 | `04cc32e` | `test_fd_potentials.py`, `test_numerics.py` |
 | B11–B13 | post-review | `test_populations.py`, `test_score.py` |
-| F1 (the seven usability items) | post-review | `test_viz.py`, `test_repairs.py` |
+| F1 (the eight usability items) | post-review | `test_viz.py`, `test_repairs.py` |
 
 Suite: 282 tests before Stage 2B, 318 after with every extra installed, and
 twenty-five more with the F1 items below. The D15 fixture is still bitwise.
@@ -540,7 +540,7 @@ stated reason rather than a vague one.
   imports no physics module — and now D20: the score a panel shows is the
   stored told score, never a re-derivation.
 
-  **Seven usability items landed ahead of that scope**, each small enough to
+  **Eight usability items landed ahead of that scope**, each small enough to
   stand alone and none of them touching the constraints:
 
   1. *A run opens on its best trial.* The scrubber's initial value was 0, so
@@ -708,6 +708,21 @@ stated reason rather than a vague one.
      anything → "already a new run"; two submissions → run 2; click → "a new
      run starts with your next submission"; click again → declined; submit →
      run 3; eight submissions in, the session is still going.
+
+  8. *The line under the submit button tells the truth after the click.* It
+     read `submitted [...] - 1 waiting` and went on saying so for the rest of
+     the session, long after the trial had been evaluated and stored. Two
+     mistakes in one line: it reported `pending_submissions` at the only
+     instant that number is certainly one — the worker has not picked it up
+     yet — and the callback had no tick input, so a claim about a live thing
+     was written once and never revisited. It now recomputes on the tick like
+     every other live thing here, through three states a person actually wants
+     told apart: `waiting` while queued, `evaluating` once the worker has it,
+     and `evaluated, score …` when it lands. The score is read back from the
+     endpoint's history rather than recomputed — it is the number the session
+     was told (D20). `history` stays out of the human contract, which is
+     deliberately the three things the panel *needs*: an endpoint that keeps
+     one gets a better line, one that does not still gets a true one.
 
   **One test came out of using it.** Each of these items changed a callback's
   arity — a `State` added here, an `Input` there — and a browser tab left open

@@ -362,6 +362,9 @@ def build_layout(store_path: str, human=None, new_run=None) -> html.Div:
                     ]
                 ),
                 html.Button("submit", id="submit", n_clicks=0),
+                # What was last submitted, so the line under the button can be
+                # recomputed on the tick instead of frozen at the click.
+                dcc.Store(id="last-submission"),
                 html.Div(id="submitted", style={"fontSize": "13px", "marginTop": "6px"}),
                 # A session runs one trial per submission for as long as you
                 # keep submitting, so "start a new run" is the only run-shaped
@@ -422,6 +425,31 @@ def scrubber_value(rows: list[dict], current, previous, run_id) -> int:
     if previous.get("trial") == previous.get("best_trial"):
         return best                                  # parked on the best
     return min(current, last)
+
+
+def submission_line(human, last: dict) -> str:
+    """What became of the last thing submitted, as of now.
+
+    Three states, and the reason to distinguish them is that a person who has
+    just clicked wants to know which one they are in: still queued, being
+    evaluated, or done and worth this much. The score is the interesting one
+    -- it is the number the session was told (D20), read back from the
+    endpoint's own history rather than recomputed here.
+
+    ``history`` is not part of the human contract, which is deliberately the
+    three things the panel *needs* (``bounds``, ``submit``,
+    ``pending_submissions``). An endpoint that keeps one gets a better line;
+    one that does not still gets a true one.
+    """
+    theta = ", ".join(f"{c:.4f}" for c in last["theta"])
+    history = getattr(human, "history", None)
+    if history is not None and len(history) > last["index"]:
+        _, score = history[last["index"]]
+        return f"submitted [{theta}] - evaluated, score {score:.4e}"
+    pending = human.pending_submissions
+    if pending:
+        return f"submitted [{theta}] - {pending} waiting"
+    return f"submitted [{theta}] - evaluating"
 
 
 def scale_for_baseline(baseline_id, current: str) -> str | None:
@@ -664,18 +692,38 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
     if human is not None:
         @app.callback(
             Output("submitted", "children"),
+            Output("last-submission", "data"),
             Input("submit", "n_clicks"),
+            Input("tick", "n_intervals"),
             State({"type": "theta", "index": dash_all()}, "value"),
+            State("last-submission", "data"),
             prevent_initial_call=True,
         )
-        def _submit(n_clicks, theta):
-            if not n_clicks:
-                return no_update
-            accepted = human.submit(theta)
-            return (
-                f"submitted [{', '.join(f'{c:.4f}' for c in accepted)}]"
-                f" - {human.pending_submissions} waiting"
-            )
+        def _submit(n_clicks, _tick, theta, last):
+            """Queue a proposal on a click, and keep its line true after.
+
+            The line used to be written once, at the click, and never again --
+            so it reported the queue depth at the only instant it is certainly
+            one, and went on saying "1 waiting" long after the trial had been
+            evaluated and stored. It is a claim about a live thing, so it has
+            to be recomputed like every other live thing here: the tick is an
+            input, and which of the two inputs fired is read the way this file
+            reads it everywhere else, by comparing against what was last
+            published rather than by asking dash.
+            """
+            submitting = not last or n_clicks != last.get("clicks")
+            if submitting:
+                if not n_clicks:
+                    return no_update, no_update
+                accepted = human.submit(theta)
+                last = {"clicks": n_clicks,
+                        "theta": [float(c) for c in accepted],
+                        # Where this proposal's result will land, so its
+                        # outcome can be recognised rather than guessed at.
+                        "index": len(getattr(human, "history", ()))}
+            elif not last.get("theta"):
+                return no_update, no_update
+            return submission_line(human, last), last
 
         if new_run is not None:
             @app.callback(
