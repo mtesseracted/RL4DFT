@@ -6,7 +6,8 @@ B8 design review concluded. `STAGE2.md`'s plan sections stay fixed; its tail —
 by this document, which merges those items with the design decisions the
 review settled. Decision numbering continues from D16.
 
-**Status: implemented**, except F1, which is still a stub awaiting scope. The
+**Status: implemented**, except F1, which is still a stub awaiting scope —
+three self-contained usability items have landed under it, listed there. The
 decisions below are written in the voice they were settled in; where the
 built shape differs from the decision as drafted, an *as built* note says how
 and why, rather than quietly editing the decision to match the code. The
@@ -287,10 +288,17 @@ the test that holds it, so a clause with no test is a clause not met.
 | 2B.4 | `b2c78d5` | `test_repairs.py` |
 | B5, F2 | `04cc32e` | `test_fd_potentials.py`, `test_numerics.py` |
 | B11–B13 | post-review | `test_populations.py`, `test_score.py` |
+| F1 (the three usability items) | post-review | `test_viz.py` |
 
-Suite: 282 tests before Stage 2B, 318 after. The D15 fixture is still bitwise.
-Six of those skip without the `[viz]` extra, which is dash's absence rather
-than a gap — every acceptance clause is held by a test that runs either way.
+Suite: 282 tests before Stage 2B, 318 after with every extra installed, and
+six more with the F1 items below. The D15 fixture is still bitwise. Measured
+without the `[cmaes]` extra the suite is 313 passed and 1 skipped, the skip
+being `test_cmaes.py` declining to run against an optimizer that is not
+there. Twenty-two of the 313 are `test_viz.py` and are collected only with the
+`[viz]` extra — without it the run collects 291, which is dash's absence
+rather than a gap: every acceptance clause is held by a test that runs either
+way. (This line previously said six tests were viz-gated, which was never
+true of the module as a whole.)
 
 ### 2B.1 — System versions and protocol rows (D17, D18)
 
@@ -526,11 +534,44 @@ stated reason rather than a vague one.
 
 ## Features
 
-- **F1 — revamp the app.** Stub, unchanged: scope to be settled before any
-  code moves. The constraints that survive any redesign: D13 — every number
-  on screen is in a record or reachable from one, the dashboard imports no
-  physics module — and now D20: the score a panel shows is the stored told
-  score, never a re-derivation.
+- **F1 — revamp the app.** Still a stub as a whole: scope to be settled before
+  any further code moves. The constraints that survive any redesign: D13 —
+  every number on screen is in a record or reachable from one, the dashboard
+  imports no physics module — and now D20: the score a panel shows is the
+  stored told score, never a re-derivation.
+
+  **Three usability items landed ahead of that scope**, each small enough to
+  stand alone and none of them touching the constraints:
+
+  1. *A run opens on its best trial.* The scrubber's initial value was 0, so
+     a loaded run opened on the worst thing the search ever proposed — on the
+     3000-trial run, candidate 2 at 4.7e−01 rather than candidate 2309 at
+     8.2e−04, and every panel below described it. The rule now lives in
+     `viz.app.scrubber_value`: open on the best, keep following the best while
+     the slider is parked on it so a live run tracks its leader, and stop the
+     moment a person drags it. Reading that last part needs the *previous*
+     published index, which is why the `selected` store now carries
+     `best_trial` and the callback takes it back as a `State` — the slider's
+     value alone cannot distinguish "a person moved this" from "we set it
+     here". Ties go to the earliest trial: that is where the best-so-far line
+     steps down, and a later trial that merely ties it discovered nothing.
+  2. *Every panel explains itself.* A hint marker beside each card heading,
+     carrying prose in a native `title` attribute — no tooltip component, no
+     CSS asset, nothing that needs a callback to appear. The heatmap's is the
+     one that mattered: it names the three metrics, says what the `conditions`
+     column is doing among four geometry regimes, gives the cell arithmetic
+     `(candidate − baseline)/|baseline|` and the zero-baseline fallback, and
+     states which end of the colour scale is the good one. Plotly's `RdBu` is
+     red at the low end, so on a panel of errors *red is the candidate
+     winning* — worth saying out loud rather than leaving a reader to assume
+     the usual polarity.
+  3. *Why the detail panel shows only `n_ref`* — asked as a question, answered
+     as a design statement rather than a feature. The candidate's own density
+     is not drawn because drawing it means an SCF solve, and D13's second half
+     is that the dashboard imports no physics. That comparison already exists
+     offline in `worlds/exp1d/plots.py`, which solves each system
+     self-consistently for LDA and for theta; the hint now points there
+     instead of leaving the absence to be read as an oversight.
 - **F2 — tests that exercise the finite-difference `v_xc` path and surface
   B5. LANDED** (`04cc32e`, `tests/test_fd_potentials.py`). Written against
   the pre-fix helpers first and confirmed to fail there — 2.6e−07, flat

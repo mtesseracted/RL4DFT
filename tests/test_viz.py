@@ -30,7 +30,7 @@ from xcsearch.ranking import MeanSquaredError
 from xcsearch.records import SystemRecord
 from xcsearch.store import SQLiteRecordStore
 from xcsearch.viz import data, figures
-from xcsearch.viz.app import build_layout, create_app
+from xcsearch.viz.app import best_trial, build_layout, create_app, scrubber_value
 from xcsearch.worlds.exp1d.conditions import default_conditions
 from xcsearch.worlds.exp1d.functionals import LDA_THETA, LocalAnsatzForm
 
@@ -206,6 +206,96 @@ def test_the_layout_has_every_panel(finished_run):
             "system", "density", "potential", "tick"} <= ids
     # No human endpoint unless one was injected.
     assert "submit" not in ids
+
+
+# --------------------------------------------------------------------------
+# The trial slider opens on the best trial, and every panel explains itself
+# --------------------------------------------------------------------------
+def test_a_loaded_run_opens_on_its_best_trial(finished_run):
+    """Not trial 0, and not the last trial: the one worth looking at."""
+    path, run_id, _ = finished_run
+    rows = data.history(path, run_id)
+
+    best = best_trial(rows)
+    assert rows[best]["score"] == min(row["score"] for row in rows)
+    # The best-so-far envelope reaches its floor exactly there, and not before.
+    assert rows[best]["best_so_far"] == rows[best]["score"]
+    assert all(row["best_so_far"] > rows[best]["score"] for row in rows[:best])
+
+    # A fresh load has no published payload yet, whatever the slider's own
+    # initial value happens to be.
+    assert scrubber_value(rows, 0, None, run_id) == best
+    assert scrubber_value(rows, None, None, run_id) == best
+
+
+def test_the_best_trial_is_the_earliest_of_a_tie():
+    rows = [
+        {"trial": 0, "score": 3.0}, {"trial": 1, "score": 1.0},
+        {"trial": 2, "score": 1.0}, {"trial": 3, "score": 2.0},
+    ]
+    assert best_trial(rows) == 1
+
+
+def test_the_scrubber_follows_the_best_until_somebody_drags_it():
+    rows = [{"trial": i, "score": s} for i, s in enumerate([3.0, 1.0, 2.0])]
+    parked = {"run_id": 1, "trial": 1, "best_trial": 1}
+
+    # Parked on the best, a better trial arrives: the slider follows it.
+    longer = rows + [{"trial": 3, "score": 0.5}]
+    assert scrubber_value(longer, 1, parked, 1) == 3
+
+    # Dragged to 0 since the last poll: a person's position outranks the rule,
+    # this poll and every poll after it.
+    assert scrubber_value(longer, 0, parked, 1) == 0
+    assert scrubber_value(longer, 0, {"run_id": 1, "trial": 0, "best_trial": 1}, 1) == 0
+
+    # Switching runs re-opens on the new run's best.
+    assert scrubber_value(longer, 0, {"run_id": 2, "trial": 0, "best_trial": 0}, 1) == 3
+
+
+def test_switching_runs_does_not_strand_the_slider_past_the_end():
+    """A shorter run must not resolve an index its history does not have."""
+    short = [{"trial": i, "score": s} for i, s in enumerate([2.0, 1.0])]
+    stale = {"run_id": 1, "trial": 9, "best_trial": 9}
+    assert scrubber_value(short, 9, stale, 1) == 1
+
+
+def test_every_panel_carries_an_explanation(finished_run):
+    """B: each card explains itself, and the heatmap explains the figure."""
+    path, _, _ = finished_run
+    hints = _hints(build_layout(path))
+
+    assert set(hints) == {"hint-run", "hint-formula", "hint-regime", "hint-system"}
+    assert all(len(text) > 80 for text in hints.values())
+
+    heatmap_hint = hints["hint-regime"]
+    for phrase in ("baseline", "conditions", "exc_sq_error", "red"):
+        assert phrase in heatmap_hint, f"the heatmap hint never mentions {phrase}"
+
+    # The density panel answers the question it provokes: why only n_ref.
+    assert "SCF" in hints["hint-system"] and "plots" in hints["hint-system"]
+
+
+def test_the_proposal_panel_is_explained_too(finished_run):
+    path, _, _ = finished_run
+    human = HumanOptimizer(FORM.bounds())
+    assert "hint-propose" in _hints(build_layout(path, human))
+
+
+def _hints(component) -> dict:
+    """Every ``title`` tooltip in a layout, by component id."""
+    out, stack = {}, [component]
+    while stack:
+        node = stack.pop()
+        node_id, title = getattr(node, "id", None), getattr(node, "title", None)
+        if isinstance(node_id, str) and title:
+            out[node_id] = title
+        children = getattr(node, "children", None)
+        if isinstance(children, (list, tuple)):
+            stack.extend(children)
+        elif children is not None:
+            stack.append(children)
+    return out
 
 
 def _component_ids(component) -> set:
