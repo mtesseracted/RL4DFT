@@ -271,6 +271,71 @@ def test_the_layout_has_every_panel(finished_run):
 
 
 # --------------------------------------------------------------------------
+# The dropdowns track a store that is still being written
+# --------------------------------------------------------------------------
+def test_a_run_created_after_the_server_started_becomes_selectable(
+    finished_run, tmp_path
+):
+    """The reported symptom: a human session could not select its own run.
+
+    ``begin_run`` writes no row until the first candidate does (B1), and the
+    layout read the run list once at startup, so the run a person was
+    *creating* was the one run the dropdown could never offer.
+    """
+    path, first_run, _ = finished_run
+    before = app_module.run_options(path)
+    assert [option["value"] for option in before] == [first_run]
+
+    # A second run appears the way a human session's does: with its first
+    # candidate, after the page is already up.
+    store = SQLiteRecordStore(path)
+    population = store.open_population(_systems(tmp_path))
+    second = store.begin_run("human", population_id=population)
+    assert [o["value"] for o in app_module.run_options(path)] == [first_run], \
+        "an opened run with no candidates is not a run yet"
+
+    lda = FORM.build(LDA_THETA)
+    store.add(lda, ConditionsEvaluator(default_conditions()).evaluate(lda),
+              second, score=1.0)
+    store.close()
+
+    after = app_module.run_options(path)
+    assert second in [option["value"] for option in after]
+    assert len(after) == 2
+
+
+def test_the_dropdown_follows_this_sessions_own_run_once_it_exists():
+    """And only on the transition -- never dragging a reader back afterwards."""
+    one = [{"label": "run 1", "value": 1}]
+    both = [{"label": "run 2", "value": 2}, {"label": "run 1", "value": 1}]
+
+    # Run 2 was not on offer last poll and is now: it just appeared.
+    assert app_module.run_choice(both, 1, one, follow_run=2) == 2
+    # It was already on offer and the reader is looking at run 1: leave them.
+    assert app_module.run_choice(both, 1, both, follow_run=2) == 1
+    # Still no run 2 in the store: nothing to move to.
+    assert app_module.run_choice(one, 1, one, follow_run=2) == 1
+    # No session run of our own: keep what is selected, newest if none is.
+    assert app_module.run_choice(both, 1, both, follow_run=None) == 1
+    assert app_module.run_choice(both, None, both, follow_run=None) == 2
+    # A selection that no longer exists cannot be kept.
+    assert app_module.run_choice(one, 99, both, follow_run=None) == 1
+    assert app_module.run_choice([], None, [], follow_run=None) is None
+
+
+def test_a_human_session_wires_its_run_into_the_dashboard(finished_run):
+    """The follow_run plumbing exists end to end, not just as a parameter."""
+    path, _, _ = finished_run
+    human = HumanOptimizer(FORM.bounds())
+    app = create_app(path, human=human, follow_run=4242)
+    assert app.layout is not None
+    # The refresh callback is registered and owns the run dropdown.
+    outputs = {output.component_id for key in app.callback_map
+               for output in _outputs(key)}
+    assert {"run", "baseline", "system"} <= outputs
+
+
+# --------------------------------------------------------------------------
 # The heatmap's colour scale: linear, or signed log over the same differences
 # --------------------------------------------------------------------------
 def _cells(figure):

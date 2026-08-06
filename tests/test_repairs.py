@@ -17,6 +17,9 @@ specific way of being wrong:
 
 from __future__ import annotations
 
+import queue
+import time
+
 import numpy as np
 import pytest
 
@@ -27,7 +30,7 @@ from xcsearch.evaluators import FrozenDensityEvaluator
 from xcsearch.optimizers.composed import FixedFormOptimizer
 from xcsearch.optimizers.optuna_tpe import OptunaTPE
 from xcsearch.ranking import MeanSquaredError
-from xcsearch.run_stage2 import run_capturing_failures
+from xcsearch.run_stage2 import human_session, run_capturing_failures
 from xcsearch.store import LDA_LABEL, NearDuplicateIndex, SQLiteRecordStore
 from xcsearch.viz import data
 from xcsearch.worlds.exp1d.dataset import load_frozen
@@ -360,15 +363,14 @@ def test_a_dying_worker_reports_itself(tmp_path, systems):
     """
     import threading
 
-    class Exploding:
-        run_id = 1
-
-        def run(self, trials):
-            raise RuntimeError("boom")
+    def exploding():
+        raise RuntimeError("boom")
 
     status: list[str] = []
     worker = threading.Thread(
-        target=run_capturing_failures, args=(Exploding(), 5, status), daemon=True
+        target=run_capturing_failures,
+        args=(exploding, status, "finished"),
+        daemon=True,
     )
     worker.start()
     worker.join(timeout=10)
@@ -378,13 +380,9 @@ def test_a_dying_worker_reports_itself(tmp_path, systems):
 
 
 def test_a_finishing_worker_says_so_too(systems):
-    class Quiet:
-        def run(self, trials):
-            return None
-
     status: list[str] = []
-    run_capturing_failures(Quiet(), 3, status)
-    assert status == ["the search worker finished its 3 proposals"]
+    run_capturing_failures(lambda: None, status, "the search worker stopped")
+    assert status == ["the search worker stopped"]
 
 
 def test_the_dashboard_renders_the_worker_status(tmp_path, systems):
@@ -403,3 +401,118 @@ def test_the_dashboard_renders_the_worker_status(tmp_path, systems):
     plain = create_app(path)
     assert any("worker-status" in k for k in plain.callback_map)
     assert "worker-status" in _ids(plain.layout)
+
+
+# --------------------------------------------------------------------------
+# A human session has no trial count, and can start a new run from the panel
+# --------------------------------------------------------------------------
+def test_a_human_session_runs_one_trial_per_submission_with_no_bound():
+    """No ``n``: the loop ends when the person stops, not when a count does.
+
+    Which needs nothing from the core. ``driver.run(n)`` is already
+    ``for _ in range(n): step()`` and ``step`` carries its counters across
+    calls, so an unbounded session is the same public method called by a
+    composition root that never stops asking.
+    """
+    import threading
+
+    class Counting:
+        """A driver-shaped stand-in: a submission queue and a trial count."""
+
+        def __init__(self):
+            self.run_id = 1
+            self.n_trials = 0
+            self.pending = queue.Queue()
+            self.runs_of = []
+
+        def step(self):
+            self.pending.get(timeout=0.05)  # raises Empty when nobody submits
+            self.n_trials += 1
+            self.runs_of.append(self.run_id)
+
+    driver = Counting()
+    requests = threading.Event()
+    opened = iter([2, 3])
+
+    def step_or_timeout():
+        try:
+            return Counting.step(driver)
+        except queue.Empty as empty:
+            raise TimeoutError("nobody submitted") from empty
+
+    driver.step = step_or_timeout
+    worker = threading.Thread(
+        target=human_session, args=(driver, lambda: next(opened), requests, 0.05),
+        daemon=True,
+    )
+    worker.start()
+
+    # Far more submissions than any trial count would have allowed.
+    for _ in range(25):
+        driver.pending.put(object())
+    _wait_until(lambda: driver.n_trials == 25)
+    assert worker.is_alive(), "a session does not end because trials ran out"
+    assert driver.runs_of == [1] * 25
+
+
+def test_the_new_run_request_takes_effect_before_the_next_submission():
+    """The point of the button: the *next* candidate begins the new run."""
+    import threading
+
+    class Counting:
+        def __init__(self):
+            self.run_id = 1
+            self.n_trials = 0
+            self.pending = queue.Queue()
+            self.runs_of = []
+
+        def step(self):
+            try:
+                self.pending.get(timeout=0.05)
+            except queue.Empty as empty:
+                raise TimeoutError("nobody submitted") from empty
+            self.n_trials += 1
+            self.runs_of.append(self.run_id)
+
+    driver = Counting()
+    requests = threading.Event()
+    opened_ids = []
+
+    def open_run():
+        opened_ids.append(len(opened_ids) + 2)
+        return opened_ids[-1]
+
+    threading.Thread(
+        target=human_session, args=(driver, open_run, requests, 0.05),
+        daemon=True,
+    ).start()
+
+    driver.pending.put(object())
+    _wait_until(lambda: driver.n_trials == 1)
+
+    requests.set()
+    _wait_until(lambda: not requests.is_set())      # the worker has taken it
+    driver.pending.put(object())
+    _wait_until(lambda: driver.n_trials == 2)
+    assert driver.runs_of == [1, 2], "the submission after the click starts run 2"
+
+    # Clicking again with nothing submitted in between is not another run:
+    # each begin_run reserves an id (the row lands with the first candidate,
+    # B1), so honouring repeat clicks would burn ids nothing will ever use.
+    requests.set()
+    _wait_until(lambda: not requests.is_set())
+    requests.set()
+    _wait_until(lambda: not requests.is_set())
+    driver.pending.put(object())
+    _wait_until(lambda: driver.n_trials == 3)
+    assert driver.runs_of == [1, 2, 3], "one click since the last candidate, one run"
+    assert opened_ids == [2, 3], "no id was drawn for a run that had no candidates"
+
+
+def _wait_until(condition, timeout=10.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if condition():
+            return
+        time.sleep(0.02)
+    raise AssertionError("condition never held")

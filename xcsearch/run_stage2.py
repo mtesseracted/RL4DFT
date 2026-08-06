@@ -145,8 +145,15 @@ def _cell(value: float | None, sign: bool = False) -> str:
     return f"{value:>+14.3e}" if sign else f"{value:>14.3e}"
 
 
-def run_capturing_failures(driver: SearchDriver, trials: int, status: list) -> None:
-    """``driver.run``, with its outcome appended to ``status`` either way (B10).
+# How often the human session's worker surfaces from its wait to see whether
+# anything has been asked of it. Small enough that a click feels immediate,
+# and a cost of nothing: `queue.get(timeout=...)` is a condition wait, not a
+# spin.
+_HUMAN_POLL_SECONDS = 0.5
+
+
+def run_capturing_failures(work, status: list, finished: str) -> None:
+    """Run ``work()``, appending its outcome to ``status`` either way (B10).
 
     The thread body of a human session. A daemon thread that raises dies
     quietly -- which is exactly what happened when the store refused a
@@ -154,23 +161,80 @@ def run_capturing_failures(driver: SearchDriver, trials: int, status: list) -> N
     working, and every submission went into a queue nobody was reading. The
     exception is re-raised after being recorded, so the thread still dies; the
     difference is that the dashboard can say so.
+
+    A callable rather than a driver and a trial count, because what a human
+    session runs is no longer ``driver.run(n)`` -- see ``human_session``.
     """
     try:
-        driver.run(trials)
+        work()
     except BaseException as exc:  # noqa: BLE001 - recorded, then re-raised
         status.append(f"the search worker died: {type(exc).__name__}: {exc}")
         raise
     else:
-        status.append(f"the search worker finished its {trials} proposals")
+        status.append(finished)
 
 
-def serve_human_session(driver: SearchDriver, human, args) -> None:
+def human_session(driver: SearchDriver, open_run, requests, poll: float,
+                  opened_at: list | None = None) -> None:
+    """The search loop for a person: one trial per submission, for as long as.
+
+    A fixed trial count is the wrong shape for a human. An optimizer is given
+    a budget because something has to decide when it has had enough; a person
+    decides that by stopping. So this loop has no bound and no ``n``, and the
+    session ends when the process does.
+
+    Nothing in the core moves to allow it. ``driver.run(n)`` is already
+    ``for _ in range(n): self.step()``, and ``step`` carries the counters and
+    the best-so-far across calls, so an unbounded session is that same public
+    method called by a composition root that never stops asking. Likewise a
+    new run is ``driver.run_id = ...``: a plain field, documented as the thing
+    stamped on every candidate the store writes.
+
+    The wait for a submission is bounded (``poll``) only so this loop stays
+    awake enough to notice a request. ``HumanOptimizer.ask`` raises rather
+    than inventing a candidate when nothing arrives, which is what makes the
+    timeout usable as a heartbeat: the exception means "nobody has submitted
+    yet", it is raised before any state moves, and going round again is the
+    whole response.
+
+    ``opened_at`` is the trial count when the current run was opened, held in a
+    one-element cell so the button's reply can be decided by the same condition
+    that decides what actually happens -- the same shape as the ``status`` cell
+    beside it, and for the same reason: two threads, one fact.
+    """
+    opened_at = [driver.n_trials] if opened_at is None else opened_at
+    while True:
+        if requests.is_set():
+            requests.clear()
+            # An untouched run is not worth replacing -- and `begin_run`
+            # reserves an id per call (the row lands with the first candidate,
+            # B1), so honouring repeat clicks would burn ids nothing will use.
+            if driver.n_trials > opened_at[0]:
+                driver.run_id = open_run()
+                opened_at[0] = driver.n_trials
+        try:
+            driver.step()
+        except TimeoutError:
+            continue  # nobody has submitted yet; that is not a failure
+
+
+def serve_human_session(driver: SearchDriver, human, args, open_run) -> None:
     """Run the loop in the background and serve the dashboard in front of it.
 
     The driver blocks on ``HumanOptimizer.ask()`` until the submit button puts
     a theta on its queue, so the "optimizer" here is a person with sliders and
     everything else in the loop is unchanged -- which is the whole point of
-    the port. Their candidates land in the store beside any other run's.
+    the port. Their candidates land in the store beside any other run's, and
+    the session runs until the person stops it rather than until a count runs
+    out (see ``human_session``).
+
+    ``open_run`` is how a new run is started from the button: a callable this
+    module supplies, invoked *by the worker*. The dashboard's own connections
+    are read-only and stay that way -- a viewer that physically cannot write
+    cannot corrupt a running search -- so the button sets an event and the
+    thread that already owns every write to this store does the writing. Same
+    shape as ``submit`` feeding a queue, and as ``status`` being a callable:
+    the viz layer signals, it does not act.
 
     The worker's fate is captured rather than lost (B10). A daemon thread that
     raises dies quietly: the dashboard stays up, the sliders keep working, and
@@ -186,13 +250,20 @@ def serve_human_session(driver: SearchDriver, human, args) -> None:
     # rather than a Queue because there is exactly one terminal state and the
     # reader wants the latest, not the next.
     status: list[str] = []
+    requests = threading.Event()
+    opened_at = [driver.n_trials]
     worker = threading.Thread(
-        target=run_capturing_failures, args=(driver, args.trials, status), daemon=True
+        target=run_capturing_failures,
+        args=(lambda: human_session(driver, open_run, requests,
+                                    _HUMAN_POLL_SECONDS, opened_at),
+              status, "the search worker stopped"),
+        daemon=True,
     )
     worker.start()
-    print(f"Human session: {args.trials} proposals, run {driver.run_id}.")
+    print(f"Human session: run {driver.run_id}, one trial per submission.")
     print("(the run appears in the store when its first candidate is stored)")
     print(f"Open http://127.0.0.1:{args.port} and submit candidates.")
+    print("Ctrl-C when you are done -- there is no trial count to run out.")
 
     def worker_status() -> str:
         """What the dashboard's watchdog line shows. Called on every poll."""
@@ -200,15 +271,40 @@ def serve_human_session(driver: SearchDriver, human, args) -> None:
             return status[-1]
         return "" if worker.is_alive() else "the search worker is gone"
 
-    create_app(args.store, human=human, status=worker_status).run(
-        host="127.0.0.1", port=args.port
-    )
+    def new_run() -> str:
+        """What the new-run button does: ask, and say what was asked.
+
+        The reply is deliberately about the *request*. The run it opens holds
+        no row until its first candidate lands (B1), so promising more than
+        "the next one starts it" would be describing a run that does not exist.
+
+        The condition is the worker's, read from the cell they share: a reply
+        decided here on its own terms would be the second definition of when a
+        request is honoured, and the one nobody re-reads.
+        """
+        if driver.n_trials <= opened_at[0]:
+            return "this run has no candidates yet -- it is already a new run"
+        requests.set()
+        return "a new run starts with your next submission"
+
+    # follow_run is a callable, not an id: the run changes under the dashboard
+    # when the button is used, and the panels should land on whichever one is
+    # being written now. It does not exist in the store when a session opens --
+    # the row appears with its first candidate (B1) -- so the dashboard watches
+    # for it and selects it the moment it does.
+    create_app(args.store, human=human, status=worker_status,
+               follow_run=lambda: driver.run_id, new_run=new_run).run(
+        host="127.0.0.1", port=args.port)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stage 2 XC-functional search")
     parser.add_argument("--data", default=DATA_DIR, help="dataset cache dir")
-    parser.add_argument("--trials", type=int, default=3000, help="optimizer trials")
+    parser.add_argument(
+        "--trials", type=int, default=3000,
+        help="optimizer trials; ignored with --human, where a session runs one "
+             "trial per submission until you stop it",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--human", action="store_true",
@@ -254,7 +350,11 @@ def main() -> None:
         # useful with the dashboard, and dash is an optional extra.
         from .optimizers.human import HumanOptimizer
 
-        coefficients = HumanOptimizer(form.bounds())
+        # A bounded wait, so the loop surfaces often enough to notice a
+        # new-run request while nobody is submitting. `ask` raises rather than
+        # inventing a candidate when the window passes, which is what makes
+        # the timeout usable as a heartbeat -- see `human_session`.
+        coefficients = HumanOptimizer(form.bounds(), timeout=_HUMAN_POLL_SECONDS)
     optimizer = FixedFormOptimizer(form, coefficients)
     # Rung 0 first: it costs milliseconds and needs no system, so a candidate
     # is measured against the exact conditions before anything is spent on it.
@@ -310,7 +410,18 @@ def main() -> None:
     if args.human:
         # A human session is the same loop with a slower optimizer: the driver
         # runs in the background and blocks on the queue the dashboard feeds.
-        serve_human_session(driver, coefficients, args)
+        #
+        # `open_run` is the only thing that knows how to open another run over
+        # the same population and protocol, which is this function's business
+        # and nobody else's -- the session is handed a callable and never sees
+        # a store.
+        def open_run() -> int:
+            return store.begin_run(
+                "human", notes=f"seed={args.seed}",
+                protocol_id=protocol_id, population_id=population_id,
+            )
+
+        serve_human_session(driver, coefficients, args, open_run)
         return
 
     print(f"Searching ({args.trials} trials, run {run_id} in {args.store})...")

@@ -7,7 +7,7 @@ by this document, which merges those items with the design decisions the
 review settled. Decision numbering continues from D16.
 
 **Status: implemented**, except F1, which is still a stub awaiting scope —
-three self-contained usability items have landed under it, listed there. The
+seven self-contained usability items have landed under it, listed there. The
 decisions below are written in the voice they were settled in; where the
 built shape differs from the decision as drafted, an *as built* note says how
 and why, rather than quietly editing the decision to match the code. The
@@ -288,13 +288,13 @@ the test that holds it, so a clause with no test is a clause not met.
 | 2B.4 | `b2c78d5` | `test_repairs.py` |
 | B5, F2 | `04cc32e` | `test_fd_potentials.py`, `test_numerics.py` |
 | B11–B13 | post-review | `test_populations.py`, `test_score.py` |
-| F1 (the three usability items) | post-review | `test_viz.py` |
+| F1 (the seven usability items) | post-review | `test_viz.py`, `test_repairs.py` |
 
 Suite: 282 tests before Stage 2B, 318 after with every extra installed, and
-twenty more with the F1 items below. The D15 fixture is still bitwise.
-Measured without the `[cmaes]` extra the suite is 327 passed and 1 skipped,
+twenty-five more with the F1 items below. The D15 fixture is still bitwise.
+Measured without the `[cmaes]` extra the suite is 332 passed and 1 skipped,
 the skip being `test_cmaes.py` declining to run against an optimizer that is
-not there. Thirty-six of the 327 are `test_viz.py` and are collected only
+not there. Thirty-nine of the 332 are `test_viz.py` and are collected only
 with the `[viz]` extra — without it the run collects 291, which is dash's absence
 rather than a gap: every acceptance clause is held by a test that runs either
 way. (This line previously said six tests were viz-gated, which was never
@@ -540,7 +540,7 @@ stated reason rather than a vague one.
   imports no physics module — and now D20: the score a panel shows is the
   stored told score, never a re-derivation.
 
-  **Five usability items landed ahead of that scope**, each small enough to
+  **Seven usability items landed ahead of that scope**, each small enough to
   stand alone and none of them touching the constraints:
 
   1. *A run opens on its best trial.* The scrubber's initial value was 0, so
@@ -641,6 +641,73 @@ stated reason rather than a vague one.
      not the same size — rather than a law, so it is written as one condition
      in `scale_for_baseline` and not derived from the data. A first draft
      asserted it as an invariant and the 2-system fixture disproved it.
+
+  6. *The dropdowns follow a store that is still being written.* Reported
+     from a human session: the run selector offered only run 1, the finished
+     3000-trial search, and never the run the person was sitting there
+     creating. Two things compounding. `begin_run` writes no row until the
+     first candidate does (B1, so an opened-and-abandoned dashboard leaves no
+     empty run behind), so at server start the session's own run genuinely
+     does not exist; and `build_layout` read the run list *once*, into an
+     `app.layout` that is one object served to every visitor — so the menus
+     were fixed at whatever the store held when the process started, and
+     reloading the browser did not rebuild them. The panels had always
+     re-read the store on the interval. The menus naming what to read had
+     not, which is invisible for a finished run and wrong for every live one:
+     candidates submitted during a session never became available as
+     baselines either.
+
+     `_choices` now refreshes all three option lists on the same tick. Which
+     run to *select* is `run_choice`, and its awkward case is the one the
+     symptom is made of: a human session should land on its own run, but that
+     run arrives mid-session, and re-selecting it on every poll would drag a
+     reader back every three seconds each time they looked at another run. So
+     it is selected on the transition, detected against the options the client
+     is already holding — a run absent from the last set offered and present
+     in this one has just appeared, and that is the only moment it reaches for
+     it. Verified against a live session: before submitting, only run 1 is on
+     offer; after, `run 2 - human (1 candidates)` appears and is selected; the
+     next poll leaves it; and a reader who switches back to run 1 stays there.
+
+  7. *A human session has no trial count, and opens its own runs.* Raised as
+     a question about the framework rather than a bug: a fixed `--trials` is
+     the wrong shape for a person. An optimizer is given a budget because
+     something has to decide when it has had enough; a person decides that by
+     stopping. So the session is unbounded — one trial per submission, for as
+     long as submissions keep coming — and the panel grows a **start a new
+     run** button instead of a length to declare up front.
+
+     **The answer to "does this break the framework" is no, and nothing in the
+     core moved.** `driver.run(n)` is already `for _ in range(n): self.step()`,
+     with `step` carrying the counters and the best-so-far across calls, so an
+     unbounded session is that same public method called by a composition root
+     that never stops asking. A new run is `driver.run_id = ...`: a plain
+     field, documented from the start as the thing stamped on every candidate
+     the store writes. `HumanOptimizer` already took a timeout and already
+     raised rather than inventing a candidate when it passed — which is what
+     makes the timeout usable as a *heartbeat*, the exception meaning "nobody
+     has submitted yet", raised before any state moves. The store already
+     tolerated the worker thread. Everything new is in `run_stage2`
+     (`human_session`) and the panel, which is where session policy belongs.
+
+     The button does not open the run. The dashboard's connections are
+     read-only on purpose — a viewer that physically cannot write cannot
+     corrupt a running search — so it sets an event and the thread that
+     already owns every write to this store does the writing. Same shape as
+     `submit` feeding a queue, and as `status` being a callable the dashboard
+     polls: the viz layer signals, it does not act.
+
+     Two details worth keeping. A request from a run with no candidates yet is
+     declined rather than honoured, because `begin_run` reserves an id per
+     call and burning ids on runs nothing will write is untidy; and the
+     button's *reply* is decided by the same shared cell the worker decides
+     with, since a reply computed on its own terms would be the second
+     definition of when a request is honoured and the one nobody re-reads. A
+     first draft had them disagree, and a test written against the wrong
+     assumption is what turned it up. Verified live: click before submitting
+     anything → "already a new run"; two submissions → run 2; click → "a new
+     run starts with your next submission"; click again → declined; submit →
+     run 3; eight submissions in, the session is still going.
 
   **One test came out of using it.** Each of these items changed a callback's
   arity — a `State` added here, an `Input` there — and a browser tab left open

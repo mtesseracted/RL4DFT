@@ -153,7 +153,15 @@ _PROPOSAL_HINT = (
     "against. The sliders are the coefficients of the formula panel, bounded "
     "by the same box the optimizer proposes inside; submitting queues one "
     "theta, which the search picks up as its next trial and records like any "
-    "other, so it lands in the history strip beside the machine's."
+    "other, so it lands in the history strip beside the machine's.\n\n"
+    "A session has no trial count. One submission is one trial and it runs "
+    "until you stop it -- a budget is what an optimizer needs because "
+    "something has to decide when it has had enough, and here you are that "
+    "something.\n\n"
+    "'start a new run' puts your next submission at the beginning of a fresh "
+    "run rather than after the ones already made, for when you want to change "
+    "approach and see it separately in the run list. The run appears there "
+    "once its first candidate lands, and the panels follow it."
 )
 
 
@@ -190,15 +198,45 @@ def check_human_endpoint(human) -> None:
         )
 
 
-def build_layout(store_path: str, human=None) -> html.Div:
-    run_options = [
+def run_options(store_path: str) -> list[dict]:
+    return [
         {"label": f"run {r['id']} - {r['optimizer']} ({r['candidates']} candidates)",
          "value": r["id"]}
         for r in data.runs(store_path)
     ]
-    baseline_options = [
+
+
+def baseline_options(store_path: str) -> list[dict]:
+    return [
         {"label": c["label"], "value": c["id"]} for c in data.baseline_choices(store_path)
     ]
+
+
+def run_choice(options: list[dict], current, offered: list[dict], follow_run):
+    """Which run the dropdown should be showing after a refresh.
+
+    ``follow_run`` is this session's own run, which a human session passes so
+    the panels land on the run the person is creating rather than on whatever
+    was newest when the server started. It cannot simply be selected whenever
+    it exists: the run row appears only when its first candidate does (B1), so
+    "exists" arrives mid-session, and re-selecting it on every poll would drag
+    a reader back every three seconds each time they looked at another run.
+
+    So it is selected on the transition, detected against the options the
+    client is *already holding*: a run that was not in the last set offered
+    and is in this one has just appeared, and that is the only moment this
+    reaches for it.
+    """
+    ids = [option["value"] for option in options]
+    if follow_run is not None and follow_run in ids:
+        if follow_run not in [option["value"] for option in offered or []]:
+            return follow_run
+    if current is None or current not in ids:
+        return follow_run if follow_run in ids else (ids[0] if ids else None)
+    return current
+
+
+def system_options(store_path: str) -> list[dict]:
     # One option per system *name*, not per version. A content-changed rebuild
     # adds a version (D17), and two options reading "atom_Z1" with the same
     # value would be a menu the reader cannot choose between -- the drill-down
@@ -206,10 +244,24 @@ def build_layout(store_path: str, human=None) -> html.Div:
     # version is not the dropdown's to pick. `dict.fromkeys` keeps first sight,
     # and `data.systems` orders newest first, so the name resolves the way
     # `density` resolves it.
-    system_options = [
+    return [
         {"label": name, "value": name}
         for name in dict.fromkeys(s["name"] for s in data.systems(store_path))
     ]
+
+
+def build_layout(store_path: str, human=None, new_run=None) -> html.Div:
+    """The initial page. Every dropdown here is refreshed by ``_choices``.
+
+    What this builds is a *starting* set of options, not the set: a store
+    gains runs, candidates and system versions while the page is open -- a
+    human session's own run does not exist until its first submission lands
+    (B1) -- and ``app.layout`` is one object served to every visitor, so
+    nothing built here is refreshed by reloading the browser either.
+    """
+    runs = run_options(store_path)
+    baselines = baseline_options(store_path)
+    systems = system_options(store_path)
 
     panels = [
         html.H1("xcsearch", style={"fontSize": "20px", "marginBottom": "2px"}),
@@ -228,8 +280,8 @@ def build_layout(store_path: str, human=None) -> html.Div:
         _card(
             "run",
             dcc.Dropdown(
-                id="run", options=run_options,
-                value=run_options[0]["value"] if run_options else None,
+                id="run", options=runs,
+                value=runs[0]["value"] if runs else None,
                 clearable=False,
             ),
             dcc.Graph(id="history", config={"displayModeBar": False}),
@@ -251,7 +303,7 @@ def build_layout(store_path: str, human=None) -> html.Div:
         _card(
             "regime x metric, against a baseline",
             dcc.Dropdown(
-                id="baseline", options=baseline_options,
+                id="baseline", options=baselines,
                 value=data.default_baseline(store_path), clearable=False,
             ),
             # What set the two means were taken over (D19). A comparison
@@ -275,8 +327,8 @@ def build_layout(store_path: str, human=None) -> html.Div:
         _card(
             "system detail",
             dcc.Dropdown(
-                id="system", options=system_options,
-                value=system_options[0]["value"] if system_options else None,
+                id="system", options=systems,
+                value=systems[0]["value"] if systems else None,
                 clearable=False,
             ),
             html.Div(id="system-metrics", style={"fontSize": "13px", "margin": "6px 0"}),
@@ -311,6 +363,17 @@ def build_layout(store_path: str, human=None) -> html.Div:
                 ),
                 html.Button("submit", id="submit", n_clicks=0),
                 html.Div(id="submitted", style={"fontSize": "13px", "marginTop": "6px"}),
+                # A session runs one trial per submission for as long as you
+                # keep submitting, so "start a new run" is the only run-shaped
+                # control it needs: there is no length to declare up front.
+                *([
+                    html.Hr(style={"border": "none", "borderTop": "1px solid #eceef1",
+                                   "margin": "12px 0 10px"}),
+                    html.Button("start a new run", id="new-run", n_clicks=0),
+                    html.Div(id="new-run-status",
+                             style={"fontSize": "13px", "marginTop": "6px",
+                                    "color": "#4a525c"}),
+                ] if new_run is not None else []),
                 hint=_PROPOSAL_HINT,
             )
         )
@@ -405,7 +468,8 @@ def scope_label(scope: dict) -> str:
     return line
 
 
-def create_app(store_path: str, human=None, status=None) -> Dash:
+def create_app(store_path: str, human=None, status=None, follow_run=None,
+               new_run=None) -> Dash:
     """Build the app. Every callback re-reads the store, so panels live-tail.
 
     ``status`` is an optional zero-argument callable returning a line to show
@@ -413,10 +477,21 @@ def create_app(store_path: str, human=None, status=None) -> Dash:
     search worker (B10). A callable rather than a queue or an object: the
     dashboard polls it, and everything it knows about the search stays "a
     string someone else computed".
+
+    ``new_run`` is the same idea in the other direction: a zero-argument
+    callable that asks the session to start a new run and returns a line
+    saying what was asked. Its button appears only when one is given. The
+    dashboard does not open the run itself and could not -- its connections
+    are read-only on purpose -- so this signals the thread that owns the
+    writes, exactly as ``submit`` signals the thread that owns the loop.
+
+    ``follow_run`` says which run the panels should land on; it may be an id
+    or a callable returning one, since a session's current run changes when
+    that button is used.
     """
     app = Dash(__name__)
     app.title = "xcsearch"
-    app.layout = build_layout(store_path, human)
+    app.layout = build_layout(store_path, human, new_run)
 
     @app.callback(
         Output("scrubber", "max"),
@@ -548,6 +623,37 @@ def create_app(store_path: str, human=None, status=None) -> Dash:
         )
 
     @app.callback(
+        Output("run", "options"),
+        Output("run", "value"),
+        Output("baseline", "options"),
+        Output("system", "options"),
+        Input("tick", "n_intervals"),
+        State("run", "value"),
+        State("run", "options"),
+    )
+    def _choices(_tick, current_run, offered):
+        """Keep the dropdowns level with a store that is still being written.
+
+        The panels have always re-read the store on the interval; the menus
+        naming what to read did not, and were fixed at whatever existed when
+        the server started. That is invisible for a finished run and wrong for
+        every live one -- a human session's own run is created by its first
+        submission (B1), so it could never be selected at all, and candidates
+        submitted during a session never became available as baselines.
+
+        Reloading the browser was no escape either: ``app.layout`` is one
+        object built once and served to every visitor.
+        """
+        options = run_options(store_path)
+        following = follow_run() if callable(follow_run) else follow_run
+        return (
+            options,
+            run_choice(options, current_run, offered, following),
+            baseline_options(store_path),
+            system_options(store_path),
+        )
+
+    @app.callback(
         Output("worker-status", "children"),
         Input("tick", "n_intervals"),
     )
@@ -570,6 +676,21 @@ def create_app(store_path: str, human=None, status=None) -> Dash:
                 f"submitted [{', '.join(f'{c:.4f}' for c in accepted)}]"
                 f" - {human.pending_submissions} waiting"
             )
+
+        if new_run is not None:
+            @app.callback(
+                Output("new-run-status", "children"),
+                Input("new-run", "n_clicks"),
+                prevent_initial_call=True,
+            )
+            def _new_run(n_clicks):
+                """Ask the session for a new run and report what it said.
+
+                The reply is the session's, not this callback's: whether a
+                request is worth honouring depends on how many candidates the
+                current run has, which is the worker's business to know.
+                """
+                return new_run() if n_clicks else no_update
 
     return app
 
