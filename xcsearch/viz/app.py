@@ -198,6 +198,104 @@ def check_human_endpoint(human) -> None:
         )
 
 
+_RELOAD_ADVICE = (
+    "the page was loaded from an older version of this app, so it is calling "
+    "callbacks with the wrong arguments -- reload it (ctrl-shift-r)"
+)
+
+
+def arguments_expected(app, output: str) -> int | None:
+    """How many arguments the registered callback for ``output`` takes.
+
+    Top-level arguments, which is what dash indexes the request against: a
+    pattern-matching group counts once however many components it matches.
+    ``None`` if no callback is registered for that output at all, which is
+    the same illness at a later stage -- a page asking for something this
+    server has never heard of.
+    """
+    callback = app.callback_map.get(output)
+    if callback is None:
+        return None
+    return len(callback.get("inputs", ())) + len(callback.get("state", ()))
+
+
+def stale_page(app, body: dict) -> str | None:
+    """Why this request cannot be served, if it cannot, in one line.
+
+    A dash page fetches the callback signatures once, at load, and then sends
+    arguments in that shape forever. Restart the server with a callback that
+    has gained an argument and every open page is now wrong -- it sends three
+    where four are read, and dash indexes off the end of the list, which
+    surfaces as an ``IndexError`` deep in ``_prepare_grouping`` with nothing
+    in it naming the real problem. Worse, ``dcc.Interval`` means the page
+    keeps asking, so one stale tab prints that traceback every three seconds.
+
+    Checking is cheap and the diagnosis is exact, so the page is told what is
+    wrong with it instead of the log being filled with a framework's stack.
+    """
+    output = body.get("output")
+    if not isinstance(output, str):
+        return None
+    expected = arguments_expected(app, output)
+    name = output.split("...")[0].strip(".")
+    if expected is None:
+        return f"no callback is registered for {name}: {_RELOAD_ADVICE}"
+    sent = len(body.get("inputs") or ()) + len(body.get("state") or ())
+    if sent < expected:
+        return (f"the callback for {name} reads {expected} arguments and the "
+                f"page sent {sent}: {_RELOAD_ADVICE}")
+    return None
+
+
+def refuse_stale_pages(app) -> None:
+    """Answer a stale page with its diagnosis, and stop caching the contract.
+
+    Two halves of one problem. The guard turns the crash into a 409 naming
+    the callback and the argument counts, which is a thing a reader can act
+    on. The headers close the door the other way: dash serves the layout and
+    the dependency list with no cache directive at all, so nothing stops a
+    browser reusing yesterday's contract against today's server, and a page
+    that is stale that way looks freshly loaded to the person loading it.
+    """
+    from flask import request
+
+    server = app.server
+
+    @server.before_request
+    def _reject_mismatched_arguments():
+        if request.method != "POST":
+            return None
+        if not request.path.endswith("/_dash-update-component"):
+            return None
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return None
+        complaint = stale_page(app, body)
+        if complaint is None:
+            return None
+        return server.response_class(complaint, status=409, mimetype="text/plain")
+
+    @server.after_request
+    def _do_not_cache_the_contract(response):
+        contract = ("/_dash-layout", "/_dash-dependencies")
+        if request.path.endswith(contract) or request.path in ("/", ""):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+
+def serve(app, host: str = "127.0.0.1", port: int = 8050) -> None:
+    """Run the app, with an already-open page told to reload on a restart.
+
+    ``dev_tools_hot_reload`` gives dash a per-process reload hash that the
+    page polls; a page that comes back with a different hash than the one it
+    loaded under reloads itself. That is exactly the stale-page case above,
+    healed rather than diagnosed -- restart the session and the tab you left
+    open picks up the new callbacks on its own. It is only the hot reloader:
+    ``debug`` stays off, so no error overlays and no code-reloading.
+    """
+    app.run(host=host, port=port, debug=False, dev_tools_hot_reload=True)
+
+
 def run_options(store_path: str) -> list[dict]:
     return [
         {"label": f"run {r['id']} - {r['optimizer']} ({r['candidates']} candidates)",
@@ -740,6 +838,8 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
                 """
                 return new_run() if n_clicks else no_update
 
+    # Registered last, so it sees the whole callback map when it checks one.
+    refuse_stale_pages(app)
     return app
 
 
@@ -764,8 +864,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     args = parser.parse_args()
 
-    app = create_app(args.store)
-    app.run(host=args.host, port=args.port, debug=False)
+    serve(create_app(args.store), host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

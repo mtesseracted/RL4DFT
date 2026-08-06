@@ -7,7 +7,7 @@ by this document, which merges those items with the design decisions the
 review settled. Decision numbering continues from D16.
 
 **Status: implemented**, except F1, which is still a stub awaiting scope —
-eight self-contained usability items have landed under it, listed there. The
+nine self-contained usability items have landed under it, listed there. The
 decisions below are written in the voice they were settled in; where the
 built shape differs from the decision as drafted, an *as built* note says how
 and why, rather than quietly editing the decision to match the code. The
@@ -288,7 +288,7 @@ the test that holds it, so a clause with no test is a clause not met.
 | 2B.4 | `b2c78d5` | `test_repairs.py` |
 | B5, F2 | `04cc32e` | `test_fd_potentials.py`, `test_numerics.py` |
 | B11–B13 | post-review | `test_populations.py`, `test_score.py` |
-| F1 (the eight usability items) | post-review | `test_viz.py`, `test_repairs.py` |
+| F1 (the nine usability items) | post-review | `test_viz.py`, `test_repairs.py` |
 
 Suite: 282 tests before Stage 2B, 318 after with every extra installed, and
 twenty-five more with the F1 items below. The D15 fixture is still bitwise.
@@ -540,7 +540,7 @@ stated reason rather than a vague one.
   imports no physics module — and now D20: the score a panel shows is the
   stored told score, never a re-derivation.
 
-  **Eight usability items landed ahead of that scope**, each small enough to
+  **Nine usability items landed ahead of that scope**, each small enough to
   stand alone and none of them touching the constraints:
 
   1. *A run opens on its best trial.* The scrubber's initial value was 0, so
@@ -724,15 +724,47 @@ stated reason rather than a vague one.
      deliberately the three things the panel *needs*: an endpoint that keeps
      one gets a better line, one that does not still gets a true one.
 
-  **One test came out of using it.** Each of these items changed a callback's
-  arity — a `State` added here, an `Input` there — and a browser tab left open
-  across the upgrade posts the old argument count to the new server, which
-  dash meets with `IndexError: list index out of range` deep in
-  `_prepare_grouping`. Not a defect, but the `dcc.Interval` fires every three
-  seconds, so one stale tab produces the traceback on a loop and it reads like
-  one. Refreshing is the fix.
+  9. *A page older than the server is told so, rather than crashing in a
+     loop.* Each item above changed some callback's arity — a `State` added
+     here, an `Input` there — and a page holds the signatures it fetched at
+     load for as long as it stays open. Post the old argument count to the
+     new server and dash indexes off the end of its own argument list:
+     `IndexError: list index out of range`, six frames into
+     `_prepare_grouping`, naming no callback and no count. The `dcc.Interval`
+     then reprints it every three seconds.
 
-  What the episode exposed is that the tests drove the panel *functions* and
+     **This was first written off as a stale tab, and that was wrong** — the
+     reader came back having restarted the browser and seen it again. The
+     mechanism was then reproduced deliberately, by sending each of the three
+     four-argument callbacks one argument short, and matches the reported
+     traceback frame for frame. Three separate windows let a page get out of
+     step, and only one of them is a tab someone forgot to close, so all
+     three are shut:
+
+     - **The contract is no longer cachable.** Dash serves `/_dash-layout`
+       and `/_dash-dependencies` with no cache directive whatsoever — checked,
+       not assumed: no `Cache-Control`, no `ETag`, no `Last-Modified` — which
+       leaves a browser free to reuse them. A page stale that way is the
+       confusing kind, because it looks freshly loaded to whoever loaded it.
+       Both routes and the index now say `no-store`.
+     - **An open page heals itself.** `serve` turns on dash's hot reloader,
+       and nothing else: `debug` stays off, so no error overlays and no
+       code-reloading. What that buys is a per-process reload hash the page
+       polls — verified to differ across two starts — so a tab left open
+       across a restart reloads on its own rather than waiting to be told.
+     - **The gap between them is diagnosed.** There is still a moment after a
+       restart before the page notices, so `refuse_stale_pages` checks each
+       request against the callback's declared argument count and answers a
+       short one with `409` and a line naming the callback, both counts, and
+       what to do. The unknown-output case — a page asking for a callback
+       this server no longer has — gets the same answer.
+
+     The check reads `inputs` and `state` off the registered callback, which
+     counts a pattern-matching group once however many components it matches
+     — the same unit dash indexes with, and the reason the submit callback
+     reads four arguments and not eight.
+
+  **One test came out of using it.** What the episode exposed is that the tests drove the panel *functions* and
   never the endpoint, so the wiring between a callback's declared inputs and
   its signature was unheld: add an `Input` to a decorator and forget the
   parameter, and every panel 500s in a browser while the suite stays green.

@@ -33,7 +33,14 @@ from xcsearch.records import SystemRecord
 from xcsearch.store import SQLiteRecordStore
 from xcsearch.viz import data, figures
 from xcsearch.viz import app as app_module
-from xcsearch.viz.app import best_trial, build_layout, create_app, scrubber_value
+from xcsearch.viz.app import (
+    arguments_expected,
+    best_trial,
+    build_layout,
+    create_app,
+    scrubber_value,
+    stale_page,
+)
 from xcsearch.worlds.exp1d.conditions import default_conditions
 from xcsearch.worlds.exp1d.functionals import LDA_THETA, LocalAnsatzForm
 
@@ -241,6 +248,92 @@ def test_every_callback_survives_a_real_dispatch(finished_run):
         assert response.status_code == 200, (
             f"{callback['output']} returned {response.status_code}"
         )
+
+
+# --------------------------------------------------------------------------
+# A page older than the server it is talking to
+# --------------------------------------------------------------------------
+
+
+def _four_argument_callback(dependencies):
+    """A callback whose inputs and state together come to four."""
+    return next(c for c in dependencies
+                if len(c["inputs"]) + len(c["state"]) == 4)
+
+
+def test_a_page_one_argument_short_is_diagnosed_not_a_traceback(finished_run):
+    """The stale-page failure, which is a restart away at any time.
+
+    A page fetches the callback signatures once and then sends arguments in
+    that shape for as long as it is open. Restart the server with a callback
+    that has gained an argument -- three did this week -- and the page sends
+    one too few. Dash indexes off the end of the list and raises IndexError
+    from inside its own grouping code, naming nothing that would let a reader
+    find the cause, and ``dcc.Interval`` reprints it every three seconds.
+    """
+    path, run_id, _ = finished_run
+    app = create_app(path)
+    client = app.server.test_client()
+    dependencies = json.loads(client.get("/_dash-dependencies").data)
+
+    callback = _four_argument_callback(dependencies)
+    arguments = callback["inputs"] + callback["state"]
+    response = client.post("/_dash-update-component", json={
+        "output": callback["output"],
+        "outputs": _output_specs(callback["output"]),
+        # What the page from one commit ago sends: everything but the last.
+        "inputs": [dict(spec, value=None) for spec in callback["inputs"]],
+        "state": [dict(spec, value=None) for spec in callback["state"][:-1]],
+        "changedPropIds": ["tick.n_intervals"],
+    })
+
+    assert response.status_code == 409
+    complaint = response.data.decode()
+    assert f"reads {len(arguments)} arguments" in complaint
+    assert f"page sent {len(arguments) - 1}" in complaint
+    assert "reload" in complaint
+
+
+def test_a_callback_this_server_never_had_is_refused_the_same_way(finished_run):
+    """The other half of stale: a page asking for a callback since removed."""
+    path, _, _ = finished_run
+    client = create_app(path).server.test_client()
+    response = client.post("/_dash-update-component", json={
+        "output": "..long-gone.children..", "outputs": [],
+        "inputs": [], "state": [], "changedPropIds": [],
+    })
+    assert response.status_code == 409
+    assert "no callback is registered" in response.data.decode()
+
+
+def test_the_check_counts_a_pattern_matching_group_once(finished_run):
+    """Five theta sliders are one argument, which is what dash indexes."""
+    path, _, _ = finished_run
+    human = HumanOptimizer(FORM.bounds(), timeout=0.01)
+    app = create_app(path, human=human)
+    submitted = next(key for key in app.callback_map if key.startswith("..submitted"))
+
+    # submit.n_clicks, tick.n_intervals, the whole theta group, last-submission.
+    assert arguments_expected(app, submitted) == 4
+    assert stale_page(app, {"output": submitted,
+                            "inputs": [1, 2],
+                            "state": [[0.0] * len(FORM.bounds()), None]}) is None
+    assert stale_page(app, {"output": submitted,
+                            "inputs": [1],
+                            "state": [[0.0] * len(FORM.bounds())]}) is not None
+
+
+def test_the_layout_and_the_dependency_list_are_never_cached(finished_run):
+    """Nothing may hold yesterday's contract against today's server.
+
+    Dash serves both with no cache directive at all, which leaves a browser
+    free to reuse them -- and a page stale that way looks freshly loaded to
+    the person who loaded it, which is the confusing version of this bug.
+    """
+    path, _, _ = finished_run
+    client = create_app(path).server.test_client()
+    for route in ("/", "/_dash-layout", "/_dash-dependencies"):
+        assert client.get(route).headers.get("Cache-Control") == "no-store", route
 
 
 def _output_specs(output: str):

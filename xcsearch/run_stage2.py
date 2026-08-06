@@ -244,7 +244,7 @@ def serve_human_session(driver: SearchDriver, human, args, open_run) -> None:
     """
     import threading
 
-    from .viz.app import create_app
+    from .viz.app import create_app, serve
 
     # One cell, written by the worker, read by the interval callback. A list
     # rather than a Queue because there is exactly one terminal state and the
@@ -292,9 +292,9 @@ def serve_human_session(driver: SearchDriver, human, args, open_run) -> None:
     # being written now. It does not exist in the store when a session opens --
     # the row appears with its first candidate (B1) -- so the dashboard watches
     # for it and selects it the moment it does.
-    create_app(args.store, human=human, status=worker_status,
-               follow_run=lambda: driver.run_id, new_run=new_run).run(
-        host="127.0.0.1", port=args.port)
+    serve(create_app(args.store, human=human, status=worker_status,
+                     follow_run=lambda: driver.run_id, new_run=new_run),
+          host="127.0.0.1", port=args.port)
 
 
 def main() -> None:
