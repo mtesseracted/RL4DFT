@@ -15,6 +15,8 @@ the gap between them was not a property of the functionals.
 
 from __future__ import annotations
 
+import importlib.util
+
 import numpy as np
 import pytest
 
@@ -211,7 +213,6 @@ def test_a_cross_population_heatmap_states_what_it_was_computed_over(
     tmp_path, systems
 ):
     from xcsearch.run_stage2 import format_heatmap
-    from xcsearch.viz.app import scope_label
 
     path = str(tmp_path / "cross.sqlite")
     store = SQLiteRecordStore(path)
@@ -242,13 +243,19 @@ def test_a_cross_population_heatmap_states_what_it_was_computed_over(
     same = store.heatmap_scope(candidate_id, wide_baseline)
     assert same["same_population"] and same["shared_systems"] == len(systems)
 
-    # Both readers state it, in the same words.
+    # The CLI states it, and the viz reader sees the same scope the store does.
     printed = format_heatmap(store, candidate_id, narrow_baseline)
     assert f"over the {NARROW} shared systems" in printed
-    assert scope_label(scope) in printed.splitlines()[0]
-    assert scope_label(data.heatmap_scope(path, candidate_id, narrow_baseline)) == (
-        scope_label(scope)
-    )
+    assert data.heatmap_scope(path, candidate_id, narrow_baseline) == scope
+
+    # That both readers *word* it identically is the dashboard's half of the
+    # clause, and `scope_label` lives in the layout module -- so it needs dash.
+    # The rest of this test does not, and acceptance (c) is about the store
+    # and what it hands its readers, which is checked above either way.
+    if importlib.util.find_spec("dash") is not None:
+        from xcsearch.viz.app import scope_label
+
+        assert scope_label(scope) in printed.splitlines()[0]
 
     # The restriction is real: the candidate's own mean over all its systems
     # differs from its mean over the shared six.
@@ -300,3 +307,121 @@ def test_viz_reads_the_population_a_run_was_opened_over(tmp_path, systems):
     assert len(members) == NARROW
     assert {m["split"] for m in members} <= {"train", "holdout", "extrapolation"}
     assert all(np.isfinite(m["n_elec"]) for m in members)
+
+
+# --------------------------------------------------------------------------
+# Review findings, after 2B.2 landed
+# --------------------------------------------------------------------------
+def _rebound(system, **changes):
+    """A copy of a system record with fields replaced."""
+    copy = SystemRecord(**vars(system))
+    for field, value in changes.items():
+        setattr(copy, field, value)
+    return copy
+
+
+def test_a_regime_reassignment_does_not_misalign_the_heatmap_bins(tmp_path, systems):
+    """A shared system the two populations bin differently is not compared.
+
+    The intersection restriction alone is not enough: it asks whether both
+    populations *contain* a system, while the heatmap groups by the regime
+    each population assigned it. A system in "atom" for one and "chain" for
+    the other would contribute to a different bin on each side, so that bin's
+    candidate mean and baseline mean would cover different sets -- under a
+    scope line still claiming the full shared width.
+    """
+    path = str(tmp_path / "rebinned.sqlite")
+    store = SQLiteRecordStore(path)
+    _, baseline = _seed(store, systems)
+
+    # Same physics, same splits, one system rebinned -- a new population.
+    moved, *rest = systems
+    rebinned = [_rebound(moved, regime="rebinned"), *rest]
+    new_population = store.open_population(rebinned)
+    assert new_population != store.candidate_population(baseline)
+    _, result = _run(store, rebinned, new_population)
+    candidate = result.best_candidate_id
+
+    scope = store.heatmap_scope(candidate, baseline)
+    assert scope["shared_systems"] == len(systems), "every version is in both"
+    assert scope["comparable_systems"] == len(systems) - 1, (
+        "the rebinned system cannot be compared to itself across two bins"
+    )
+
+    # The rebinned system is absent from both sides, not present on one.
+    rows = store.heatmap(candidate, baseline)
+    assert "rebinned" not in {row["bin"] for row in rows}
+    for row in rows:
+        assert row["value"] is not None and row["baseline"] is not None
+
+    # And the number quoted is the one the table has, with the gap named.
+    from xcsearch.run_stage2 import format_heatmap
+
+    printed = format_heatmap(store, candidate, baseline)
+    assert f"over the {len(systems) - 1} shared systems" in printed
+    assert "1 more shared but binned differently" in printed
+    store.close()
+
+
+def test_the_system_dropdown_offers_each_name_once(tmp_path, systems):
+    """A content-changed rebuild adds a version, not a second menu entry.
+
+    Options are keyed by name -- that is what the drill-down resolves through
+    -- so two versions of one system would render two identical, unchoosable
+    options.
+    """
+    pytest.importorskip("dash", reason="the [viz] extra is not installed")
+    from xcsearch.viz.app import build_layout
+
+    path = str(tmp_path / "versions.sqlite")
+    store = SQLiteRecordStore(path)
+    _seed(store, systems)
+
+    # One system's physics moves: a new version of the same name (D17).
+    moved, *rest = systems
+    changed = _rebound(moved, e_xc_exact=float(moved.e_xc_exact) + 1e-3)
+    changed.content_hash = record_content_hash(changed)
+    store.open_population([changed, *rest])
+    store.close()
+
+    assert len([s for s in data.systems(path) if s["name"] == moved.name]) == 2, (
+        "the store really does hold two versions of that name"
+    )
+    layout = build_layout(path)
+    options = _dropdown_options(layout, "system")
+    assert [o["value"] for o in options] == sorted({s.name for s in systems})
+
+
+def test_the_unscoped_system_list_claims_no_split_or_regime(tmp_path, systems):
+    """Outside a population there is no assignment, so none is reported.
+
+    The join it replaced returned whichever population SQLite reached first --
+    a bare column that reads like an answer.
+    """
+    path = str(tmp_path / "unscoped.sqlite")
+    store = SQLiteRecordStore(path)
+    store.open_population(systems)
+    store.open_population([_rebound(s, split="holdout") for s in systems])
+    store.close()
+
+    rows = data.systems(path)
+    assert rows, "the versions are there"
+    assert all(row["split"] is None and row["regime"] is None for row in rows)
+
+
+def _dropdown_options(component, target_id):
+    """Every option of the dropdown with ``target_id``, anywhere in a layout."""
+    if getattr(component, "id", None) == target_id:
+        return component.options
+    for child in _children(component):
+        found = _dropdown_options(child, target_id)
+        if found is not None:
+            return found
+    return None
+
+
+def _children(component):
+    children = getattr(component, "children", None)
+    if children is None:
+        return []
+    return children if isinstance(children, list) else [children]

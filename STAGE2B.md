@@ -6,6 +6,13 @@ B8 design review concluded. `STAGE2.md`'s plan sections stay fixed; its tail —
 by this document, which merges those items with the design decisions the
 review settled. Decision numbering continues from D16.
 
+**Status: implemented**, except F1, which is still a stub awaiting scope. The
+decisions below are written in the voice they were settled in; where the
+built shape differs from the decision as drafted, an *as built* note says how
+and why, rather than quietly editing the decision to match the code. The
+difference is usually the interesting part — D19's is what a run turned out
+not to be able to key.
+
 The organizing finding: every number in `evaluations` is a measurement, and a
 measurement's meaning is a four-tuple — *what* was measured (the candidate),
 *against what* (the system as it existed at that moment), *how* (grid,
@@ -90,42 +97,102 @@ versioned.** The Stage 2 schema guaranteed neither.
   measured against (`x`, `w`, `n`, `e_xc_exact`, and the frozen potential
   arrays) — computed once at cache-build time and stored in both the `.npz`
   and the row. `regime` and `split` are *assignment*, not identity: they
-  move to run scope (D19) and never partake in the hash. `evaluations`
-  references the version id, not the name. `register_systems` becomes
-  insert-if-new-version: relaunching over an unchanged cache inserts
+  move to population scope (D19) and never partake in the hash.
+  `evaluations` references the version id, not the name. `register_systems`
+  becomes insert-if-new-version: relaunching over an unchanged cache inserts
   nothing, a content-changed system creates a *new row* with old evaluations
   still attached to the old one. Overwrite becomes structurally impossible
   rather than policed, and the call cannot fail — which dissolves the old
   option-(3) objection that immutability makes registration fallible.
+  *As built*: a Stage 2 store cannot be opened at all. The schemas are
+  incompatible in the one direction that matters — a pre-2B `systems` row is
+  keyed by name and carries no hash, so there is no way to tell which version
+  its evaluations were taken against, which is precisely B8. Rather than
+  migrate on a guess, `SQLiteRecordStore` detects the old shape and raises
+  with the reason and the remedy: move the file aside and start a new store,
+  the old one staying readable with any Stage 2 checkout. Refusing is the
+  honest option — the fact a migration would need was never recorded, and
+  inventing it is exactly the class of error this stage exists to end.
 - **D18 — Protocol rows.** `protocols(id, hash, json)`: grid parameters,
   margins, floors, the anchor window, the evaluator stack and its metric
   list, library versions, and the git commit hash. One row per distinct
   configuration, hash-keyed, referenced by `runs`. Written once, ~1 KB. The
   git hash is stored but deliberately unconsumed — a breadcrumb for a future
   investigation, not a dependency.
-- **D19 — Population is a first-class object.** A junction table
-  `run_systems(run_id, system_version_id, split)`, frozen at run start —
-  chosen over a mere fingerprint hash because a table makes the *difference*
-  between two populations visible and their union or intersection an
-  ordinary join. `seed_baseline` becomes keyed by (label, population)
-  instead of label alone, which closes the original 51-vs-63 hole by
-  construction: a baseline is a measurement over a stated population, and a
-  new population gets a new baseline. Reductions compare within one
-  population by default; cross-population comparison exists but is explicit
-  and labeled ("over the N shared systems") — the old option (4) in its
-  soft form, made cheap by the junction.
+- **D19 — Population is a first-class object.** A junction table, frozen
+  when the population is opened — chosen over a mere fingerprint hash
+  because a table makes the *difference* between two populations visible and
+  their union or intersection an ordinary join. `seed_baseline` becomes
+  keyed by (label, population) instead of label alone, which closes the
+  original 51-vs-63 hole by construction: a baseline is a measurement over a
+  stated population, and a new population gets a new baseline. Reductions
+  compare within one population by default; cross-population comparison
+  exists but is explicit and labeled ("over the N shared systems") — the old
+  option (4) in its soft form, made cheap by the junction.
+
+  *As built*, the junction hangs off a population rather than off a run:
+
+      populations(id, hash UNIQUE, n_systems, created_at)
+      population_systems(population_id, system_version_id, split, regime)
+      runs.population_id, candidates.population_id
+
+  The originally drafted `run_systems(run_id, system_version_id, split)`
+  could not carry the decision, for two reasons found in implementation.
+  **The baseline belongs to no run.** D13 stores it with `run_id IS NULL`,
+  so a junction keyed by run has nowhere to put the population a baseline
+  was measured over — which is the exact quantity B8 turned on. **And 2B.2's
+  acceptance (c) needs an intersection between two populations, not two
+  runs.** A candidate and the baseline it is compared against are routinely
+  from different runs or from no run; "the systems both were measured over"
+  has to be answerable without knowing whether either has a run at all.
+
+  Hashing the membership (sorted `(version_id, split, regime)` triples,
+  `population_hash`) makes the population the identity, so two runs over an
+  unchanged cache *share* one row and are comparable without restriction —
+  the common case costs one lookup and no intersection. `population_id`
+  therefore sits on both `runs` and `candidates`: the run's is provenance,
+  the candidate's is what every reduction scopes by.
+
+  `regime` joins `split` on the junction, which the draft omitted. Both are
+  assignment (D17), both are consulted at read time to interpret a stored
+  number, and the repair rule admits no third category: the heatmap's bins
+  come from each candidate's own population, not from a global dimension
+  table rewritten by the next rebuild.
+
+  Which turned out to have a second consequence, found in review. Restricting
+  a cross-population comparison to the systems both populations *contain* is
+  not enough, because the regime is the heatmap's grouping key: a system both
+  contain but bin differently lands in one bin for the candidate and another
+  for the baseline, so that bin's two means cover different sets — under a
+  scope line still claiming the full shared width. The intersection therefore
+  requires agreement on the regime as well as membership, and the scope
+  carries two counts: `shared_systems` (membership) and `comparable_systems`
+  (membership *and* the same bin), the second being what the table covers and
+  what the label quotes. They differ only after a regime reassignment, and
+  when they do the label says so rather than quoting a width the figure does
+  not have.
+
+  `open_population(systems) -> int` is a new `RecordStore` method, so a
+  store implementation cannot offer persistence without offering the scope
+  its numbers mean something in. Writing a record about a system outside the
+  population is refused rather than accepted quietly.
 - **D20 — The told score is data.** `candidates` gains a `score` column,
   written in the same transaction as the candidate's records: exactly the
   number `tell()` received, recorded once and never re-derived. The
   `RankingPolicy` is the canonical definition; the dashboard's
   `history()`/best-so-far read the stored score, the SQL `AVG`
   re-definition in `viz/data.history` is deleted, and the dead
-  `store.best()` is removed (or reduced to `ORDER BY score`). The baseline
+  `store.best()` is reduced to `ORDER BY score ASC, id ASC` rather than
+  removed — of the two options this decision left open, keeping it costs one
+  statement and the tie-break on `id` makes "best" total rather than
+  arbitrary, which is what a near-tie needs. The baseline
   gets its score at seed time through the same policy — the composition
   root already holds the records. D15 is untouched: the policy keeps its
   bitwise numpy reduction; this decision *records* its output rather than
-  redefining it. `HEATMAP_SQL` is unaffected — the heatmap is a genuinely
-  different, per-regime quantity, already single-homed. Rationale, in
+  redefining it. `HEATMAP_SQL` is unaffected *by this decision* — the
+  heatmap is a genuinely different, per-regime quantity, already
+  single-homed — though D19 does change where its `regime` comes from and
+  adds the intersection clause. Rationale, in
   increasing severity: SQLite's row-order `AVG` and numpy's pairwise mean
   can disagree in the last bits and flip a near-tie's "best"; a future
   policy swap would silently desynchronize what the dashboard shows from
@@ -206,6 +273,25 @@ knows nothing about either.
 
 ## Sub-stages
 
+All four landed on branch `stage2b`, together with B5 and F2 from the
+sections below. 2B.1 and 2B.2 are one commit and could not be two: moving
+`regime`/`split` off the systems row is the same schema change as making that
+row append-only, and a store between the halves has no home for either field.
+Everything here except F1 is implemented; each acceptance clause below names
+the test that holds it, so a clause with no test is a clause not met.
+
+| | landed as | tests |
+|---|---|---|
+| 2B.1, 2B.2 | `b2c78d5` | `test_provenance.py`, `test_populations.py` |
+| 2B.3 | `b2c78d5` | `test_score.py` |
+| 2B.4 | `b2c78d5` | `test_repairs.py` |
+| B5, F2 | `04cc32e` | `test_fd_potentials.py`, `test_numerics.py` |
+| B11–B13 | post-review | `test_populations.py`, `test_score.py` |
+
+Suite: 282 tests before Stage 2B, 318 after. The D15 fixture is still bitwise.
+Six of those skip without the `[viz]` extra, which is dash's absence rather
+than a gap — every acceptance clause is held by a test that runs either way.
+
 ### 2B.1 — System versions and protocol rows (D17, D18)
 
 - The schema change, the cache-build content hash, and
@@ -216,18 +302,27 @@ knows nothing about either.
   *identically*, before and after; (b) a relaunch over an unchanged cache
   inserts no rows; (c) a run references a protocol row whose json
   round-trips, git hash included; (d) the pinned D15 fixture still passes.
+- Held by (a)
+  `test_a_content_change_adds_a_version_and_leaves_old_evaluations_alone`,
+  `test_a_relaunch_over_an_unchanged_cache_inserts_no_rows` (b),
+  `test_a_run_references_a_protocol_whose_json_round_trips` (c), `test_d15.py`
+  unchanged (d).
 
 ### 2B.2 — Populations and the baseline (D19)
 
-- `run_systems` written when a run opens; `seed_baseline` keyed by
-  (label, population); reductions scoped to a population; the intersection
-  comparison as an explicit, labeled view.
+- The population junction written when a population is opened;
+  `seed_baseline` keyed by (label, population); reductions scoped to a
+  population; the intersection comparison as an explicit, labeled view.
 - **Acceptance**: (a) the live incident reproduced as a test — a store
   seeded over 51 systems, then relaunched over 63 — produces two baselines,
   each scored over its own population, and no reduction silently spans
   both; (b) a split reassignment in a rebuilt cache changes no prior run's
   history or score readback; (c) a cross-population heatmap states the
   shared-system count it was computed over.
+- Held by `test_a_relaunch_over_more_systems_gets_its_own_baseline` and
+  `test_a_score_is_never_averaged_across_two_populations` (a),
+  `test_a_split_reassignment_leaves_the_earlier_run_untouched` (b),
+  `test_a_cross_population_heatmap_states_what_it_was_computed_over` (c).
 
 ### 2B.3 — The persisted score (D20)
 
@@ -238,46 +333,68 @@ knows nothing about either.
   constructed near-tie that row-order `AVG` would have flipped; (b) a run
   driven by a policy other than `MeanSquaredError` renders a correct
   history with no change in `viz/`; (c) the D15 fixture still passes.
+- Held by `test_a_near_tie_is_decided_by_the_told_score_not_by_sql` (a),
+  `test_a_different_policy_renders_with_no_change_in_viz` (b), `test_d15.py`
+  unchanged (c).
 
 ### 2B.4 — The remaining bug repairs
 
 The open items from the ledger below that D17–D20 do not subsume, folded
-into one sub-stage: B1 (the lazy run row — which under D19 also writes
-`run_systems` on first candidate; note `serve_human_session` currently
-prints `driver.run_id` before any candidate exists, so the print moves or
-the id arrives lazily), B2 (`delete_run`, transactional, cascade order
-`duplicate_buckets` → `evaluations` → `candidates` → `run_systems` →
-`runs`; the baseline invariant — never touch `run_id IS NULL` candidates —
-stated on any future bulk variant, where the risk actually lives), B6 (the
-shape check at `create_app`, covering `bounds`, `submit`, *and*
+into one sub-stage: B1 (the lazy run row), B2 (`delete_run`, transactional),
+B6 (the shape check at `create_app`, covering `bounds`, `submit`, *and*
 `pending_submissions`), B9 (the `dcc.Store` single source of the resolved
 candidate id), and B10's wanted watchdog (`serve_human_session` capturing a
 dead worker's exception into a cell an interval callback renders, instead
 of a daemon thread dying silently behind a live dashboard).
 
+Two details this sub-stage was drafted with an open question on, as settled:
+
+- **B1's run id.** The draft noted that `serve_human_session` prints
+  `driver.run_id` before any candidate exists, so "the print moves or the id
+  arrives lazily". Neither: `begin_run` *reserves* the id and returns it
+  without inserting a row, and the row materializes with the first candidate.
+  The print is unchanged and the operator still gets a run number to watch for
+  — an abandoned session simply never writes the row that number was reserved
+  for. Reserving is what lets the id be a caller-visible handle and the row be
+  evidence that a search happened.
+- **B2's cascade.** `duplicate_buckets` → `evaluations` → `candidates` →
+  `runs`, with no junction step: the draft's `run_systems` deletion has no
+  counterpart, because populations are hash-keyed and therefore *shared* — two
+  runs over the same cache point at the same row, so deleting one run's
+  population would delete another's. Populations and protocols are kilobytes
+  and survive their last run deliberately; one that nothing references any
+  more is a historical fact about a store, not garbage.
+
 ## Bug ledger
 
 Carried from `STAGE2.md` and updated by the review. B3 and B4 were never
 present in the source list; the numbers stay reserved so citations to the
-original doc keep meaning.
+original doc keep meaning. B11–B13 are new, found reviewing the landed code.
 
-- **B1 — `begin_run` fires on every launch.** Open; 2B.4. An opened-and-
-  abandoned `--human` session leaves a zero-candidate run the dashboard
-  lists forever. Make the run lazy — created when the first candidate is
-  recorded — so the store contains searches that happened. Under D19, lazy
-  creation writes the population junction at the same moment.
-- **B2 — the store has no delete or prune API.** Open; 2B.4. `delete_run`
-  cascading in dependency order (no `ON DELETE CASCADE` is declared and
+- **B1 — `begin_run` fires on every launch. FIXED** (2B.4). An opened-and-
+  abandoned `--human` session left a zero-candidate run the dashboard listed
+  forever. The run is now lazy — `begin_run` reserves an id, the row is
+  written with the first candidate — so the store contains searches that
+  happened. The population is attached at reservation rather than at
+  materialization: it is what the run was *opened over*, and a run that
+  proposed nothing still opened over something.
+- **B2 — the store has no delete or prune API. FIXED** (2B.4). `delete_run`
+  cascades in dependency order (no `ON DELETE CASCADE` is declared and
   SQLite does not enforce foreign keys by default), wrapped in one
   transaction so an interrupt cannot leave a half-cascaded store, plus a
-  `--delete-run N` flag.
-- **B5 — the finite-difference `v_xc` silently flattens in the vacuum.**
-  Open; diagnosis stands, the originally proposed fix was wrong, and the two
-  helpers need different fixes (the substance, with measurements, is carried
-  here; the superseded `STAGE2.md` entry is at `1717e2a`). The original
-  proposal
-  `h = max(DN, ε·n)` keeps `h ≥ DN` everywhere, so for every `n < DN/ε` the
-  arithmetic is **bit-identical to today** — the clip still fires and the
+  `--delete-run N` flag. Shared rows — populations, protocols — and the
+  baseline's `run_id IS NULL` candidates are never touched; see 2B.4.
+- **B5 — the finite-difference `v_xc` silently flattens in the vacuum.
+  FIXED** (`04cc32e`), differently in each helper, as the analysis below
+  concluded: `local_vxc` takes the pure relative step and loses its floor
+  entirely — that is the fix — while `fd_vxc` keeps a floor no step schedule
+  can remove, and takes `max(DN, ε·n)` as a documented compromise rather than
+  as a repair. The diagnosis stands; the originally proposed fix was wrong
+  (the substance, with measurements, is carried here; the superseded
+  `STAGE2.md` entry is at `1717e2a`). That proposal,
+  `h = max(DN, ε·n)` applied to *both*, keeps `h ≥ DN` everywhere, so for
+  every `n < DN/ε` the arithmetic is **bit-identical to the unfixed
+  helper** — the clip still fires and the
   `b·√DN` floor survives at exactly the densities B5 is about (verified: the
   step array is `==` to the fixed-step one at every probe point at or below
   `1e−6`). And `max(DN, ε·n)` can never produce a zero span, so the original
@@ -319,12 +436,13 @@ original doc keep meaning.
   this helper only*, documented as "the generic path keeps a vacuum floor
   by nature", never as a fix for B5. Neither change disturbs the D15 gate,
   which never evaluates a potential.
-- **B6 — the dashboard's human endpoint is an unchecked contract.** Open;
-  2B.4. One detail corrected: a missing `bounds` fails at `create_app`
-  already (the layout builder iterates it); only a missing `submit` — or
-  `pending_submissions`, which the submit callback also uses — fails inside
-  a callback. The fix is unchanged: a shape check at `create_app`, not an
-  import, and it covers all three attributes.
+- **B6 — the dashboard's human endpoint is an unchecked contract. FIXED**
+  (2B.4). One detail corrected in the review: a missing `bounds` fails at
+  `create_app` already (the layout builder iterates it); only a missing
+  `submit` — or `pending_submissions`, which the submit callback also uses —
+  failed inside a callback. The fix is as proposed: a shape check at
+  `create_app`, not an import, covering all three attributes, so an endpoint
+  that cannot serve a session is rejected before a browser ever opens.
 - **B7 — the printed heatmap crashed on a NULL cell. FIXED.** `_cell`
   prints `--` for the NULL that `AVG(CASE WHEN ...)` legitimately returns,
   with a regression test against the pre-fix formatter. Under D19 the
@@ -347,20 +465,64 @@ original doc keep meaning.
   (D17), with mutation replaced by versioning rather than refusal — plus
   (4) in soft form at the reductions. Option (2), topping up the baseline,
   is unnecessary under per-population baselines.
-- **B9 — the run panel and the heatmap number candidates differently.**
-  Open; 2B.4. Sharper than first stated: the scrubber is *labeled*
-  "candidate" in the layout while its value is the trial index, so the UI
-  is actively wrong, not merely ambiguous. Fix as proposed — a `dcc.Store`
-  holding the resolved candidate id as the single source for the dependent
-  panels, the scrubber relabeled "trial", both identities printed together
-  (`trial 2 / candidate 4`) — which also removes the run-switch race (the
-  concurrent callback firing with the new run and the old scrubber index)
-  and two of the three redundant `data.history()` reads per poll.
+- **B9 — the run panel and the heatmap number candidates differently.
+  FIXED** (2B.4). Sharper than first stated: the scrubber was *labeled*
+  "candidate" in the layout while its value was the trial index, so the UI
+  was actively wrong, not merely ambiguous. Fixed as proposed — a
+  `dcc.Store` holding the resolved candidate id as the single source for the
+  dependent panels, the scrubber relabeled "trial", both identities printed
+  together (`trial 2 / candidate 4`) — which also removed the run-switch race
+  (the concurrent callback firing with the new run and the old scrubber
+  index) and two of the three redundant `data.history()` reads per poll.
 - **B10 — the store could not be used from the thread the driver runs on.
   FIXED.** `check_same_thread=False`, with the docstring stating what the
   flag does and does not buy, and a regression test that reproduces the
-  original `ProgrammingError` without it. The wanted dead-worker watchdog
-  in `serve_human_session` remains open → 2B.4.
+  original `ProgrammingError` without it. The dead-worker watchdog is now
+  fixed too (2B.4): `run_capturing_failures` appends the worker's outcome —
+  exception *or* clean finish — to a cell an interval callback renders, so a
+  daemon thread can no longer die silently behind a live dashboard. Both
+  outcomes are reported, because a dashboard that only ever speaks up on
+  failure leaves "still running" and "finished twenty minutes ago"
+  indistinguishable.
+
+Three more from the review of the landed code, numbered on from B10. All are
+consequences of D17 and D19 rather than defects in them — versioning a system
+and scoping a mean create readers that have to be told which version and which
+scope, and these are the three that were not.
+
+- **B11 — a cross-population heatmap could compare different bins. FIXED.**
+  The subject of the D19 note above: the intersection now requires the two
+  populations to agree on the regime, `heatmap_scope` reports
+  `comparable_systems` beside `shared_systems`, and both labelers quote the
+  former. Regimes derive from physics and rarely move, which is exactly why
+  this would have gone unseen — the scope line would have kept saying "over
+  the N shared systems" while two of those N were being averaged into
+  different bins on either side.
+- **B12 — the system dropdown duplicated a name once it had two versions.
+  FIXED.** `data.systems(path)` returns one row per *version* (D17), and the
+  layout mapped each to an option with `label=name, value=name` — so a
+  content-changed rebuild produced two identical, unchoosable entries.
+  Options are now one per name, newest first, matching what `density`
+  resolves a name to. The unscoped call also stopped reporting `split` and
+  `regime`: it was a `LEFT JOIN` under `GROUP BY s.id`, so the values were
+  whichever population SQLite reached first — a bare column reading like an
+  answer, and precisely the "interpretation by join against today's table"
+  B8 was.
+- **B13 — every launch re-measured the LDA baseline before discovering it
+  was already stored. FIXED.** The composition root evaluated the full stack
+  over every system, then `seed_baseline` returned the existing id and
+  dropped the records on the floor — a sweep linear in the cache, paid on
+  every relaunch for a number the store already held. The existence check
+  now comes first, and the stored score comes back with it (D20) instead of
+  being re-derived, which retired the last re-derivation of the baseline
+  number: the printed "Train MSE LDA" line was a third one.
+
+The review also confirmed two properties worth keeping named, since both are
+the kind a later session tends to "simplify" away: `numerics.py`'s docstrings
+carry the measured tables *and* the negative result — `fd_vxc`'s step
+schedule is recorded as a compromise, not a fix, with the 1.9e−04 against
+6.3e−05 numbers — and `_refuse_legacy_schema` declines to migrate for the
+stated reason rather than a vague one.
 
 ## Features
 
@@ -370,7 +532,11 @@ original doc keep meaning.
   physics module — and now D20: the score a panel shows is the stored told
   score, never a re-derivation.
 - **F2 — tests that exercise the finite-difference `v_xc` path and surface
-  B5.** Updated per the revised B5: the end-to-end test drives a functional
+  B5. LANDED** (`04cc32e`, `tests/test_fd_potentials.py`). Written against
+  the pre-fix helpers first and confirmed to fail there — 2.6e−07, flat
+  across 80 vacuum points, against 3.6e−19 after — because a regression test
+  that has never failed is a test of nothing. Updated per the revised B5: the
+  end-to-end test drives a functional
   whose `vxc` is an FD helper through `FrozenDensityEvaluator` and
   `one_step_density`, measuring the error where it is used — unweighted, in
   the Hamiltonian — and it exercises the **two helpers separately**, since
@@ -381,9 +547,20 @@ original doc keep meaning.
 
 ## Performance against Stage 1
 
-Carried unchanged from `STAGE2.md` (measured 2026-08-05, Stage 1 at
-`2cb8c3e` against Stage 2 at `354a0f4`, each in its own worktree so that
-each run imports its own package). Single-threaded (`OMP_NUM_THREADS=1`),
+**These numbers predate Stage 2B and have not been re-measured.** Carried
+unchanged from `STAGE2.md` (measured 2026-08-05, Stage 1 at `2cb8c3e`
+against Stage 2 at `354a0f4`, each in its own worktree so that each run
+imports its own package). Two figures below are the ones Stage 2B could have
+moved, and neither has been re-timed: the +0.54 ms `SQLiteRecordStore.add`
+(now also writing a score and validating the system against the population)
+and the per-system evaluation cost (`local_vxc`'s step is now an array
+multiply rather than a scalar). Both are expected to be small against the
+125 ms/trial eigensolve that dominates, but expected is not measured, and the
+distinction is the whole point of having numbers. The conclusions the section
+draws — where the time goes, that the architecture itself is free — rest on
+the eigensolve and are not sensitive to either change.
+
+Single-threaded (`OMP_NUM_THREADS=1`),
 the 63-system frozen cache, seed 0. Timings on a shared box drift by tens of
 percent between runs, so every comparison below is either interleaved A/B or
 measured inside one process; cross-run numbers are only quoted where the

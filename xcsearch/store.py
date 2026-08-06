@@ -184,6 +184,17 @@ CREATE INDEX IF NOT EXISTS duplicate_buckets_lookup
 # then restricts to the systems both populations contain, and the caller is
 # expected to say so (`heatmap_scope`). Rung-0 rows have no system and are
 # never restricted -- a condition is measured against no population at all.
+#
+# Membership is not enough: the intersection also requires the two populations
+# to agree on the *regime*, because the regime is the bin. A system both
+# populations contain but bin differently would land in one bin for the
+# candidate and another for the baseline, so that bin's two means would cover
+# different subsets -- the intersection would be honest about which systems
+# were compared and silently wrong about which were compared *to each other*,
+# under a scope line still saying "over the N shared systems". Regimes come
+# from physics and rarely move, which is exactly why this would be missed.
+# `IS` rather than `=` so two unassigned regimes count as agreement; `=` is
+# NULL for NULL in SQLite and would drop every unbinned system.
 HEATMAP_SQL = """
 SELECT COALESCE(ps.regime, 'conditions') AS bin,
        e.metric                          AS metric,
@@ -198,15 +209,46 @@ SELECT COALESCE(ps.regime, 'conditions') AS bin,
         AND ps.system_version_id = e.system_id
  WHERE e.candidate_id IN (:candidate, :baseline)
    AND (e.system_id IS NULL OR :restrict = 0 OR e.system_id IN (
-            SELECT a.system_version_id FROM population_systems a
+            SELECT a.system_version_id
+              FROM population_systems a
+              JOIN population_systems b
+                ON b.system_version_id = a.system_version_id
+               AND b.regime IS a.regime
              WHERE a.population_id = (SELECT population_id FROM candidates
                                        WHERE id = :candidate)
-            INTERSECT
-            SELECT b.system_version_id FROM population_systems b
-             WHERE b.population_id = (SELECT population_id FROM candidates
+               AND b.population_id = (SELECT population_id FROM candidates
                                        WHERE id = :baseline)))
  GROUP BY bin, e.metric
  ORDER BY bin, e.metric
+"""
+
+# The two population-width counts, single-homed for the same reason
+# HEATMAP_SQL is: the dashboard prints this number beside the figure and the
+# CLI prints it above the table, so a second copy of the statement would be a
+# second definition of how wide a comparison is -- the drift this stage exists
+# to retire, at the semantic level.
+#
+# SHARED counts membership; COMPARABLE counts membership *and* agreement on
+# the bin, which is what the heatmap's restriction actually uses. Keeping both
+# lets a reader be told when they differ instead of being quoted a width the
+# table does not have.
+POPULATION_SIZE_SQL = "SELECT n_systems AS c FROM populations WHERE id = ?"
+
+SHARED_SYSTEMS_SQL = """
+SELECT COUNT(*) AS c FROM (
+    SELECT system_version_id FROM population_systems WHERE population_id = ?
+    INTERSECT
+    SELECT system_version_id FROM population_systems WHERE population_id = ?
+)
+"""
+
+COMPARABLE_SYSTEMS_SQL = """
+SELECT COUNT(*) AS c
+  FROM population_systems a
+  JOIN population_systems b
+    ON b.system_version_id = a.system_version_id
+   AND b.regime IS a.regime
+ WHERE a.population_id = ? AND b.population_id = ?
 """
 
 # What a store built before 2B.1 looks like, and how to say so. There is no
@@ -538,6 +580,28 @@ class SQLiteRecordStore(RecordStore):
             "over that population"
         )
 
+    def baseline(
+        self, population_id: int | None, label: str = LDA_LABEL
+    ) -> sqlite3.Row | None:
+        """The baseline already stored for a population, or ``None``.
+
+        Split out of ``seed_baseline`` so a caller can ask *before* measuring.
+        Evaluating the baseline is a full sweep of the evaluator stack over
+        every system, and on a relaunch over an unchanged cache that sweep is
+        thrown away by the existence check inside ``seed_baseline`` -- a cost
+        that grows with the cache and buys a number the store already has.
+
+        Returns the row, not just the id, because the stored ``score`` is the
+        thing a caller would otherwise re-derive next (D20): the baseline's
+        told score is data, and reading it back is the point of having
+        recorded it.
+        """
+        return self.connection.execute(
+            "SELECT id, score FROM candidates "
+            " WHERE label = ? AND population_id IS ?",
+            (label, population_id),
+        ).fetchone()
+
     def seed_baseline(
         self,
         functional: Functional,
@@ -563,10 +627,7 @@ class SQLiteRecordStore(RecordStore):
         against, so a baseline scored by a different definition is a
         comparison against a different question.
         """
-        existing = self.connection.execute(
-            "SELECT id FROM candidates WHERE label = ? AND population_id IS ?",
-            (label, population_id),
-        ).fetchone()
+        existing = self.baseline(population_id, label)
         if existing is not None:
             return int(existing["id"])
         return self.add(
@@ -711,30 +772,28 @@ class SQLiteRecordStore(RecordStore):
             row["population_id"]
         )
 
-    def shared_systems(self, first: int | None, second: int | None) -> int:
+    def shared_systems(
+        self, first: int | None, second: int | None, same_regime: bool = False
+    ) -> int:
         """How many system versions two populations have in common (D19).
 
         An ordinary join, which is the argument for the junction table: with a
         population reduced to a fingerprint hash this question would have no
         answer at all, only "same" or "different".
+
+        With ``same_regime``, only versions the two populations also assign the
+        same regime count -- the narrower question the heatmap has to ask,
+        since the regime is the bin it groups by. A population is always
+        regime-consistent with itself, so the two agree whenever the
+        populations are equal.
         """
         if first is None or second is None:
             return 0
         if first == second:
-            row = self.connection.execute(
-                "SELECT n_systems AS c FROM populations WHERE id = ?", (first,)
-            ).fetchone()
+            row = self.connection.execute(POPULATION_SIZE_SQL, (first,)).fetchone()
             return int(row["c"]) if row else 0
-        row = self.connection.execute(
-            """
-            SELECT COUNT(*) AS c FROM (
-                SELECT system_version_id FROM population_systems WHERE population_id = ?
-                INTERSECT
-                SELECT system_version_id FROM population_systems WHERE population_id = ?
-            )
-            """,
-            (first, second),
-        ).fetchone()
+        sql = COMPARABLE_SYSTEMS_SQL if same_regime else SHARED_SYSTEMS_SQL
+        row = self.connection.execute(sql, (first, second)).fetchone()
         return int(row["c"])
 
     def heatmap_scope(self, candidate_id: int, baseline_id: int) -> dict:
@@ -745,6 +804,15 @@ class SQLiteRecordStore(RecordStore):
         different populations can still be compared, but only over the systems
         both were measured on, and a reader has to be told that is what they
         are looking at ("over the N shared systems").
+
+        Two counts, because they answer different questions. ``shared_systems``
+        is how many system versions the populations have in common;
+        ``comparable_systems`` is how many of those they also *bin* the same
+        way, which is what the heatmap actually covers -- a system the two
+        populations put in different regimes cannot be compared to itself
+        across bins, so ``HEATMAP_SQL`` excludes it. They differ only when a
+        rebuild reassigned a regime, and the label says so when they do rather
+        than quoting a width the table does not have.
         """
         candidate_population = self.candidate_population(candidate_id)
         baseline_population = self.candidate_population(baseline_id)
@@ -755,6 +823,9 @@ class SQLiteRecordStore(RecordStore):
             "same_population": same,
             "shared_systems": self.shared_systems(
                 candidate_population, baseline_population
+            ),
+            "comparable_systems": self.shared_systems(
+                candidate_population, baseline_population, same_regime=True
             ),
         }
 

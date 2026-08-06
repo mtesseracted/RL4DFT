@@ -51,11 +51,39 @@ def save_best_theta(
         json.dump(payload, f, indent=2)
 
 
-def baseline_score(systems: list[SystemRecord]) -> float:
-    """Train MSE of the LDA member, scored through the same stack."""
-    lda = LocalAnsatzForm().build(LDA_THETA)
-    records = FrozenDensityEvaluator(systems).evaluate(lda)
-    return MeanSquaredError().score(records)
+def ensure_baseline(store, form, evaluators, policy, population_id) -> tuple[int, float]:
+    """The LDA baseline for this population, measured only if it is new.
+
+    The baseline is stored with its records, not just its formula: an
+    unmeasured baseline is a comparison against nothing. Keyed by (label,
+    population) (D19), so a relaunch over a changed cache gets its own
+    baseline instead of comparing against one measured over a different set.
+
+    The existence check comes *first*. Measuring costs a full sweep of the
+    evaluator stack over every system, and on a relaunch over an unchanged
+    cache that sweep produces a candidate the store already holds and then
+    discards it -- a cost linear in the cache, paid for nothing. When the
+    baseline is already there its stored score comes back with it (D20)
+    rather than being re-derived, which is what recording the told score was
+    for.
+    """
+    existing = store.baseline(population_id)
+    if existing is not None and existing["score"] is not None:
+        return int(existing["id"]), existing["score"]
+    # A baseline stored without a score (an older path, a test) is measured
+    # again for the number this run prints, but not rewritten: `seed_baseline`
+    # stays idempotent and returns the row that is already there. Recomputing
+    # a missing number is fair; editing a stored measurement is what D17 exists
+    # to prevent.
+    lda = form.build(LDA_THETA)
+    records = [r for ev in evaluators for r in ev.evaluate(lda)]
+    # Scored through the same policy the run will use (D20): a baseline scored
+    # by a different definition is a comparison against a different question.
+    score = policy.score(records)
+    return (
+        store.seed_baseline(lda, records, population_id=population_id, score=score),
+        score,
+    )
 
 
 def format_heatmap(store: SQLiteRecordStore, candidate_id: int, baseline_id: int) -> str:
@@ -83,14 +111,22 @@ def _scope_line(scope: dict) -> str:
     Printed above the table rather than left implicit, because a candidate and
     a baseline drawn from different populations are compared over the systems
     they share, and a mean whose set is unstated is exactly the defect B8 was.
+
+    The count quoted is ``comparable_systems`` -- what the table covers -- and
+    the shared count appears only when a regime reassignment made the two
+    differ, which is the one case where "shared" would overstate the width.
     """
-    n = scope["shared_systems"]
+    n = scope["comparable_systems"]
     if scope["same_population"]:
         return f"over population {scope['candidate_population']} ({n} systems)"
-    return (
+    line = (
         f"over the {n} shared systems of populations "
         f"{scope['candidate_population']} and {scope['baseline_population']}"
     )
+    dropped = scope["shared_systems"] - n
+    if dropped:
+        line += f" ({dropped} more shared but binned differently)"
+    return line
 
 
 def _cell(value: float | None, sign: bool = False) -> str:
@@ -234,20 +270,8 @@ def main() -> None:
     # every reduction -- is scoped to it, so a rebuilt cache produces a new
     # population beside the old one rather than silently re-interpreting it.
     population_id = store.open_population(systems)
-    # The baseline is stored with its records, not just its formula: an
-    # unmeasured baseline is a comparison against nothing. Keyed by (label,
-    # population), so a relaunch over a changed cache gets its own baseline
-    # instead of comparing against one measured over a different set.
-    lda = form.build(LDA_THETA)
-    lda_records = [r for ev in evaluators for r in ev.evaluate(lda)]
-    baseline_id = store.seed_baseline(
-        lda,
-        lda_records,
-        population_id=population_id,
-        # Scored through the same policy the run will use (D20): the
-        # composition root already holds the records, and a baseline scored by
-        # a different definition is a comparison against a different question.
-        score=policy.score(lda_records),
+    baseline_id, lda_mse = ensure_baseline(
+        store, form, evaluators, policy, population_id
     )
     # The protocol (D18): *how* every number in this run was measured. The
     # composition root is the only place that can see the world's constants,
@@ -293,7 +317,6 @@ def main() -> None:
     result = driver.run(args.trials)
 
     best_theta = result.best_functional.fingerprint()[1]
-    lda_mse = baseline_score(systems)
 
     print("\nBest theta:", np.array2string(best_theta, precision=4))
     print(f"LDA baseline theta: {np.array2string(LDA_THETA, precision=4)}")

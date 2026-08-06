@@ -283,3 +283,50 @@ def test_the_stores_best_reads_the_stored_score():
     source = inspect.getsource(SQLiteRecordStore.best)
     assert "AVG(" not in source
     assert "ORDER BY" in source
+
+
+# --------------------------------------------------------------------------
+# The baseline is measured once per population, and read back after that
+# --------------------------------------------------------------------------
+def test_a_relaunch_does_not_re_evaluate_the_baseline(tmp_path, systems):
+    """The existence check comes before the sweep, not after it.
+
+    Evaluating the baseline costs a full pass of the evaluator stack over
+    every system. ``seed_baseline`` is idempotent on (label, population), so
+    on a relaunch over an unchanged cache that pass produced a candidate the
+    store already held and was then dropped on the floor -- a cost linear in
+    the cache, paid for a number already recorded (D20).
+    """
+    from xcsearch.run_stage2 import ensure_baseline
+
+    class Counting(FrozenDensityEvaluator):
+        sweeps = 0
+
+        def evaluate(self, functional):
+            Counting.sweeps += 1
+            return super().evaluate(functional)
+
+    store = SQLiteRecordStore(str(tmp_path / "relaunch.sqlite"))
+    population = store.open_population(systems)
+    evaluators = [Counting(systems)]
+    policy = MeanSquaredError()
+
+    first_id, first_score = ensure_baseline(store, FORM, evaluators, policy, population)
+    assert Counting.sweeps == 1, "the first launch has to measure it"
+
+    second_id, second_score = ensure_baseline(store, FORM, evaluators, policy, population)
+    assert Counting.sweeps == 1, "the relaunch must not sweep again"
+    assert second_id == first_id
+    # Read back from the store, and equal to the number that was told -- the
+    # printed LDA line is no longer a third re-derivation.
+    assert second_score == first_score
+    assert second_score == data.candidate(str(tmp_path / "relaunch.sqlite"), first_id)["score"]
+
+    # A new population is a new baseline, and does get measured. The
+    # evaluator has to match the population -- a baseline measured over
+    # systems the population does not contain is what the store refuses.
+    narrower = systems[:-1]
+    other = store.open_population(narrower)
+    ensure_baseline(store, FORM, [Counting(narrower)], policy, other)
+    assert Counting.sweeps == 2, "a population with no baseline still measures one"
+    store.close()

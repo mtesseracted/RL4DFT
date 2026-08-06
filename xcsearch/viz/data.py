@@ -7,9 +7,11 @@ viewer that physically cannot write is a viewer that cannot corrupt a running
 search. WAL mode (set by the writer) is what lets those readers see rows while
 the search is still going.
 
-The heatmap statement itself is imported from ``store``, not re-typed here:
-one home for the query means the dashboard cannot drift from what the store
-says the numbers mean.
+The heatmap statement and the two population-width counts are imported from
+``store``, not re-typed here: one home for a query means the dashboard cannot
+drift from what the store says the numbers mean. That rule is why they are
+constants at all -- a copy that starts identical is still a second definition,
+and the one it drifts from is the one nobody re-reads.
 """
 
 from __future__ import annotations
@@ -20,7 +22,13 @@ import sqlite3
 
 import numpy as np
 
-from ..store import HEATMAP_SQL, LDA_LABEL
+from ..store import (
+    COMPARABLE_SYSTEMS_SQL,
+    HEATMAP_SQL,
+    LDA_LABEL,
+    POPULATION_SIZE_SQL,
+    SHARED_SYSTEMS_SQL,
+)
 
 
 def connect(path: str) -> sqlite3.Connection:
@@ -176,17 +184,22 @@ def systems(path: str, population_id: int | None = None) -> list[dict]:
     that population assigned -- the same system version can sit in the train
     split of one and the holdout of another, and the store no longer pretends
     otherwise (D19).
+
+    Which is why the unscoped call reports them as ``None`` rather than
+    joining: outside a population a version has no split and no regime, and a
+    ``LEFT JOIN`` with ``GROUP BY s.id`` would hand back whichever population
+    SQLite happened to visit first -- a bare column that reads like an answer.
+    Newest version of each name first, matching what ``density`` resolves a
+    name to, so a caller collapsing versions by name and a caller reading
+    arrays get the same system.
     """
     if population_id is None:
         rows = _rows(
             path,
             """
-            SELECT s.*, ps.split AS split, ps.regime AS regime,
-                   ps.population_id AS population_id
+            SELECT s.*, NULL AS split, NULL AS regime, NULL AS population_id
               FROM systems s
-              LEFT JOIN population_systems ps ON ps.system_version_id = s.id
-             GROUP BY s.id
-             ORDER BY s.name, s.id
+             ORDER BY s.name, s.id DESC
             """,
         )
     else:
@@ -235,35 +248,24 @@ def heatmap_scope(path: str, candidate_id: int, baseline_id: int) -> dict:
     baseline_population = populations.get(baseline_id)
     same = candidate_population == baseline_population
 
-    if candidate_population is None or baseline_population is None:
-        shared = 0
-    elif same:
-        counted = _rows(
-            path, "SELECT n_systems AS c FROM populations WHERE id = ?",
-            (candidate_population,),
-        )
-        shared = int(counted[0]["c"]) if counted else 0
-    else:
-        counted = _rows(
-            path,
-            """
-            SELECT COUNT(*) AS c FROM (
-                SELECT system_version_id FROM population_systems
-                 WHERE population_id = ?
-                INTERSECT
-                SELECT system_version_id FROM population_systems
-                 WHERE population_id = ?
-            )
-            """,
-            (candidate_population, baseline_population),
-        )
-        shared = int(counted[0]["c"])
+    def width(sql: str) -> int:
+        if candidate_population is None or baseline_population is None:
+            return 0
+        if same:
+            counted = _rows(path, POPULATION_SIZE_SQL, (candidate_population,))
+            return int(counted[0]["c"]) if counted else 0
+        counted = _rows(path, sql, (candidate_population, baseline_population))
+        return int(counted[0]["c"])
 
     return {
         "candidate_population": candidate_population,
         "baseline_population": baseline_population,
         "same_population": same,
-        "shared_systems": shared,
+        "shared_systems": width(SHARED_SYSTEMS_SQL),
+        # What the figure actually covers: the heatmap drops a system the two
+        # populations bin differently, because it cannot compare it to itself
+        # across two bins. Same statement the store counts with.
+        "comparable_systems": width(COMPARABLE_SYSTEMS_SQL),
     }
 
 

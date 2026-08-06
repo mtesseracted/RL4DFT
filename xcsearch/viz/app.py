@@ -80,8 +80,16 @@ def build_layout(store_path: str, human=None) -> html.Div:
     baseline_options = [
         {"label": c["label"], "value": c["id"]} for c in data.baseline_choices(store_path)
     ]
+    # One option per system *name*, not per version. A content-changed rebuild
+    # adds a version (D17), and two options reading "atom_Z1" with the same
+    # value would be a menu the reader cannot choose between -- the drill-down
+    # resolves a name through the selected candidate's own rows anyway, so the
+    # version is not the dropdown's to pick. `dict.fromkeys` keeps first sight,
+    # and `data.systems` orders newest first, so the name resolves the way
+    # `density` resolves it.
     system_options = [
-        {"label": s["name"], "value": s["name"]} for s in data.systems(store_path)
+        {"label": name, "value": name}
+        for name in dict.fromkeys(s["name"] for s in data.systems(store_path))
     ]
 
     panels = [
@@ -186,18 +194,23 @@ def scope_label(scope: dict) -> str:
     """One line naming the population a comparison was taken over (D19).
 
     The dashboard's counterpart to the CLI's ``_scope_line``: same sentence,
-    same reason. A cross-population heatmap is computed over the systems both
-    candidates were measured on, and the reader is told how many that was.
+    same reason, same count. A cross-population heatmap is computed over the
+    systems both candidates were measured on *and binned alike*, and the
+    reader is told how many that was.
     """
-    n = scope["shared_systems"]
+    n = scope["comparable_systems"]
     if scope["candidate_population"] is None:
         return "no population recorded for this candidate"
     if scope["same_population"]:
         return f"over population {scope['candidate_population']} ({n} systems)"
-    return (
+    line = (
         f"over the {n} shared systems of populations "
         f"{scope['candidate_population']} and {scope['baseline_population']}"
     )
+    dropped = scope["shared_systems"] - n
+    if dropped:
+        line += f" ({dropped} more shared but binned differently)"
+    return line
 
 
 def create_app(store_path: str, human=None, status=None) -> Dash:
