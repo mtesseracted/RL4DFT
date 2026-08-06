@@ -13,6 +13,7 @@ indistinguishable in shape from what TPE leaves behind. That is the claim
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import threading
@@ -195,6 +196,60 @@ def test_the_app_builds_and_its_callbacks_return_figures(finished_run):
     assert figures.heatmap(
         data.heatmap(path, rows[-1]["candidate_id"], baseline_id)
     ).data
+
+
+def test_every_callback_survives_a_real_dispatch(finished_run):
+    """Drive each callback over HTTP the way a browser does.
+
+    The tests above call the panel *functions*; this posts to the endpoint
+    dash actually serves, with a body built from the app's own published
+    dependencies. That covers what a function-level test cannot: the wiring
+    between a callback's declared inputs and its signature. Get those out of
+    step -- an input added to the decorator and not to the parameters, or the
+    reverse -- and every panel 500s in the browser while every unit test here
+    stays green.
+    """
+    path, run_id, baseline_id = finished_run
+    app = create_app(path)
+    client = app.server.test_client()
+
+    dependencies = json.loads(client.get("/_dash-dependencies").data)
+    assert dependencies, "the app published no callbacks"
+
+    values = {
+        ("run", "value"): run_id,
+        ("tick", "n_intervals"): 1,
+        ("scrubber", "value"): 0,
+        ("selected", "data"): None,
+        ("baseline", "value"): baseline_id,
+        ("heatmap-scale", "value"): "linear",
+        ("system", "value"): data.systems(path)[0]["name"],
+    }
+
+    for callback in dependencies:
+        specs = [dict(spec, value=values.get((spec["id"], spec["property"])))
+                 for spec in callback["inputs"]]
+        state = [dict(spec, value=values.get((spec["id"], spec["property"])))
+                 for spec in callback["state"]]
+        response = client.post("/_dash-update-component", json={
+            "output": callback["output"],
+            "outputs": _output_specs(callback["output"]),
+            "inputs": specs,
+            "state": state,
+            "changedPropIds": [f"{s['id']}.{s['property']}" for s in specs[:1]],
+        })
+        assert response.status_code == 200, (
+            f"{callback['output']} returned {response.status_code}"
+        )
+
+
+def _output_specs(output: str):
+    """``..a.b...c.d..`` -> a list of specs; a single output -> one spec."""
+    multi = output.startswith("..")
+    parts = output.strip(".").split("...") if multi else [output]
+    specs = [{"id": part.rpartition(".")[0], "property": part.rpartition(".")[2]}
+             for part in parts]
+    return specs if multi else specs[0]
 
 
 def _outputs(key):

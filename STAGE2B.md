@@ -291,10 +291,10 @@ the test that holds it, so a clause with no test is a clause not met.
 | F1 (the three usability items) | post-review | `test_viz.py` |
 
 Suite: 282 tests before Stage 2B, 318 after with every extra installed, and
-nineteen more with the F1 items below. The D15 fixture is still bitwise.
-Measured without the `[cmaes]` extra the suite is 326 passed and 1 skipped,
+twenty more with the F1 items below. The D15 fixture is still bitwise.
+Measured without the `[cmaes]` extra the suite is 327 passed and 1 skipped,
 the skip being `test_cmaes.py` declining to run against an optimizer that is
-not there. Thirty-five of the 326 are `test_viz.py` and are collected only
+not there. Thirty-six of the 327 are `test_viz.py` and are collected only
 with the `[viz]` extra — without it the run collects 291, which is dash's absence
 rather than a gap: every acceptance clause is held by a test that runs either
 way. (This line previously said six tests were viz-gated, which was never
@@ -641,6 +641,24 @@ stated reason rather than a vague one.
      not the same size — rather than a law, so it is written as one condition
      in `scale_for_baseline` and not derived from the data. A first draft
      asserted it as an invariant and the 2-system fixture disproved it.
+
+  **One test came out of using it.** Each of these items changed a callback's
+  arity — a `State` added here, an `Input` there — and a browser tab left open
+  across the upgrade posts the old argument count to the new server, which
+  dash meets with `IndexError: list index out of range` deep in
+  `_prepare_grouping`. Not a defect, but the `dcc.Interval` fires every three
+  seconds, so one stale tab produces the traceback on a loop and it reads like
+  one. Refreshing is the fix.
+
+  What the episode exposed is that the tests drove the panel *functions* and
+  never the endpoint, so the wiring between a callback's declared inputs and
+  its signature was unheld: add an `Input` to a decorator and forget the
+  parameter, and every panel 500s in a browser while the suite stays green.
+  `test_every_callback_survives_a_real_dispatch` now posts to
+  `/_dash-update-component` for every published callback, with each body built
+  from the app's own `/_dash-dependencies`. Confirmed to fail against exactly
+  that mutation — dropping `scale` from `_candidate`'s parameters while
+  leaving it in the decorator — before being kept.
 - **F2 — tests that exercise the finite-difference `v_xc` path and surface
   B5. LANDED** (`04cc32e`, `tests/test_fd_potentials.py`). Written against
   the pre-fix helpers first and confirmed to fail there — 2.6e−07, flat
