@@ -31,6 +31,7 @@ from xcsearch.ranking import MeanSquaredError
 from xcsearch.records import SystemRecord
 from xcsearch.store import SQLiteRecordStore
 from xcsearch.viz import data, figures
+from xcsearch.viz import app as app_module
 from xcsearch.viz.app import best_trial, build_layout, create_app, scrubber_value
 from xcsearch.worlds.exp1d.conditions import default_conditions
 from xcsearch.worlds.exp1d.functionals import LDA_THETA, LocalAnsatzForm
@@ -119,12 +120,17 @@ def test_the_formula_panel_has_latex_and_theta(finished_run):
 def test_the_baseline_dropdown_puts_labelled_candidates_first(finished_run):
     path, _, baseline_id = finished_run
     choices = data.baseline_choices(path)
-    assert choices[0]["id"] == baseline_id and choices[0]["label"] == "LDA"
-    assert choices[0]["is_labelled"]
-    assert not any(c["is_labelled"] for c in choices[1:])
+    # The exact reference heads the list: it is not a candidate, and it is the
+    # one baseline that is available whatever the store happens to hold.
+    assert choices[0]["id"] == data.EXACT
+    assert choices[1]["id"] == baseline_id and choices[1]["label"] == "LDA"
+    assert choices[1]["is_labelled"]
+    assert not any(c["is_labelled"] for c in choices[2:])
+    # LDA is still what the panel opens on -- "how does this compare to the
+    # functional we are trying to beat" is the question a run is asking.
     assert data.default_baseline(path) == baseline_id
     # Every candidate is selectable, not just the labelled ones.
-    assert len(choices) == TRIALS + 1
+    assert len(choices) == TRIALS + 2
 
 
 def test_the_heatmap_has_a_conditions_bin_and_renders(finished_run):
@@ -325,6 +331,74 @@ def test_the_log_colourbar_is_labelled_in_differences():
     assert colorbar.tickvals == tuple(sorted(colorbar.tickvals))
     # Labels are magnitudes, so none of them carries a sign.
     assert not any(label.startswith(("+", "-")) for label in colorbar.ticktext)
+
+
+def test_the_exact_reference_baseline_is_the_raw_errors(finished_run):
+    """Zero is the baseline, so the delta is the error the run measured."""
+    path, run_id, _ = finished_run
+    candidate_id = data.history(path, run_id)[-1]["candidate_id"]
+    rows = data.heatmap(path, candidate_id, data.EXACT)
+    assert rows
+
+    for row in rows:
+        assert row["baseline"] == 0.0
+        assert row["delta"] == pytest.approx(row["value"])
+        assert row["value"] >= 0.0, "every metric on this figure is an error"
+
+    # The same means the store itself reports, not a second computation of
+    # them: each cell is the average over that bin of the stored records.
+    by_cell = {(row["bin"], row["metric"]): row["value"] for row in rows}
+    stored = {}
+    for system in data.systems(path, data.run_population(path, run_id)):
+        for metric, value in data.system_metrics(path, candidate_id, system["name"]).items():
+            stored.setdefault((system["regime"], metric), []).append(value)
+    for cell, values in stored.items():
+        assert by_cell[cell] == pytest.approx(sum(values) / len(values))
+
+
+def test_the_exact_reference_drops_the_direction_arrows(finished_run):
+    """Every error is above zero, so an arrow would say the same thing always."""
+    path, run_id, baseline_id = finished_run
+    candidate_id = data.history(path, run_id)[-1]["candidate_id"]
+    raw = data.heatmap(path, candidate_id, data.EXACT)
+
+    for scale in ("linear", "logabs"):
+        figure = figures.heatmap(raw, scale=scale, against_zero=True)
+        assert figure.layout.annotations == (), scale
+        # And no diverging colours either -- half of one would go unused.
+        assert figure.data[0].colorscale[0][1] == figures.heatmap(
+            raw, scale="logabs", against_zero=True
+        ).data[0].colorscale[0][1]
+        assert figure.data[0].colorbar.title.text == "error"
+
+    # Against another candidate the arrows are still there.
+    versus = data.heatmap(path, candidate_id, baseline_id)
+    assert figures.heatmap(versus, scale="logabs").layout.annotations
+
+
+def test_the_exact_reference_scope_is_the_candidates_own_population(finished_run):
+    """A comparison against a constant spans one population, and says which."""
+    path, run_id, _ = finished_run
+    candidate_id = data.history(path, run_id)[-1]["candidate_id"]
+    scope = data.heatmap_scope(path, candidate_id, data.EXACT)
+
+    assert scope["same_population"]
+    assert scope["candidate_population"] == data.run_population(path, run_id)
+    assert scope["comparable_systems"] == len(
+        data.systems(path, data.run_population(path, run_id))
+    )
+    assert "over population" in app_module.scope_label(scope)
+
+
+def test_the_exact_reference_brings_the_log_scale_with_it():
+    """Raw errors span decades, and linear colour cannot show decades."""
+    assert app_module.scale_for_baseline(data.EXACT, "linear") == "logabs"
+    # Already looking at decades: nothing to move.
+    assert app_module.scale_for_baseline(data.EXACT, "logabs") is None
+    # A reader who put it back to linear on this baseline keeps linear -- the
+    # rule fires on a change of baseline, not on every poll.
+    assert app_module.scale_for_baseline(1, "linear") is None
+    assert app_module.scale_for_baseline(1, "logabs") is None
 
 
 def test_an_unknown_scale_is_refused_rather_than_silently_linear():

@@ -222,6 +222,38 @@ SELECT COALESCE(ps.regime, 'conditions') AS bin,
  ORDER BY bin, e.metric
 """
 
+# The same figure against the exact reference instead of against another
+# candidate -- which is to say, the raw errors.
+#
+# Zero is the right baseline for it and not a stand-in for one. Every metric
+# this figure can show is a distance from exactness: `exc_sq_error` is squared
+# error in E_xc against the reference, `vxc_l2_error` and `one_step_dn` are
+# norms of a difference from reference quantities, and the rung-0 conditions
+# are violation measures that a functional satisfying them scores zero on. A
+# functional that were exact would score zero on every one, so the exact
+# reference *is* the all-zero row -- there is no candidate to join against
+# because there is no candidate that could be it.
+#
+# Shaped to return the same columns as HEATMAP_SQL so the panel above it does
+# not care which of the two it was handed. No restriction clause: a comparison
+# against zero spans one population, the candidate's own, and has no
+# intersection to take.
+RAW_ERRORS_SQL = """
+SELECT COALESCE(ps.regime, 'conditions') AS bin,
+       e.metric                          AS metric,
+       AVG(e.value)                      AS value,
+       0.0                               AS baseline,
+       AVG(e.value)                      AS delta
+  FROM evaluations e
+  JOIN candidates c ON c.id = e.candidate_id
+  LEFT JOIN population_systems ps
+         ON ps.population_id = c.population_id
+        AND ps.system_version_id = e.system_id
+ WHERE e.candidate_id = :candidate
+ GROUP BY bin, e.metric
+ ORDER BY bin, e.metric
+"""
+
 # The two population-width counts, single-homed for the same reason
 # HEATMAP_SQL is: the dashboard prints this number beside the figure and the
 # CLI prints it above the table, so a second copy of the statement would be a

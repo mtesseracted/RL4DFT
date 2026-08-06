@@ -27,8 +27,18 @@ from ..store import (
     HEATMAP_SQL,
     LDA_LABEL,
     POPULATION_SIZE_SQL,
+    RAW_ERRORS_SQL,
     SHARED_SYSTEMS_SQL,
 )
+
+# The baseline that is not a candidate. Every metric the heatmap can show is a
+# distance from exactness, so the exact reference is the all-zero row and a
+# comparison against it is the raw errors. A sentinel rather than a seeded
+# candidate row: there is no theta that is exact, and writing one into the
+# store to make a dropdown work would put a functional in the candidates table
+# that no optimizer ever proposed and no evaluator ever measured.
+EXACT = "exact"
+EXACT_LABEL = "exact reference (raw errors)"
 
 
 def connect(path: str) -> sqlite3.Connection:
@@ -133,7 +143,7 @@ def baseline_choices(path: str) -> list[dict]:
          ORDER BY (label IS NULL), label, id
         """,
     )
-    return [
+    return [{"id": EXACT, "label": EXACT_LABEL, "is_labelled": True}] + [
         {
             "id": int(row["id"]),
             "label": row["label"] or f"candidate {row['id']}",
@@ -161,7 +171,16 @@ def heatmap(path: str, candidate_id: int, baseline_id: int) -> list[dict]:
     ``conditions`` bin rather than being dropped -- see the query in store.py.
     Cross-population comparisons are restricted to the shared systems; ask
     ``heatmap_scope`` for the count to display beside them.
+
+    ``baseline_id`` may be ``EXACT``, which is the exact reference rather than
+    a candidate: the same columns come back with the baseline pinned to zero,
+    so the deltas are the errors themselves.
     """
+    if baseline_id == EXACT:
+        return [
+            dict(row)
+            for row in _rows(path, RAW_ERRORS_SQL, {"candidate": candidate_id})
+        ]
     scope = heatmap_scope(path, candidate_id, baseline_id)
     return [
         dict(row)
@@ -235,7 +254,29 @@ def heatmap_scope(path: str, candidate_id: int, baseline_id: int) -> dict:
     prints it: a candidate and a baseline from different populations are
     compared over their intersection, and a mean whose set is unstated is the
     defect this stage exists to remove.
+
+    Against ``EXACT`` there is one population in play -- the candidate's own,
+    since the other side of the comparison is a constant. The question the
+    scope line answers is still live, though: the reader is being shown a mean
+    and is owed the set it was taken over.
     """
+    if baseline_id == EXACT:
+        population = _rows(
+            path, "SELECT population_id FROM candidates WHERE id = ?", (candidate_id,)
+        )
+        candidate_population = population[0]["population_id"] if population else None
+        width = 0
+        if candidate_population is not None:
+            counted = _rows(path, POPULATION_SIZE_SQL, (candidate_population,))
+            width = int(counted[0]["c"]) if counted else 0
+        return {
+            "candidate_population": candidate_population,
+            "baseline_population": candidate_population,
+            "same_population": True,
+            "shared_systems": width,
+            "comparable_systems": width,
+        }
+
     rows = _rows(
         path,
         """

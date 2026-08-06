@@ -291,10 +291,10 @@ the test that holds it, so a clause with no test is a clause not met.
 | F1 (the three usability items) | post-review | `test_viz.py` |
 
 Suite: 282 tests before Stage 2B, 318 after with every extra installed, and
-fifteen more with the F1 items below. The D15 fixture is still bitwise.
-Measured without the `[cmaes]` extra the suite is 322 passed and 1 skipped,
+nineteen more with the F1 items below. The D15 fixture is still bitwise.
+Measured without the `[cmaes]` extra the suite is 326 passed and 1 skipped,
 the skip being `test_cmaes.py` declining to run against an optimizer that is
-not there. Thirty-one of the 322 are `test_viz.py` and are collected only
+not there. Thirty-five of the 326 are `test_viz.py` and are collected only
 with the `[viz]` extra — without it the run collects 291, which is dash's absence
 rather than a gap: every acceptance clause is held by a test that runs either
 way. (This line previously said six tests were viz-gated, which was never
@@ -540,7 +540,7 @@ stated reason rather than a vague one.
   imports no physics module — and now D20: the score a panel shows is the
   stored told score, never a re-derivation.
 
-  **Four usability items landed ahead of that scope**, each small enough to
+  **Five usability items landed ahead of that scope**, each small enough to
   stand alone and none of them touching the constraints:
 
   1. *A run opens on its best trial.* The scrubber's initial value was 0, so
@@ -610,6 +610,37 @@ stated reason rather than a vague one.
      functional — and the hover text carries both raw values and their
      *signed* difference on either scale. The toggle changes what a cell looks
      like and must be unable to change what it claims.
+  5. *The exact reference as a baseline* — the same figure showing raw errors
+     rather than a comparison. It is not a special case bolted on: every
+     metric the heatmap can show is a distance from exactness. `exc_sq_error`
+     is squared error in `E_xc` against the reference, `vxc_l2_error` and
+     `one_step_dn` are norms of a difference from reference quantities, and
+     the rung-0 conditions are violation measures a satisfying functional
+     scores zero on. A functional that were exact would score zero on every
+     one, so **the exact reference is the all-zero row**, and `RAW_ERRORS_SQL`
+     is `HEATMAP_SQL` with the baseline pinned there and the intersection
+     clause gone — a comparison against a constant spans one population, the
+     candidate's own.
+
+     It is a sentinel (`viz.data.EXACT`), not a seeded candidate. There is no
+     theta that is exact, and writing one into `candidates` to make a dropdown
+     work would put a functional in the store that no optimizer proposed and
+     no evaluator measured — the store's whole claim is that a row there was
+     told to something.
+
+     Two consequences the figure takes on itself rather than asking the caller
+     for. Direction stops meaning anything, since every error is above zero,
+     so the arrows go and the linear scale drops its diverging colours for the
+     magnitude ramp — half a diverging scale is the half that would never be
+     used. And choosing it moves the scale toggle to log, because raw errors
+     do span decades where differences from a baseline do not: on the
+     3000-trial run they run 2.9e−04 to 7.8e−01, so on linear colour the whole
+     `exc_sq_error` row sits at the foot of the ramp and the panel reads as
+     broken rather than as four decades. That last is an observation about
+     what these metrics *are* — a squared energy error and a density norm are
+     not the same size — rather than a law, so it is written as one condition
+     in `scale_for_baseline` and not derived from the data. A first draft
+     asserted it as an invariant and the 2-system fixture disproved it.
 - **F2 — tests that exercise the finite-difference `v_xc` path and surface
   B5. LANDED** (`04cc32e`, `tests/test_fd_potentials.py`). Written against
   the pre-fix helpers first and confirmed to fail there — 2.6e−07, flat

@@ -135,7 +135,7 @@ def _difference(row: dict) -> tuple[float, bool]:
 
 
 def heatmap(rows: list[dict], candidate_label="candidate", baseline_label="baseline",
-            scale: str = "linear"):
+            scale: str = "linear", against_zero: bool = False):
     """Regime x metric, as the *difference* from the baseline.
 
     Differences rather than raw values, because the raw numbers of different
@@ -159,9 +159,17 @@ def heatmap(rows: list[dict], candidate_label="candidate", baseline_label="basel
     separates into ten distinguishable steps rather than into "large" and
     "white". Exact zeros are drawn at the foot of the ramp; see ``log_floor``.
 
+    ``against_zero`` says the baseline is the exact reference rather than
+    another candidate, so the cells are the candidate's own errors. Two things
+    follow and both are done here rather than asked of the caller: the arrows
+    go, because every error is above zero and an arrow that is always the same
+    arrow is furniture; and the linear scale drops its diverging colours for
+    the magnitude ramp, because half a diverging scale is the half that would
+    never be used.
+
     Either way the transform is a property of the *colour*. Hovering a cell
-    reports the two raw numbers and their signed difference, so nothing the
-    figure claims depends on which scale is showing.
+    reports what it measured, so nothing the figure claims depends on which
+    scale is showing.
     """
     if scale not in _SCALES:
         raise ValueError(f"scale must be one of {_SCALES}, not {scale!r}")
@@ -184,19 +192,32 @@ def heatmap(rows: list[dict], candidate_label="candidate", baseline_label="basel
                 continue
             difference, relative = _difference(row)
             difference_row.append(difference)
-            hover_row.append(
-                f"{candidate_label}: {float(row['value']):.3e}"
-                f"<br>{baseline_label}: {float(row['baseline']):.3e}"
-                f"<br>{'relative' if relative else 'absolute'} difference: "
-                f"{difference:+.3e}"
-            )
+            if against_zero:
+                # Nothing to subtract, so nothing to report but the number and
+                # what it is a mean of.
+                hover_row.append(
+                    f"{candidate_label}<br>mean {metric}: {float(row['value']):.3e}"
+                    f"<br>{baseline_label}: 0"
+                )
+            else:
+                hover_row.append(
+                    f"{candidate_label}: {float(row['value']):.3e}"
+                    f"<br>{baseline_label}: {float(row['baseline']):.3e}"
+                    f"<br>{'relative' if relative else 'absolute'} difference: "
+                    f"{difference:+.3e}"
+                )
         differences.append(difference_row)
         hover.append(hover_row)
 
     flat = [d for row in differences for d in row if d is not None]
-    colorbar = dict(title="vs baseline")
+    colorbar = dict(title="error" if against_zero else "vs baseline")
 
-    if scale == "linear":
+    if scale == "linear" and against_zero:
+        z = differences
+        colour = dict(colorscale=_MAGNITUDE_SCALE, zmin=0.0,
+                      zmax=max(flat, default=0.0))
+        arrows = []
+    elif scale == "linear":
         z = differences
         colour = dict(colorscale="RdBu", zmid=0.0)
         arrows = []
@@ -208,7 +229,7 @@ def heatmap(rows: list[dict], candidate_label="candidate", baseline_label="basel
         top = max((cell for row in z for cell in row if cell is not None), default=low)
         colorbar.update(_log_ticks(floor, top))
         colour = dict(colorscale=_MAGNITUDE_SCALE, zmin=low, zmax=top)
-        arrows = _arrows(differences, z, bins, metrics, low, top)
+        arrows = [] if against_zero else _arrows(differences, z, bins, metrics, low, top)
 
     figure = go.Figure(
         go.Heatmap(

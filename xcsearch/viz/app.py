@@ -87,6 +87,16 @@ _FORMULA_HINT = (
 _HEATMAP_HINT = (
     "How the selected candidate does against a reference functional -- LDA "
     "unless you pick another -- everywhere it was measured.\n\n"
+    "The first entry in the baseline list is not a functional. Every metric "
+    "here is a distance from exactness, so the exact reference is zero on all "
+    "of them, and choosing it shows the candidate's raw errors rather than a "
+    "comparison: what it scores, not what it scores relative to something "
+    "else. Nothing has a direction on that setting -- every error is above "
+    "zero -- so the arrows and the two-sided colours drop away and the whole "
+    "ramp goes to size. Raw errors span decades where differences from a "
+    "baseline do not, which is why choosing it also brings the log scale "
+    "with it; put the scale back to linear if you want it and it will stay "
+    "there.\n\n"
     "Rows are metrics. exc_sq_error is the squared error in the XC energy on "
     "the exact density. vxc_l2_error is the density-weighted L2 error in the "
     "XC potential. one_step_dn is how far one Kohn-Sham step moves the "
@@ -351,6 +361,27 @@ def scrubber_value(rows: list[dict], current, previous, run_id) -> int:
     return min(current, last)
 
 
+def scale_for_baseline(baseline_id, current: str) -> str | None:
+    """The colour scale to move to on a change of baseline, or None to stay.
+
+    Raw errors span decades where differences from a baseline do not. On the
+    3000-trial run they run from 2.9e-04 to 7.8e-01, so linear colour puts the
+    whole ``exc_sq_error`` row at the foot of the ramp and the panel looks
+    broken rather than looking like four decades. Moving the toggle along with
+    the baseline is a visible move of a control the reader can move back,
+    which beats handing them a blank map and letting them go looking.
+
+    That is an observation about what these metrics are -- a squared energy
+    error and a density norm are not the same size -- rather than a law, which
+    is why the rule is written here as one condition and not derived from the
+    data. Only on a change of baseline, and only away from the default: a
+    reader who has already chosen a scale keeps it.
+    """
+    if baseline_id == data.EXACT and current == "linear":
+        return "logabs"
+    return None
+
+
 def scope_label(scope: dict) -> str:
     """One line naming the population a comparison was taken over (D19).
 
@@ -449,7 +480,8 @@ def create_app(store_path: str, human=None, status=None) -> Dash:
         candidate_id = selected["candidate_id"]
 
         record = data.candidate(store_path, candidate_id) or {}
-        baseline = data.candidate(store_path, baseline_id) or {}
+        exact = baseline_id == data.EXACT
+        baseline = {} if exact else (data.candidate(store_path, baseline_id) or {})
         latex = record.get("form_latex", "")
         theta = ", ".join(f"{c:.4f}" for c in record.get("theta", []))
         return (
@@ -468,11 +500,22 @@ def create_app(store_path: str, human=None, status=None) -> Dash:
             figures.heatmap(
                 data.heatmap(store_path, candidate_id, baseline_id),
                 candidate_label=f"candidate {candidate_id}",
-                baseline_label=baseline.get("label") or f"candidate {baseline_id}",
+                baseline_label=("exact reference" if exact else
+                                baseline.get("label") or f"candidate {baseline_id}"),
                 scale=scale or "linear",
+                against_zero=exact,
             ),
             scope_label(data.heatmap_scope(store_path, candidate_id, baseline_id)),
         )
+
+    @app.callback(
+        Output("heatmap-scale", "value"),
+        Input("baseline", "value"),
+        State("heatmap-scale", "value"),
+        prevent_initial_call=True,
+    )
+    def _scale_for_baseline(baseline_id, current):
+        return scale_for_baseline(baseline_id, current) or no_update
 
     @app.callback(
         Output("system-metrics", "children"),
