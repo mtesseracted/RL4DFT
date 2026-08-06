@@ -291,11 +291,11 @@ the test that holds it, so a clause with no test is a clause not met.
 | F1 (the three usability items) | post-review | `test_viz.py` |
 
 Suite: 282 tests before Stage 2B, 318 after with every extra installed, and
-six more with the F1 items below. The D15 fixture is still bitwise. Measured
-without the `[cmaes]` extra the suite is 313 passed and 1 skipped, the skip
-being `test_cmaes.py` declining to run against an optimizer that is not
-there. Twenty-two of the 313 are `test_viz.py` and are collected only with the
-`[viz]` extra — without it the run collects 291, which is dash's absence
+fifteen more with the F1 items below. The D15 fixture is still bitwise.
+Measured without the `[cmaes]` extra the suite is 322 passed and 1 skipped,
+the skip being `test_cmaes.py` declining to run against an optimizer that is
+not there. Thirty-one of the 322 are `test_viz.py` and are collected only
+with the `[viz]` extra — without it the run collects 291, which is dash's absence
 rather than a gap: every acceptance clause is held by a test that runs either
 way. (This line previously said six tests were viz-gated, which was never
 true of the module as a whole.)
@@ -540,7 +540,7 @@ stated reason rather than a vague one.
   imports no physics module — and now D20: the score a panel shows is the
   stored told score, never a re-derivation.
 
-  **Three usability items landed ahead of that scope**, each small enough to
+  **Four usability items landed ahead of that scope**, each small enough to
   stand alone and none of them touching the constraints:
 
   1. *A run opens on its best trial.* The scrubber's initial value was 0, so
@@ -572,6 +572,44 @@ stated reason rather than a vague one.
      offline in `worlds/exp1d/plots.py`, which solves each system
      self-consistently for LDA and for theta; the hint now points there
      instead of leaving the absence to be read as an oversight.
+  4. *A linear / log-magnitude toggle on the heatmap.* Linear colour is
+     proportional to the difference, so one large cell owns the scale: on the
+     3000-trial run the smallest cell is 1.7% of the largest, which is white,
+     and a whole row — the four `one_step_dn` bins, spanning +0.014 to +0.18 —
+     reads as "no change" when it is nothing of the kind.
+
+     The second setting colours by `log10|d|` and moves the direction out of
+     the colour entirely, into an arrow drawn in each cell: ▼ below the
+     baseline (better, these being errors), ▲ above it, `=` exactly equal.
+     That split is what makes it work. A diverging scale spends half its range
+     on each direction; once the arrows carry direction, the whole ramp is
+     available for magnitude, and the `one_step_dn` row separates into four
+     visibly different greens instead of four whites.
+
+     Three choices worth recording. **Zero.** `log10` has no value there and
+     the cell still has to be drawn, so `log_floor` puts exact ties one decade
+     below the smallest non-zero difference on the map — low enough to be
+     unmistakably the foot of the ramp, no lower, so the decades between keep
+     the rest of the colour. Because the floor sits a full decade under the
+     smallest real difference, *nothing but an exact zero can reach it*, which
+     is what lets the colourbar label that end `0` and be telling the truth.
+     **The ramp.** Yellow-to-green, on two constraints that rule out most of
+     the obvious choices: it shares no hue with the linear scale's RdBu, so
+     nothing means one thing on one setting of the toggle and something else
+     one click away — a red ramp would have "big difference" wearing the
+     colour that means "candidate winning" — and it starts at pale yellow
+     rather than white, so a tie at the floor cannot be mistaken for the white
+     of a cell with no data. **The arrows** are layout annotations, not the
+     trace's own text, because a heatmap draws all its text in one colour and
+     this ramp runs pale to dark; an annotation carries its own, so each glyph
+     is picked against the cell it sits on.
+
+     Throughout, the transform is a property of the colour only. The colourbar
+     is labelled in the differences themselves rather than in log units —
+     "−1.84" is a number about the transform, "0.014" is a number about the
+     functional — and the hover text carries both raw values and their
+     *signed* difference on either scale. The toggle changes what a cell looks
+     like and must be unable to change what it claims.
 - **F2 — tests that exercise the finite-difference `v_xc` path and surface
   B5. LANDED** (`04cc32e`, `tests/test_fd_potentials.py`). Written against
   the pre-fix helpers first and confirmed to fail there — 2.6e−07, flat

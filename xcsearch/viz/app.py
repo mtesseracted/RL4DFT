@@ -99,9 +99,25 @@ _HEATMAP_HINT = (
     "Each cell is the mean over the systems in that bin, expressed against "
     "the baseline as (candidate - baseline) / |baseline|, or as the plain "
     "difference where the baseline is exactly zero -- a condition it already "
-    "satisfies. Every metric here is an error, so a negative cell is the "
-    "candidate beating the baseline; on this scale that is the red end, blue "
-    "is losing to it, and white is a tie. Hover a cell for both raw numbers.\n\n"
+    "satisfies. Hover a cell for both raw numbers and the difference between "
+    "them, on either scale.\n\n"
+    "linear / log magnitude changes the colour only, never the numbers.\n\n"
+    "On linear, colour is the signed difference: every metric here is an "
+    "error, so a cell below its baseline is the candidate winning, and on "
+    "this scale that is the red end, blue is losing, white is a tie. Colour "
+    "is proportional to the difference, which means the largest cell owns the "
+    "scale -- a cell a hundred times smaller is white whatever it says.\n\n"
+    "On log magnitude, colour is log10 of the size of the difference alone, "
+    "pale where the two agree and saturated where they diverge, and the "
+    "direction moves out of the colour and into the arrow drawn in each cell: "
+    "▼ the candidate is below its baseline (better, these being errors), ▲ "
+    "above it, = exactly equal. Splitting the two gives the whole ramp to "
+    "magnitude instead of half of it, so cells that differ by a factor of ten "
+    "look ten steps apart rather than 'large' and 'white'. The colourbar is "
+    "labelled in the differences themselves, not in log units. Exact zeros "
+    "sit at the foot of the ramp, one decade below the smallest real "
+    "difference on the map -- which is the only thing that can land there, so "
+    "that end of the bar reads 0.\n\n"
     "The line above the figure names the population the means were taken "
     "over. Comparing candidates from two different populations uses only the "
     "systems they share and bin alike."
@@ -233,6 +249,16 @@ def build_layout(store_path: str, human=None) -> html.Div:
             # part of the comparison rather than a footnote to it.
             html.Div(id="heatmap-scope",
                      style={"fontSize": "12px", "color": "#7a828c", "margin": "2px 0"}),
+            # Colour scale, not data: both settings draw the same differences.
+            dcc.RadioItems(
+                id="heatmap-scale",
+                options=[{"label": "linear", "value": "linear"},
+                         {"label": "log magnitude", "value": "logabs"}],
+                value="linear", inline=True,
+                style={"fontSize": "12px", "color": "#4a525c"},
+                inputStyle={"marginRight": "4px"},
+                labelStyle={"marginRight": "12px"},
+            ),
             dcc.Graph(id="heatmap", config={"displayModeBar": False}),
             hint=_HEATMAP_HINT,
         ),
@@ -414,9 +440,10 @@ def create_app(store_path: str, human=None, status=None) -> Dash:
         Output("heatmap-scope", "children"),
         Input("selected", "data"),
         Input("baseline", "value"),
+        Input("heatmap-scale", "value"),
         Input("tick", "n_intervals"),
     )
-    def _candidate(selected, baseline_id, _tick):
+    def _candidate(selected, baseline_id, scale, _tick):
         if not selected or baseline_id is None:
             return "*no candidate selected*", "", figures.heatmap([]), ""
         candidate_id = selected["candidate_id"]
@@ -442,6 +469,7 @@ def create_app(store_path: str, human=None, status=None) -> Dash:
                 data.heatmap(store_path, candidate_id, baseline_id),
                 candidate_label=f"candidate {candidate_id}",
                 baseline_label=baseline.get("label") or f"candidate {baseline_id}",
+                scale=scale or "linear",
             ),
             scope_label(data.heatmap_scope(store_path, candidate_id, baseline_id)),
         )

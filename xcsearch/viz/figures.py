@@ -7,6 +7,8 @@ what ``data`` returned.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import plotly.graph_objects as go
 
@@ -62,15 +64,107 @@ def history_strip(history: list[dict], selected: int | None = None) -> go.Figure
     return figure
 
 
-def heatmap(rows: list[dict], candidate_label="candidate", baseline_label="baseline"):
+_SCALES = ("linear", "logabs")
+
+# Which way a cell moved, for the log scale, where the colour no longer says.
+# Down is better because every metric on this figure is an error: the arrow
+# points the way the number went, and for errors down is the good direction.
+BETTER, WORSE, TIE = "▼", "▲", "="
+
+# Magnitude ramp for the log scale: pale where the candidate and the baseline
+# agree, saturated where they diverge. Sequential rather than diverging
+# because on this scale colour carries one thing only -- how big the change
+# is -- and the arrows carry which way.
+#
+# Yellow-to-green specifically, on two constraints that between them rule out
+# most of the obvious choices. It shares no hue with the linear scale's RdBu,
+# so nothing means one thing on one setting of the toggle and another thing on
+# the other -- a red ramp would have "big difference" wearing the colour that
+# means "candidate winning" one click away. And it starts at pale yellow
+# rather than at white, so the floor an exact tie is drawn at cannot be
+# mistaken for the white of a cell with no data at all.
+_MAGNITUDE_SCALE = "YlGn"
+
+
+def log_floor(differences: list[float]) -> float:
+    """The magnitude an exact zero is drawn at, given what else is on the map.
+
+    A logarithm has no value at zero and a heatmap still has to draw the cell,
+    so zeros are clamped to one decade below the smallest difference that is
+    not zero. That is the useful place for them: strictly below everything the
+    run actually distinguished, so an exact tie is unmistakably the foot of the
+    ramp, and no lower than that, so the decades in between keep the rest of
+    the colour. Because the floor sits a full decade under the smallest real
+    difference, nothing but an exact zero can reach it -- which is what lets
+    the colourbar label that end "0" and be telling the truth.
+    """
+    nonzero = [abs(d) for d in differences if d]
+    # Every cell a tie: the floor is arbitrary, so pick one and let the ramp
+    # collapse to a single colour, which is exactly what the figure means.
+    return min(nonzero) / 10.0 if nonzero else 1.0
+
+
+def _log_ticks(floor: float, top: float) -> dict:
+    """Colourbar ticks at round magnitudes, placed at their log height.
+
+    ``log10`` values are numbers about the transform; the differences they
+    came from are numbers about the functional, so the bar is labelled in
+    those and positioned in these. The bottom tick is the floor, labelled for
+    what alone can reach it.
+    """
+    low = math.log10(floor)
+    steps = (1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1.0, 3.0, 10.0, 30.0)
+    decades = [d for d in steps if low < math.log10(d) <= top]
+    return dict(
+        tickmode="array",
+        tickvals=[low] + [math.log10(d) for d in decades],
+        ticktext=["0"] + [f"{d:g}" for d in decades],
+    )
+
+
+def _difference(row: dict) -> tuple[float, bool]:
+    """A cell's difference from its baseline, and whether it is a relative one.
+
+    Relative where the baseline is nonzero; absolute where it is zero -- a
+    satisfied exact condition -- since dividing by it would be infinite rather
+    than informative.
+    """
+    value, baseline = float(row["value"]), float(row["baseline"])
+    relative = bool(baseline)
+    return ((value - baseline) / abs(baseline) if relative else value - baseline), relative
+
+
+def heatmap(rows: list[dict], candidate_label="candidate", baseline_label="baseline",
+            scale: str = "linear"):
     """Regime x metric, as the *difference* from the baseline.
 
     Differences rather than raw values, because the raw numbers of different
     metrics share no scale: an energy error and a potential error on one colour
     axis would make the larger one the only thing visible. Relative to a
-    baseline, every cell reads the same way -- below zero is better than the
-    baseline.
+    baseline, every cell reads the same way.
+
+    ``scale`` picks what colour means.
+
+    ``"linear"`` is the signed difference on a diverging scale: colour is
+    proportional to it and carries the direction as well, red below the
+    baseline and blue above. Proportional is what you want when the cells are
+    the same size; it is also why the largest cell owns the scale, and one cell
+    a hundred times the rest leaves them all white.
+
+    ``"logabs"`` is ``log10`` of the *magnitude* on a sequential scale, with
+    the direction moved out of the colour and into an arrow drawn in the cell:
+    ``BETTER`` for a candidate below its baseline, ``WORSE`` for above, ``TIE``
+    for exactly equal. Splitting the two makes the whole ramp available for
+    magnitude instead of half of it, so a row spanning a factor of ten
+    separates into ten distinguishable steps rather than into "large" and
+    "white". Exact zeros are drawn at the foot of the ramp; see ``log_floor``.
+
+    Either way the transform is a property of the *colour*. Hovering a cell
+    reports the two raw numbers and their signed difference, so nothing the
+    figure claims depends on which scale is showing.
     """
+    if scale not in _SCALES:
+        raise ValueError(f"scale must be one of {_SCALES}, not {scale!r}")
     if not rows:
         return _empty("no evaluations for this candidate")
 
@@ -78,35 +172,79 @@ def heatmap(rows: list[dict], candidate_label="candidate", baseline_label="basel
     metrics = sorted({row["metric"] for row in rows})
     lookup = {(row["bin"], row["metric"]): row for row in rows}
 
-    z, text = [], []
+    # Pass one: the differences, which both scales are drawings of.
+    differences, hover = [], []
     for metric in metrics:
-        z_row, text_row = [], []
+        difference_row, hover_row = [], []
         for bin_name in bins:
             row = lookup.get((bin_name, metric))
             if row is None or row["value"] is None or row["baseline"] is None:
-                z_row.append(None)
-                text_row.append("no data")
+                difference_row.append(None)
+                hover_row.append("no data")
                 continue
-            value, baseline = float(row["value"]), float(row["baseline"])
-            # Relative difference where the baseline is nonzero; absolute
-            # difference where it is zero (a satisfied exact condition), since
-            # dividing by it would be infinite rather than informative.
-            z_row.append((value - baseline) / abs(baseline) if baseline else value - baseline)
-            text_row.append(
-                f"{candidate_label}: {value:.3e}<br>{baseline_label}: {baseline:.3e}"
+            difference, relative = _difference(row)
+            difference_row.append(difference)
+            hover_row.append(
+                f"{candidate_label}: {float(row['value']):.3e}"
+                f"<br>{baseline_label}: {float(row['baseline']):.3e}"
+                f"<br>{'relative' if relative else 'absolute'} difference: "
+                f"{difference:+.3e}"
             )
-        z.append(z_row)
-        text.append(text_row)
+        differences.append(difference_row)
+        hover.append(hover_row)
+
+    flat = [d for row in differences for d in row if d is not None]
+    colorbar = dict(title="vs baseline")
+
+    if scale == "linear":
+        z = differences
+        colour = dict(colorscale="RdBu", zmid=0.0)
+        arrows = []
+    else:
+        floor = log_floor(flat)
+        low = math.log10(floor)
+        z = [[None if d is None else math.log10(max(abs(d), floor)) for d in row]
+             for row in differences]
+        top = max((cell for row in z for cell in row if cell is not None), default=low)
+        colorbar.update(_log_ticks(floor, top))
+        colour = dict(colorscale=_MAGNITUDE_SCALE, zmin=low, zmax=top)
+        arrows = _arrows(differences, z, bins, metrics, low, top)
 
     figure = go.Figure(
         go.Heatmap(
-            z=z, x=bins, y=metrics, text=text,
+            z=z, x=bins, y=metrics, text=hover,
             hovertemplate="%{y} / %{x}<br>%{text}<extra></extra>",
-            colorscale="RdBu", zmid=0.0, colorbar=dict(title="vs baseline"),
+            colorbar=colorbar, **colour,
         )
     )
-    figure.update_layout(**_LAYOUT, xaxis_title="regime", yaxis_title="metric")
+    figure.update_layout(**_LAYOUT, xaxis_title="regime", yaxis_title="metric",
+                         annotations=arrows)
     return figure
+
+
+def _arrows(differences, z, bins, metrics, low: float, top: float) -> list[dict]:
+    """One direction glyph per populated cell, in a colour that survives it.
+
+    Annotations rather than the trace's own text because a heatmap draws all
+    of its text in one colour, and this ramp runs from pale yellow to dark
+    red: a single choice is invisible at one end or the other. An annotation
+    carries its own colour, so each glyph is picked against the cell it sits
+    on.
+    """
+    span = top - low
+    out = []
+    for row_index, metric in enumerate(metrics):
+        for column, bin_name in enumerate(bins):
+            difference = differences[row_index][column]
+            if difference is None:
+                continue
+            glyph = TIE if difference == 0 else (BETTER if difference < 0 else WORSE)
+            shade = (z[row_index][column] - low) / span if span else 0.0
+            out.append(dict(
+                x=bin_name, y=metric, text=glyph, showarrow=False,
+                font=dict(size=11, color="#f4f4f4" if shade > 0.62 else "#333333"),
+            ))
+    return out
 
 
 def density_figure(arrays: dict | None, wells: list[list[float]], name: str):

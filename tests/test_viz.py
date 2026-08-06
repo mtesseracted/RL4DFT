@@ -13,6 +13,7 @@ indistinguishable in shape from what TPE leaves behind. That is the claim
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 
@@ -206,6 +207,135 @@ def test_the_layout_has_every_panel(finished_run):
             "system", "density", "potential", "tick"} <= ids
     # No human endpoint unless one was injected.
     assert "submit" not in ids
+
+
+# --------------------------------------------------------------------------
+# The heatmap's colour scale: linear, or signed log over the same differences
+# --------------------------------------------------------------------------
+def _cells(figure):
+    """Every populated cell of a heatmap as (metric, bin, z)."""
+    trace = figure.data[0]
+    return [
+        (trace.y[row], trace.x[column], value)
+        for row, values in enumerate(trace.z)
+        for column, value in enumerate(values)
+        if value is not None
+    ]
+
+
+def test_the_log_scale_colours_by_magnitude_alone():
+    """Colour is log10|d|, so two opposite differences of one size match."""
+    rows = [{"bin": "atom", "metric": "worse", "value": 1.5, "baseline": 1.0},
+            {"bin": "atom", "metric": "better", "value": 0.5, "baseline": 1.0}]
+    z = {metric: value for metric, _, value in _cells(figures.heatmap(rows, scale="logabs"))}
+    assert z["worse"] == pytest.approx(math.log10(0.5))
+    assert z["better"] == pytest.approx(math.log10(0.5))
+    assert z["worse"] == z["better"]
+
+
+def test_the_direction_is_carried_by_an_arrow_per_cell():
+    """What colour no longer says, the glyph does -- for every drawn cell."""
+    rows = [{"bin": "atom", "metric": "worse", "value": 1.5, "baseline": 1.0},
+            {"bin": "atom", "metric": "better", "value": 0.5, "baseline": 1.0},
+            {"bin": "atom", "metric": "tied", "value": 1.0, "baseline": 1.0},
+            {"bin": "conditions", "metric": "worse", "value": None, "baseline": None}]
+    figure = figures.heatmap(rows, scale="logabs")
+
+    glyphs = {(note["y"], note["x"]): note["text"] for note in figure.layout.annotations}
+    assert glyphs[("worse", "atom")] == figures.WORSE
+    assert glyphs[("better", "atom")] == figures.BETTER
+    assert glyphs[("tied", "atom")] == figures.TIE
+    # A cell with no data gets no glyph: an arrow there would be a claim.
+    assert ("worse", "conditions") not in glyphs
+    assert len(glyphs) == len(_cells(figure))
+
+    # The linear scale needs none of this -- its colour still carries the sign.
+    assert figures.heatmap(rows, scale="linear").layout.annotations == ()
+
+
+def test_an_exact_tie_sits_below_every_real_difference():
+    """log10 has no value at zero, and the cell still has to be drawn."""
+    rows = [{"bin": "atom", "metric": "tied", "value": 1.0, "baseline": 1.0},
+            {"bin": "atom", "metric": "small", "value": 1.02, "baseline": 1.0},
+            {"bin": "atom", "metric": "large", "value": 3.0, "baseline": 1.0}]
+    z = {metric: value for metric, _, value in _cells(figures.heatmap(rows, scale="logabs"))}
+
+    assert z["tied"] < z["small"] < z["large"]
+    # One decade below the smallest real difference, and no lower: the floor
+    # is the bottom of the colour range, so the tie is unmistakably the foot
+    # of the ramp without the decades between being squeezed for it.
+    assert z["small"] - z["tied"] == pytest.approx(1.0)
+    assert figures.log_floor([0.0, 0.02, 2.0]) == pytest.approx(0.002)
+    assert figures.heatmap(rows, scale="logabs").data[0].zmin == pytest.approx(z["tied"])
+
+
+def test_nothing_but_a_tie_can_reach_the_floor():
+    """Which is what lets the colourbar call that end of the ramp zero."""
+    floor = figures.log_floor([0.0, -0.5, 0.014, 3.0])
+    assert all(abs(d) > floor for d in (-0.5, 0.014, 3.0))
+    assert figures.log_floor([0.0, 0.0]) > 0.0  # every cell a tie: still finite
+
+
+def test_both_scales_draw_the_same_differences(finished_run):
+    path, run_id, baseline_id = finished_run
+    rows = data.heatmap(path, data.history(path, run_id)[-1]["candidate_id"], baseline_id)
+
+    linear = figures.heatmap(rows, scale="linear")
+    logabs = figures.heatmap(rows, scale="logabs")
+
+    # Same cells, same hover text -- only the colour mapping moved.
+    assert linear.data[0].x == logabs.data[0].x
+    assert linear.data[0].y == logabs.data[0].y
+    assert linear.data[0].text == logabs.data[0].text
+
+    floor = figures.log_floor([value for _, _, value in _cells(linear)])
+    pairs = list(zip(_cells(linear), _cells(logabs)))
+    assert pairs
+    for (metric, bin_name, difference), (_, _, height) in pairs:
+        assert height == pytest.approx(math.log10(max(abs(difference), floor))), \
+            f"{metric} / {bin_name}"
+
+
+def test_the_hover_text_carries_the_raw_numbers_and_the_difference(finished_run):
+    """Whatever the colour is doing, the cell still reports what it measured."""
+    path, run_id, baseline_id = finished_run
+    rows = data.heatmap(path, data.history(path, run_id)[-1]["candidate_id"], baseline_id)
+    text = figures.heatmap(rows, scale="logabs").data[0].text
+    populated = [cell for row in text for cell in row if cell != "no data"]
+    assert populated
+    assert all("difference" in cell for cell in populated)
+    # The sign survives in the number even where the colour has dropped it.
+    assert all(("+" in cell.rsplit(":", 1)[-1]) or ("-" in cell.rsplit(":", 1)[-1])
+               for cell in populated)
+    # A zero baseline is an absolute difference and says so, rather than
+    # quietly meaning something else than the cell beside it.
+    assert any("absolute difference" in cell for cell in populated)
+
+
+def test_the_log_colourbar_is_labelled_in_differences():
+    """log10 heights mean nothing to a reader; the differences do."""
+    rows = [{"bin": "atom", "metric": "tied", "value": 1.0, "baseline": 1.0},
+            {"bin": "atom", "metric": "big", "value": 3.0, "baseline": 1.0},
+            {"bin": "atom", "metric": "small", "value": 1.01, "baseline": 1.0}]
+    colorbar = figures.heatmap(rows, scale="logabs").data[0].colorbar
+
+    assert colorbar.ticktext[0] == "0", "the floor is labelled for what reaches it"
+    assert "1" in colorbar.ticktext
+    assert colorbar.tickvals[colorbar.ticktext.index("1")] == pytest.approx(0.0)
+    assert colorbar.tickvals == tuple(sorted(colorbar.tickvals))
+    # Labels are magnitudes, so none of them carries a sign.
+    assert not any(label.startswith(("+", "-")) for label in colorbar.ticktext)
+
+
+def test_an_unknown_scale_is_refused_rather_than_silently_linear():
+    with pytest.raises(ValueError, match="scale must be one of"):
+        figures.heatmap([{"bin": "a", "metric": "m", "value": 1.0, "baseline": 1.0}],
+                        scale="log")
+
+
+def test_the_scale_toggle_is_in_the_layout(finished_run):
+    path, _, _ = finished_run
+    assert "heatmap-scale" in _component_ids(build_layout(path))
 
 
 # --------------------------------------------------------------------------
