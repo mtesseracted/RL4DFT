@@ -12,6 +12,8 @@ import math
 import numpy as np
 import plotly.graph_objects as go
 
+from .data import CONDITIONS
+
 # One accent per role, reused across panels so a colour means the same thing
 # everywhere: the candidate, its baseline, and the reference.
 CANDIDATE = "#d95926"
@@ -173,6 +175,12 @@ def heatmap(rows: list[dict], candidate_label="candidate", baseline_label="basel
     """
     if scale not in _SCALES:
         raise ValueError(f"scale must be one of {_SCALES}, not {scale!r}")
+    # Conditions are dropped here and not merely by the caller, so that no
+    # route back to the half-empty grid exists: they have no regime, so they
+    # cannot be a column of a figure whose columns are regimes. See
+    # `condition_bars`, which draws them, and `data.split_conditions`, which
+    # is how the panel gets hold of them.
+    rows = [row for row in rows if row["bin"] != CONDITIONS]
     if not rows:
         return _empty("no evaluations for this candidate")
 
@@ -240,6 +248,63 @@ def heatmap(rows: list[dict], candidate_label="candidate", baseline_label="basel
     )
     figure.update_layout(**_LAYOUT, xaxis_title="regime", yaxis_title="metric",
                          annotations=arrows)
+    return figure
+
+
+def condition_bars(rows: list[dict], candidate_label="candidate",
+                   baseline_label="baseline", against_zero: bool = False):
+    """The rung-0 conditions, as raw violations rather than as differences.
+
+    These left the heatmap because they never belonged in a grid: they are
+    measured on no system, so they have no regime to be a column of, and the
+    metrics they carry appear in no other bin. Half of that figure was empty
+    for a structural reason and not for want of data.
+
+    Raw values rather than the difference from a baseline, which is the other
+    half of the same argument. Every one of these is a *violation* measure
+    with an absolute meaning at zero -- the constraint is satisfied, exactly
+    -- and "0.0e+00 against a baseline of 3.2e-02" says something a relative
+    difference cannot say at all, since it would be dividing by the number
+    that matters. So both bars are drawn and the reader compares them, which
+    is also why this figure ignores the colour-scale toggle: there is no
+    transform here to choose, only two numbers and their names.
+
+    ``against_zero`` drops the baseline series. The exact reference satisfies
+    every condition by construction, so that series is a row of zeros, and a
+    bar of height zero is an invisible claim rather than a made one -- the
+    sub-label says it instead.
+    """
+    usable = [row for row in rows if row.get("value") is not None]
+    if not usable:
+        return _empty("no conditions recorded for this candidate")
+
+    metrics = [row["metric"] for row in sorted(usable, key=lambda r: r["metric"])]
+    values = [float(row["value"]) for row in sorted(usable, key=lambda r: r["metric"])]
+
+    figure = go.Figure()
+    series = [(candidate_label, values, CANDIDATE)]
+    if not against_zero:
+        baselines = [None if row["baseline"] is None else float(row["baseline"])
+                     for row in sorted(usable, key=lambda r: r["metric"])]
+        series.append((baseline_label, baselines, BASELINE))
+
+    for name, heights, colour in series:
+        figure.add_bar(
+            y=metrics, x=heights, name=name, orientation="h",
+            marker_color=colour,
+            text=[("" if h is None else f"{h:.3e}") for h in heights],
+            textposition="outside", cliponaxis=False,
+            hovertemplate=f"{name}<br>%{{y}}: %{{x:.4e}}<extra></extra>",
+        )
+
+    figure.update_layout(
+        **_LAYOUT, barmode="group",
+        xaxis_title="violation (0 = satisfied)", yaxis_title="",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        height=60 + 46 * len(metrics),
+    )
+    # Room for the value labels drawn outside the longest bar.
+    figure.update_xaxes(rangemode="tozero")
     return figure
 
 

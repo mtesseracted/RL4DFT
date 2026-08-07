@@ -164,6 +164,32 @@ def default_baseline(path: str) -> int | None:
 # --------------------------------------------------------------------------
 # The heatmap and the per-system drill-down
 # --------------------------------------------------------------------------
+
+# The bin the query files rung-0 conditions under, having no system to bin
+# them by. Named here because two figures now key on it.
+CONDITIONS = "conditions"
+
+
+def split_conditions(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """The heatmap rows split into the per-system ones and the conditions.
+
+    They measure different kinds of thing and share no metric, so a single
+    grid of the two is half empty by construction: the geometry bins carry
+    exc_sq_error, vxc_l2_error and one_step_dn, the conditions bin carries
+    uniform_gas, one_electron_si and exchange_non_positivity, and no metric
+    appears in both. On the live store that came to 15 of 30 cells filled --
+    a checkerboard whose empty half is not missing data but a question that
+    was never asked.
+
+    Split here rather than in SQL: one statement still answers "how does this
+    candidate compare", and which figure draws which half is a display
+    decision, so it belongs where the figures are chosen.
+    """
+    per_system = [row for row in rows if row["bin"] != CONDITIONS]
+    conditions = [row for row in rows if row["bin"] == CONDITIONS]
+    return per_system, conditions
+
+
 def heatmap(path: str, candidate_id: int, baseline_id: int) -> list[dict]:
     """Mean value by regime x metric, beside a baseline. One SQL statement.
 

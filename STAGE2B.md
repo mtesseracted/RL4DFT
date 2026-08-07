@@ -7,7 +7,7 @@ by this document, which merges those items with the design decisions the
 review settled. Decision numbering continues from D16.
 
 **Status: implemented**, except F1, which is still a stub awaiting scope —
-ten self-contained usability items have landed under it, listed there. The
+eleven self-contained usability items have landed under it, listed there. The
 decisions below are written in the voice they were settled in; where the
 built shape differs from the decision as drafted, an *as built* note says how
 and why, rather than quietly editing the decision to match the code. The
@@ -288,7 +288,7 @@ the test that holds it, so a clause with no test is a clause not met.
 | 2B.4 | `b2c78d5` | `test_repairs.py` |
 | B5, F2 | `04cc32e` | `test_fd_potentials.py`, `test_numerics.py` |
 | B11–B13 | post-review | `test_populations.py`, `test_score.py` |
-| F1 (the ten usability items) | post-review | `test_viz.py`, `test_repairs.py` |
+| F1 (the eleven usability items) | post-review | `test_viz.py`, `test_repairs.py` |
 
 Suite: 282 tests before Stage 2B, 318 after with every extra installed, and
 twenty-five more with the F1 items below. The D15 fixture is still bitwise.
@@ -540,7 +540,7 @@ stated reason rather than a vague one.
   imports no physics module — and now D20: the score a panel shows is the
   stored told score, never a re-derivation.
 
-  **Ten usability items landed ahead of that scope**, each small enough to
+  **Eleven usability items landed ahead of that scope**, each small enough to
   stand alone and none of them touching the constraints:
 
   1. *A run opens on its best trial.* The scrubber's initial value was 0, so
@@ -819,6 +819,51 @@ stated reason rather than a vague one.
       recorded, because a refusal that does not record it looks like an
       unsubmitted click on every tick after and resubmits the moment the box
       is filled.
+
+  11. *The conditions leave the grid, because they were never in it.* The
+      heatmap read as a checkerboard, and the empty half was not missing data
+      — it was a question never asked. Counted on the live store: **15 of 30
+      cells**, exactly half, with **no metric appearing in both halves**. The
+      geometry bins carry `exc_sq_error`, `vxc_l2_error` and `one_step_dn`,
+      measured per system against reference data; the `conditions` bin
+      carries `uniform_gas`, `one_electron_si` and `exchange_non_positivity`,
+      measured on *no* system — they are properties of the functional
+      checked against itself. A bin with no regime cannot be a column of a
+      figure whose columns are regimes, so every cell where the two crossed
+      was empty by construction.
+
+      They are now their own figure under the same baseline selector: raw
+      violations as grouped bars, candidate beside baseline. Raw rather than
+      differences, for the same reason they are not a column — every one is a
+      violation measure with an absolute meaning at zero, and "0.0e+00
+      against a baseline of 3.2e-02" says something a relative difference
+      cannot say at all, being a division by the number that matters. That is
+      also why the colour-scale toggle does not reach them: there is no
+      transform to choose, only two numbers and their names. Against the
+      exact reference the baseline series drops, since exactness satisfies
+      all three and a bar of height zero is an invisible claim; the line
+      underneath makes it instead, and counts how many hold exactly.
+
+      The drop happens in `figures.heatmap` and not only in the caller, so
+      no route back to the half-empty grid exists — handed unsplit rows it
+      draws the same figure. `data.split_conditions` is how the panel gets
+      hold of the other half. One SQL statement still answers "how does this
+      candidate compare"; which figure draws which half is a display
+      decision and lives with the figures.
+
+      **What the split immediately showed**, which the checkerboard had
+      buried: the best candidate of the 3000-trial run (2309) *breaks* the
+      uniform-gas limit at 6.03e−02 where LDA satisfies it exactly, and pays
+      for it by halving the one-electron self-interaction error, 6.36e−02 to
+      3.18e−02. A trade the search made and nobody asked it to make. In the
+      old figure that was one cell whose baseline was zero, rendered by the
+      fallback branch, sat next to five empty ones.
+
+      One consequence worth recording: `_difference`'s zero-baseline fallback
+      was reached *only* by the conditions, so no real cell exercises it now.
+      It stays, because a per-system metric can come out exactly zero and
+      dividing by that is worse than naming which kind of difference the cell
+      is — but its test is now constructed rather than fixtured, and says so.
 
   **One test came out of using it.** What the episode exposed is that the tests drove the panel *functions* and
   never the endpoint, so the wiring between a callback's declared inputs and

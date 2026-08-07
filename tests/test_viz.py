@@ -144,18 +144,115 @@ def test_the_baseline_dropdown_puts_labelled_candidates_first(finished_run):
     assert len(choices) == TRIALS + 2
 
 
-def test_the_heatmap_has_a_conditions_bin_and_renders(finished_run):
+def test_the_heatmap_query_still_carries_the_conditions(finished_run):
+    """They arrive in the same result set; which figure draws them is later."""
     path, run_id, baseline_id = finished_run
     candidate_id = data.history(path, run_id)[-1]["candidate_id"]
     rows = data.heatmap(path, candidate_id, baseline_id)
 
     bins = {row["bin"] for row in rows}
-    assert "conditions" in bins, "rung-0 rows were dropped"
+    assert data.CONDITIONS in bins, "rung-0 rows were dropped"
     assert {"atom", "equilibrium"} <= bins
 
-    figure = figures.heatmap(rows)
+
+def test_the_two_halves_of_the_grid_share_no_metric(finished_run):
+    """Why the one figure was half empty, asserted rather than asserted about.
+
+    The geometry bins measure a functional against reference data per system;
+    the conditions measure the functional against itself, on no system. They
+    are disjoint in metric, so every cell of a combined grid where the two
+    cross is empty by construction -- on the live store, 15 of 30.
+    """
+    path, run_id, baseline_id = finished_run
+    candidate_id = data.history(path, run_id)[-1]["candidate_id"]
+    per_system, conditions = data.split_conditions(
+        data.heatmap(path, candidate_id, baseline_id))
+
+    assert per_system and conditions, "the fixture should exercise both halves"
+    assert {row["metric"] for row in per_system}.isdisjoint(
+        {row["metric"] for row in conditions})
+    # Conditions belong to no regime, which is why they have no column.
+    assert {row["bin"] for row in conditions} == {data.CONDITIONS}
+
+
+def test_splitting_the_rows_loses_none_of_them(finished_run):
+    path, run_id, baseline_id = finished_run
+    candidate_id = data.history(path, run_id)[-1]["candidate_id"]
+    rows = data.heatmap(path, candidate_id, baseline_id)
+    per_system, conditions = data.split_conditions(rows)
+
+    assert len(per_system) + len(conditions) == len(rows)
+    assert per_system + conditions == [
+        r for r in rows if r["bin"] != data.CONDITIONS
+    ] + [r for r in rows if r["bin"] == data.CONDITIONS]
+
+
+def test_the_geometry_heatmap_is_dense_once_the_conditions_are_out(finished_run):
+    """The point of the split: every cell of what is left carries a number."""
+    path, run_id, baseline_id = finished_run
+    candidate_id = data.history(path, run_id)[-1]["candidate_id"]
+    per_system, _ = data.split_conditions(
+        data.heatmap(path, candidate_id, baseline_id))
+
+    figure = figures.heatmap(per_system)
     assert figure.data and figure.data[0].type == "heatmap"
-    assert "conditions" in list(figure.data[0].x)
+    assert data.CONDITIONS not in list(figure.data[0].x)
+
+    z = figure.data[0].z
+    cells = [cell for row in z for cell in row]
+    assert cells and all(cell is not None for cell in cells), "still a checkerboard"
+
+    # And there is no route back: handed the unsplit rows it draws the same
+    # figure, because a bin with no regime cannot be a column of this one.
+    unsplit = figures.heatmap(data.heatmap(path, candidate_id, baseline_id))
+    assert list(unsplit.data[0].x) == list(figure.data[0].x)
+    assert list(unsplit.data[0].y) == list(figure.data[0].y)
+
+
+def test_the_conditions_are_drawn_as_raw_violations_against_the_baseline(finished_run):
+    """Both bars, raw: zero means satisfied, which is relative to nothing."""
+    path, run_id, baseline_id = finished_run
+    candidate_id = data.history(path, run_id)[-1]["candidate_id"]
+    _, conditions = data.split_conditions(
+        data.heatmap(path, candidate_id, baseline_id))
+
+    figure = figures.condition_bars(conditions, candidate_label="c",
+                                    baseline_label="b")
+    assert [trace.name for trace in figure.data] == ["c", "b"]
+    assert all(trace.type == "bar" and trace.orientation == "h"
+               for trace in figure.data)
+
+    # The numbers drawn are the numbers stored, not differences of them.
+    stored = {row["metric"]: float(row["value"]) for row in conditions}
+    assert dict(zip(figure.data[0].y, figure.data[0].x)) == stored
+
+
+def test_the_exact_reference_drops_the_condition_baseline(finished_run):
+    """A row of zero-height bars is an invisible claim; the note makes it."""
+    path, run_id, _ = finished_run
+    candidate_id = data.history(path, run_id)[-1]["candidate_id"]
+    _, conditions = data.split_conditions(
+        data.heatmap(path, candidate_id, data.EXACT))
+
+    figure = figures.condition_bars(conditions, against_zero=True)
+    assert len(figure.data) == 1
+    assert "satisfies all of them" in app_module.conditions_note(conditions, True)
+
+
+def test_the_conditions_note_counts_the_ones_that_hold_exactly():
+    rows = [{"bin": "conditions", "metric": "a", "value": 0.0, "baseline": 0.0},
+            {"bin": "conditions", "metric": "b", "value": 0.5, "baseline": 0.1}]
+    assert "1 of 2 satisfied exactly" in app_module.conditions_note(rows, False)
+
+    none_hold = [dict(row, value=1.0) for row in rows]
+    assert "none of 2" in app_module.conditions_note(none_hold, False)
+    assert app_module.conditions_note([], False) == ""
+
+
+def test_conditions_with_nothing_recorded_say_so_rather_than_drawing_nothing():
+    figure = figures.condition_bars([])
+    assert not figure.data
+    assert "no conditions" in figure.layout.annotations[0].text
 
 
 def test_the_detail_panel_reads_the_density_through_the_store_pointer(finished_run):
@@ -713,9 +810,26 @@ def test_the_hover_text_carries_the_raw_numbers_and_the_difference(finished_run)
     # The sign survives in the number even where the colour has dropped it.
     assert all(("+" in cell.rsplit(":", 1)[-1]) or ("-" in cell.rsplit(":", 1)[-1])
                for cell in populated)
-    # A zero baseline is an absolute difference and says so, rather than
-    # quietly meaning something else than the cell beside it.
-    assert any("absolute difference" in cell for cell in populated)
+    assert all("relative difference" in cell for cell in populated)
+
+
+def test_a_zero_baseline_is_an_absolute_difference_and_says_so():
+    """The fallback that survived the conditions leaving the grid.
+
+    It was the conditions that used to reach it -- exchange_non_positivity
+    has a baseline of exactly zero when the baseline satisfies it -- so no
+    real geometry cell exercises it now. It stays because a per-system metric
+    *can* come out exactly zero, and dividing by that is worse than saying
+    which kind of difference the cell is. Constructed rather than fixtured,
+    since the fixture no longer produces one.
+    """
+    rows = [{"bin": "atom", "metric": "perfect", "value": 0.25, "baseline": 0.0},
+            {"bin": "atom", "metric": "ordinary", "value": 0.5, "baseline": 0.1}]
+    text = figures.heatmap(rows, scale="logabs").data[0].text
+    cells = {row[0] for row in text}
+
+    assert any("absolute difference: +2.500e-01" in cell for cell in cells)
+    assert any("relative difference" in cell for cell in cells)
 
 
 def test_the_log_colourbar_is_labelled_in_differences():

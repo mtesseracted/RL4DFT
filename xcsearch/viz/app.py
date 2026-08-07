@@ -138,10 +138,17 @@ _HEATMAP_HINT = (
     "XC potential. one_step_dn is how far one Kohn-Sham step moves the "
     "reference density: a functional can get the energy right on the exact "
     "density and still push it somewhere else on the first step.\n\n"
-    "Columns are bins. Four are geometry regimes -- equilibrium, stretched, "
-    "dissociating, and isolated atoms -- and 'conditions' holds the exact "
-    "constraints that belong to no single system: the uniform-gas limit, "
-    "one-electron self-interaction, and non-positivity of exchange.\n\n"
+    "Columns are the four geometry regimes: equilibrium, stretched, "
+    "dissociating, and isolated atoms.\n\n"
+    "The exact conditions are underneath rather than in the grid, and are a "
+    "different kind of measurement: the uniform-gas limit, one-electron "
+    "self-interaction, and non-positivity of exchange are properties of the "
+    "functional itself, measured on no system, so they have no regime to be "
+    "a column of and share no metric with the rows above. Kept together they "
+    "made a figure that was half empty by construction. They are drawn as "
+    "raw violations, not as differences: zero means the constraint holds "
+    "exactly, which is a claim relative to nothing, and the colour-scale "
+    "toggle does not apply to them.\n\n"
     "Each cell is the mean over the systems in that bin, expressed against "
     "the baseline as (candidate - baseline) / |baseline|, or as the plain "
     "difference where the baseline is exactly zero -- a condition it already "
@@ -624,6 +631,15 @@ def build_layout(store_path: str, human=None, new_run=None) -> html.Div:
                     labelStyle={"marginRight": "12px"},
                 ),
                 dcc.Graph(id="heatmap", config={"displayModeBar": False}),
+                # Their own figure, because they are their own kind of
+                # measurement: no system, so no regime to be a column of, and
+                # no metric in common with the grid above.
+                _subbox(
+                    "exact conditions",
+                    dcc.Graph(id="conditions", config={"displayModeBar": False}),
+                    html.Div(id="conditions-note",
+                             style={"fontSize": "11px", "color": "#9aa1a9"}),
+                ),
                 hint=_HEATMAP_HINT,
             ),
             _card(
@@ -716,6 +732,23 @@ def submission_line(human, last: dict) -> str:
     if pending:
         return f"submitted [{theta}] - {pending} waiting"
     return f"submitted [{theta}] - evaluating"
+
+
+def conditions_note(rows: list[dict], against_zero: bool) -> str:
+    """The line under the condition bars: what they are, and how many hold.
+
+    Worth counting rather than leaving to be read off the bars, because
+    "satisfied" here means exactly zero and a bar too short to see is not the
+    same claim as one that is not there.
+    """
+    if not rows:
+        return ""
+    satisfied = [row["metric"] for row in rows if row.get("value") == 0]
+    line = (f"{len(satisfied)} of {len(rows)} satisfied exactly"
+            if satisfied else f"none of {len(rows)} satisfied exactly")
+    if against_zero:
+        return f"{line}. The exact reference satisfies all of them, so it is not drawn."
+    return f"{line}. Lower is better; these are violations, not errors against data."
 
 
 def scale_for_baseline(baseline_id, current: str) -> str | None:
@@ -838,6 +871,8 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
         Output("formula-c", "children"),
         Output("theta", "children"),
         Output("heatmap", "figure"),
+        Output("conditions", "figure"),
+        Output("conditions-note", "children"),
         Output("heatmap-scope", "children"),
         Input("selected", "data"),
         Input("baseline", "value"),
@@ -846,7 +881,8 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
     )
     def _candidate(selected, baseline_id, scale, _tick):
         if not selected or baseline_id is None:
-            return ("*no candidate selected*", "", "", figures.heatmap([]), "")
+            return ("*no candidate selected*", "", "", figures.heatmap([]),
+                    figures.condition_bars([]), "", "")
         candidate_id = selected["candidate_id"]
 
         record = data.candidate(store_path, candidate_id) or {}
@@ -854,6 +890,13 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
         baseline = {} if exact else (data.candidate(store_path, baseline_id) or {})
         exchange, correlation = split_formula(record.get("form_latex", ""))
         theta = ", ".join(f"{c:.4f}" for c in record.get("theta", []))
+        candidate_label = f"candidate {candidate_id}"
+        baseline_label = ("exact reference" if exact else
+                          baseline.get("label") or f"candidate {baseline_id}")
+        # One query, two figures: the grid was half empty because these two
+        # halves share no metric and the conditions have no regime.
+        per_system, conditions = data.split_conditions(
+            data.heatmap(store_path, candidate_id, baseline_id))
         return (
             f"$${exchange}$$" if exchange else "",
             f"$${correlation}$$" if correlation else "",
@@ -869,13 +912,16 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
                 style={"fontSize": "13px", "fontFamily": "monospace"},
             ),
             figures.heatmap(
-                data.heatmap(store_path, candidate_id, baseline_id),
-                candidate_label=f"candidate {candidate_id}",
-                baseline_label=("exact reference" if exact else
-                                baseline.get("label") or f"candidate {baseline_id}"),
-                scale=scale or "linear",
+                per_system,
+                candidate_label=candidate_label, baseline_label=baseline_label,
+                scale=scale or "linear", against_zero=exact,
+            ),
+            figures.condition_bars(
+                conditions,
+                candidate_label=candidate_label, baseline_label=baseline_label,
                 against_zero=exact,
             ),
+            conditions_note(conditions, exact),
             scope_label(data.heatmap_scope(store_path, candidate_id, baseline_id)),
         )
 
