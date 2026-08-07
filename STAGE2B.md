@@ -7,7 +7,7 @@ by this document, which merges those items with the design decisions the
 review settled. Decision numbering continues from D16.
 
 **Status: implemented**, except F1, which is still a stub awaiting scope —
-nine self-contained usability items have landed under it, listed there. The
+ten self-contained usability items have landed under it, listed there. The
 decisions below are written in the voice they were settled in; where the
 built shape differs from the decision as drafted, an *as built* note says how
 and why, rather than quietly editing the decision to match the code. The
@@ -288,7 +288,7 @@ the test that holds it, so a clause with no test is a clause not met.
 | 2B.4 | `b2c78d5` | `test_repairs.py` |
 | B5, F2 | `04cc32e` | `test_fd_potentials.py`, `test_numerics.py` |
 | B11–B13 | post-review | `test_populations.py`, `test_score.py` |
-| F1 (the nine usability items) | post-review | `test_viz.py`, `test_repairs.py` |
+| F1 (the ten usability items) | post-review | `test_viz.py`, `test_repairs.py` |
 
 Suite: 282 tests before Stage 2B, 318 after with every extra installed, and
 twenty-five more with the F1 items below. The D15 fixture is still bitwise.
@@ -540,7 +540,7 @@ stated reason rather than a vague one.
   imports no physics module — and now D20: the score a panel shows is the
   stored told score, never a re-derivation.
 
-  **Nine usability items landed ahead of that scope**, each small enough to
+  **Ten usability items landed ahead of that scope**, each small enough to
   stand alone and none of them touching the constraints:
 
   1. *A run opens on its best trial.* The scrubber's initial value was 0, so
@@ -763,6 +763,60 @@ stated reason rather than a vague one.
      counts a pattern-matching group once however many components it matches
      — the same unit dash indexes with, and the reason the submit callback
      reads four arguments and not eight.
+
+  10. *Four panels, two across and two down, and the functional in parts.*
+      The panels were a single column, so the two things read against each
+      other — a trial's score and the functional that earned it — were a
+      scroll apart, and the same for the heatmap and the system detail that
+      drills into one of its columns. They are now a 2×2 grid: run and
+      functional above, heatmap and system detail below. `_row` uses
+      `flex-wrap`, so the breakpoint is a property of the panels' own minimum
+      width rather than a number in a stylesheet kept in step with them by
+      hand, and each cell carries `minWidth: 0` — without it a plotly graph
+      reports a wide minimum, the row refuses to narrow, and the page scrolls
+      sideways instead of stacking. The container went from 900px to 1320px,
+      because two panes at the old width are narrower than the heatmap needs.
+
+      The functional panel is now **split the way the form is**: an exchange
+      box and a correlation box. That is not a decorative division.
+      `eps_xc(n) = eps_x_ansatz(n; theta) + eps_c_LDA(n)` — *every* searched
+      coefficient is an exchange coefficient and correlation is fixed LDA
+      with nothing to tune, which is a fact about this form that the single
+      run-on formula hid. Saying it in the layout is why the coefficient
+      inputs go **inside the exchange box**: they are the coefficients of the
+      term they now sit under, and the correlation box says plainly that the
+      search proposes nothing there.
+
+      The split is done in viz, on the stored latex, by cutting at the last
+      `\epsilon_c`. That is a *rendering* convention, not physics — viz still
+      reads a string out of a record and knows nothing about what produced it
+      (D13) — and a formula with no such marker comes back whole rather than
+      empty, so an unfamiliar form renders as itself. If forms ever differ in
+      how they separate, the honest fix is for the form to publish its parts;
+      one marker and a fallback are enough for one form.
+
+      **The sliders became text boxes with a step button either side.** A
+      slider is a poor way to say 1.15, and these are numbers a person has a
+      value in mind for — reproducing a published theta, or nudging one digit
+      of the trial on screen. The buttons keep the one thing the slider was
+      good at, moving by a known amount without aiming: one click is a
+      two-hundredth of that coefficient's range, which is the step the slider
+      used and comes to a round 0.01 for both boxes this form uses.
+
+      Four details worth keeping. The **id shape is unchanged**, so the
+      submit callback that collects the coefficients cannot tell the
+      components were replaced — verified live, a submission still arrives in
+      c0..c4 order and scores what it scored before. The step callback is the
+      **one place here that asks dash which input fired**, and the one place
+      that is the honest answer: the two buttons differ in nothing but
+      direction and there is no previously published state to read it out of.
+      Its **bounds come from the endpoint**, not from the component's own
+      `min`/`max`, so the box a value is clipped into is the form's rather
+      than whatever the browser sent back. And an **empty box stops the
+      submission** rather than being guessed at — with the click still
+      recorded, because a refusal that does not record it looks like an
+      unsubmitted click on every tick after and resubmits the moment the box
+      is filled.
 
   **One test came out of using it.** What the episode exposed is that the tests drove the panel *functions* and
   never the endpoint, so the wiring between a callback's declared inputs and

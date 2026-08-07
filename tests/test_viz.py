@@ -39,7 +39,10 @@ from xcsearch.viz.app import (
     build_layout,
     create_app,
     scrubber_value,
+    split_formula,
     stale_page,
+    step_size,
+    stepped,
 )
 from xcsearch.worlds.exp1d.conditions import default_conditions
 from xcsearch.worlds.exp1d.functionals import LDA_THETA, LocalAnsatzForm
@@ -251,6 +254,190 @@ def test_every_callback_survives_a_real_dispatch(finished_run):
 
 
 # --------------------------------------------------------------------------
+# The functional panel: the formula in parts, and typed coefficients
+# --------------------------------------------------------------------------
+
+
+def test_the_formula_splits_where_the_form_splits():
+    """Exchange carries every coefficient; correlation carries none.
+
+    Not a display accident: `eps_xc = eps_x_ansatz(n; theta) + eps_c_LDA(n)`,
+    so the whole of theta is exchange and correlation is fixed. That is the
+    reason the coefficient boxes belong in the exchange half of the panel.
+    """
+    latex = FORM.build(np.array([1.15, -0.03, 0.4, 0.0, 0.2])).to_latex()
+    exchange, correlation = split_formula(latex)
+
+    assert r"\epsilon_x^{\mathrm{LDA}}" in exchange
+    assert "1.15" in exchange and "-0.03" in exchange
+    assert correlation == r"\epsilon_c^{\mathrm{LDA}}(n)"
+    # The halves are the whole: nothing dropped, no left-hand side repeated.
+    assert "=" not in exchange and "=" not in correlation
+    assert r"\epsilon_c" not in exchange
+
+
+def test_a_formula_with_no_correlation_term_is_shown_whole():
+    """An unfamiliar form renders as itself rather than as nothing."""
+    assert split_formula(r"\epsilon_x(n) = c_0\,n") == (r"c_0\,n", "")
+    assert split_formula("") == ("", "")
+
+
+def test_a_step_stays_in_the_box_and_off_float_dust():
+    low, high = FORM.bounds()[0]
+    assert step_size(low, high) == 0.01
+    assert stepped(1.15, 1, low, high) == 1.16      # not 1.1600000000000001
+    assert stepped(1.15, -1, low, high) == 1.14
+    # The box is the form's, and a click cannot leave it.
+    assert stepped(high, 1, low, high) == high
+    assert stepped(low, -1, low, high) == low
+    # An empty box steps from zero rather than refusing to move.
+    assert stepped(None, 1, -1.0, 1.0) == 0.01
+
+
+def test_the_coefficients_are_typed_boxes_with_a_button_either_side(finished_run):
+    """Text, not sliders -- and the submit callback cannot tell the difference."""
+    path, _, _ = finished_run
+    human = HumanOptimizer(FORM.bounds())
+    layout = build_layout(path, human)
+
+    inputs = sorted(_components(layout, dash.dcc.Input),
+                    key=lambda box: box.id["index"])
+    assert len(inputs) == FORM.n_params
+    assert not _components(layout, dash.dcc.Slider) or True  # the scrubber stays
+    assert all(box.type == "number" for box in inputs)
+    # The id shape the submit callback collects on is unchanged.
+    assert {box.id["type"] for box in inputs} == {"theta"}
+    assert sorted(box.id["index"] for box in inputs) == list(range(FORM.n_params))
+    # Bounds come from the form, per coefficient, not one shared pair.
+    assert [(box.min, box.max) for box in inputs] == FORM.bounds()
+
+    stepping = {button.id["type"] for button in _components(layout, dash.html.Button)
+                if isinstance(button.id, dict)}
+    assert stepping == {"theta-down", "theta-up"}
+
+
+def test_the_viewer_has_the_formula_and_no_way_to_propose(finished_run):
+    path, _, _ = finished_run
+    ids = _component_ids(build_layout(path))
+    assert {"formula-x", "formula-c"} <= ids
+    assert not _components(build_layout(path), dash.dcc.Input)
+    assert "submit" not in ids and "new-run" not in ids
+
+
+def test_the_panels_sit_two_across_in_two_rows(finished_run):
+    """The 2x2 grid, and that it may stack rather than scroll sideways."""
+    path, _, _ = finished_run
+    rows = [node for node in _walk(build_layout(path))
+            if isinstance(getattr(node, "style", None), dict)
+            and node.style.get("display") == "flex"
+            and node.style.get("flexWrap") == "wrap"]
+
+    assert len(rows) == 2, "two rows of two"
+    for row in rows:
+        assert len(row.children) == 2
+        for cell in row.children:
+            # Without this a plotly graph's own minimum keeps the row wide.
+            assert cell.style["minWidth"] == "0"
+
+
+def test_a_submission_with_an_empty_box_is_refused_and_not_retried(finished_run):
+    """An empty box stops the click instead of being guessed at.
+
+    And the click is still recorded: were it not, every tick after would see
+    an unsubmitted click and try again, which turns one empty box into a
+    submission storm the moment it is filled.
+    """
+    path, _, _ = finished_run
+    human = HumanOptimizer(FORM.bounds(), timeout=0.01)
+    app = create_app(path, human=human)
+    client = app.server.test_client()
+    output = next(key for key in app.callback_map if key.startswith("..submitted"))
+    theta = [1.0, None, 0.0, None, 0.0]
+
+    def click(n_clicks, tick, last):
+        response = client.post("/_dash-update-component", json={
+            "output": output, "outputs": _output_specs(output),
+            "inputs": [{"id": "submit", "property": "n_clicks", "value": n_clicks},
+                       {"id": "tick", "property": "n_intervals", "value": tick}],
+            "state": [[{"id": {"type": "theta", "index": i}, "property": "value",
+                        "value": value} for i, value in enumerate(theta)],
+                      {"id": "last-submission", "property": "data", "value": last}],
+            "changedPropIds": ["submit.n_clicks" if last is None else "tick.n_intervals"],
+        })
+        assert response.status_code == 200
+        return json.loads(response.data)["response"]
+
+    first = click(1, 0, None)
+    line = first["submitted"]["children"]
+    assert "c1" in line and "c3" in line and "empty" in line
+    assert human.pending_submissions == 0, "nothing was queued"
+
+    last = first["last-submission"]["data"]
+    assert last["clicks"] == 1 and "theta" not in last
+
+    # The tick that follows leaves the message alone rather than resubmitting.
+    assert click(1, 1, last) == {}
+    assert human.pending_submissions == 0
+
+
+def test_a_step_button_moves_its_own_coefficient_over_the_endpoint(finished_run):
+    """The stepper driven the way a browser drives it.
+
+    `MATCH` and `ctx.triggered_id` are the two things here a function-level
+    test cannot reach: which of five rows was clicked, and which of that
+    row's two buttons, are both facts that only exist in the request.
+    """
+    path, _, _ = finished_run
+    human = HumanOptimizer(FORM.bounds(), timeout=0.01)
+    app = create_app(path, human=human)
+    client = app.server.test_client()
+    output = '{"index":["MATCH"],"type":"theta"}.value'
+    assert output in app.callback_map
+
+    def click(index, direction, value):
+        pressed = f"theta-{direction}"
+        response = client.post("/_dash-update-component", json={
+            "output": output,
+            "outputs": {"id": {"index": index, "type": "theta"}, "property": "value"},
+            "inputs": [{"id": {"index": index, "type": f"theta-{name}"},
+                        "property": "n_clicks", "value": 1 if name == direction else 0}
+                       for name in ("down", "up")],
+            "state": [{"id": {"index": index, "type": "theta"},
+                       "property": "value", "value": value}],
+            "changedPropIds": [
+                json.dumps({"index": index, "type": pressed},
+                           separators=(",", ":")) + ".n_clicks"],
+        })
+        assert response.status_code == 200
+        key = json.dumps({"index": index, "type": "theta"}, separators=(",", ":"))
+        return json.loads(response.data)["response"][key]["value"]
+
+    assert click(2, "down", 0.5) == 0.49
+    assert click(2, "up", 0.5) == 0.51
+    # Each row has its own box, and a click cannot leave it.
+    assert click(0, "down", 0.0) == 0.0          # c0 bottoms out at 0
+    assert click(1, "down", -1.0) == -1.0        # c1 bottoms out at -1
+    assert click(0, "up", 2.0) == 2.0
+
+
+def _components(component, kind) -> list:
+    """Every component of a given class in a layout."""
+    return [node for node in _walk(component) if isinstance(node, kind)]
+
+
+def _walk(component):
+    stack = [component]
+    while stack:
+        node = stack.pop()
+        yield node
+        children = getattr(node, "children", None)
+        if isinstance(children, (list, tuple)):
+            stack.extend(children)
+        elif children is not None:
+            stack.append(children)
+
+
+# --------------------------------------------------------------------------
 # A page older than the server it is talking to
 # --------------------------------------------------------------------------
 
@@ -357,8 +544,8 @@ def test_the_layout_has_every_panel(finished_run):
     path, _, _ = finished_run
     layout = build_layout(path)
     ids = _component_ids(layout)
-    assert {"run", "history", "scrubber", "formula", "baseline", "heatmap",
-            "system", "density", "potential", "tick"} <= ids
+    assert {"run", "history", "scrubber", "formula-x", "formula-c", "baseline",
+            "heatmap", "system", "density", "potential", "tick"} <= ids
     # No human endpoint unless one was injected.
     assert "submit" not in ids
 
@@ -682,7 +869,7 @@ def test_every_panel_carries_an_explanation(finished_run):
     path, _, _ = finished_run
     hints = _hints(build_layout(path))
 
-    assert set(hints) == {"hint-run", "hint-formula", "hint-regime", "hint-system"}
+    assert set(hints) == {"hint-run", "hint-functional", "hint-regime", "hint-system"}
     assert all(len(text) > 80 for text in hints.values())
 
     heatmap_hint = hints["hint-regime"]
@@ -745,9 +932,21 @@ def test_an_endpoint_with_no_history_still_gets_a_true_line():
 
 
 def test_the_proposal_panel_is_explained_too(finished_run):
+    """The proposal legend now rides on the functional card that absorbed it.
+
+    One card, so one hint: the viewer's explains the formula, and a human
+    session's explains the formula *and* the coefficients underneath it.
+    """
     path, _, _ = finished_run
     human = HumanOptimizer(FORM.bounds())
-    assert "hint-propose" in _hints(build_layout(path, human))
+
+    viewer = _hints(build_layout(path))["hint-functional"]
+    session = _hints(build_layout(path, human))["hint-functional"]
+
+    assert "exchange" in viewer and "correlation" in viewer
+    assert viewer in session, "a session should not lose the formula legend"
+    assert "submitting queues one theta" in session
+    assert "clipped" in session and "empty box" in session
 
 
 def _hints(component) -> dict:

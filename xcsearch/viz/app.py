@@ -2,15 +2,17 @@
 
     python -m xcsearch.viz.app --store data/exp1d/records.sqlite
 
-Panels: the formula of the selected candidate, a regime x metric heatmap
-against a baseline of your choosing, a per-system drill-down, and a history
-scrubber over a run with its best-so-far strip. All of it re-reads the store on
-an interval, so the panels track a search that is still running -- the store is
+Four panels, two across and two down: a run with its history scrubber and
+best-so-far strip, the selected candidate's functional split into its exchange
+and correlation terms, a regime x metric heatmap against a baseline of your
+choosing, and a per-system drill-down. All of it re-reads the store on an
+interval, so the panels track a search that is still running -- the store is
 in WAL mode and these connections are read-only, so nothing here can block or
 corrupt the writer.
 
 The human endpoint is optional: pass an object with ``bounds`` and
-``submit(theta)`` (``HumanOptimizer`` is one) and the proposal panel appears.
+``submit(theta)`` (``HumanOptimizer`` is one) and the functional panel grows a
+coefficient box per parameter and a submit button.
 It is *duck-typed* on purpose -- the dashboard renders records and feeds a
 queue, and giving it an import of an optimizer adapter would be the first
 crack in "viz imports no physics".
@@ -58,6 +60,36 @@ def _card(title: str, *children, hint: str | None = None) -> html.Div:
     )
 
 
+def _row(*panels) -> html.Div:
+    """Panels side by side, stacking when the window is too narrow to hold them.
+
+    ``flex-wrap`` rather than a media query: the breakpoint is then a property
+    of the panels' own minimum width instead of a number in a stylesheet that
+    has to be kept in step with them. ``minWidth: 0`` on each cell because a
+    flex item defaults to its content's minimum, and a plotly graph reports a
+    wide one -- without it the row refuses to narrow and the page scrolls
+    sideways instead of stacking.
+    """
+    return html.Div(
+        [html.Div(panel, style={"flex": "1 1 400px", "minWidth": "0"})
+         for panel in panels],
+        style={"display": "flex", "gap": "14px", "alignItems": "flex-start",
+               "flexWrap": "wrap"},
+    )
+
+
+def _subbox(label: str, *children) -> html.Div:
+    """A labelled division inside a card, for a panel with parts."""
+    return html.Div(
+        [html.Div(label, style={"fontSize": "10px", "letterSpacing": "0.07em",
+                                "textTransform": "uppercase", "color": "#8b929a",
+                                "marginBottom": "5px"}),
+         *children],
+        style={"border": "1px solid #eceef1", "borderRadius": "6px",
+               "padding": "8px 10px", "marginBottom": "8px", "background": "#fcfcfd"},
+    )
+
+
 # The panel legends. Kept as constants rather than inline so that what a panel
 # claims to show sits next to what it shows, and so a test can assert every
 # panel has one -- an unexplained heatmap is the failure mode here, not a
@@ -74,12 +106,16 @@ _RUN_HINT = (
     "underneath names both, and the rest of the store keys on the candidate id."
 )
 
-_FORMULA_HINT = (
-    "The selected trial's functional, written out: LDA exchange scaled by c0, "
-    "plus the density raised to 1/2, 1, 3/2 and 2 with coefficients c1..c4, "
-    "plus LDA correlation left alone. LDA itself is theta = [1, 0, 0, 0, 0], "
-    "which is why c0 near 1 with small tail terms reads as a correction to it "
-    "rather than a replacement for it.\n\n"
+_FUNCTIONAL_HINT = (
+    "The selected trial's functional, split the way the form itself is: an "
+    "exchange term carrying every searched coefficient, and a correlation "
+    "term carrying none.\n\n"
+    "Exchange is LDA exchange scaled by c0, plus the density raised to 1/2, "
+    "1, 3/2 and 2 with coefficients c1..c4. Correlation is LDA correlation, "
+    "fixed -- the search does not touch it, which is why that box has nothing "
+    "to set. LDA itself is theta = [1, 0, 0, 0, 0], which is why c0 near 1 "
+    "with small tail terms reads as a correction to it rather than a "
+    "replacement for it.\n\n"
     "theta is the coefficient vector as proposed. score is the value stored "
     "for that proposal at the time it was made, not a re-derivation of it here."
 )
@@ -149,11 +185,17 @@ _SYSTEM_HINT = (
 )
 
 _PROPOSAL_HINT = (
-    "Hand-place a functional in the same search the optimizer is running "
-    "against. The sliders are the coefficients of the formula panel, bounded "
-    "by the same box the optimizer proposes inside; submitting queues one "
-    "theta, which the search picks up as its next trial and records like any "
-    "other, so it lands in the history strip beside the machine's.\n\n"
+    "The boxes under exchange hand-place a functional in the same search the "
+    "optimizer is running against, bounded by the same box it proposes "
+    "inside; submitting queues one theta, which the search picks up as its "
+    "next trial and records like any other, so it lands in the history strip "
+    "beside the machine's.\n\n"
+    "They are yours to set and do not follow the trial selected on the left: "
+    "the formula above is the selected trial's, the numbers in the boxes are "
+    "your next proposal. Type into a box, or step it with the buttons either "
+    "side -- one click is a two-hundredth of that coefficient's range. A "
+    "number outside the box is clipped into it rather than refused, and an "
+    "empty box stops the submission rather than guessing at one.\n\n"
     "A session has no trial count. One submission is one trial and it runs "
     "until you stop it -- a budget is what an optimizer needs because "
     "something has to decide when it has had enough, and here you are that "
@@ -196,6 +238,159 @@ def check_human_endpoint(human) -> None:
             f"{type(human).__name__}.submit is not callable: the submit "
             "button calls it with a theta and expects the accepted theta back."
         )
+
+
+# The marker the exchange and correlation halves of a stored formula are
+# split on. The form writes `<exchange terms> + \epsilon_c^{...}(n)` and the
+# panel shows the two separately, which is a *rendering* convention and not a
+# claim about physics -- viz still reads a string out of a record and knows
+# nothing about what produced it (D13). If the day comes that forms differ in
+# how they separate, the honest fix is for the form to publish its parts
+# rather than for this to grow cases; until then one marker and a fallback
+# that shows the formula whole are enough.
+_CORRELATION_TERM = r"\epsilon_c"
+
+
+def split_formula(latex: str) -> tuple[str, str]:
+    """A stored formula as (exchange, correlation), right-hand sides only.
+
+    The left-hand side is dropped because the two boxes are already labelled;
+    printing ``\\epsilon_{xc}(n) =`` above each half would say the wrong thing
+    twice. A formula with no correlation term comes back whole in the first
+    slot and empty in the second, so an unfamiliar form renders as itself
+    rather than as nothing.
+    """
+    if not latex:
+        return "", ""
+    _, equals, right = latex.partition("=")
+    body = (right if equals else latex).strip()
+    cut = body.rfind(_CORRELATION_TERM)
+    if cut < 0:
+        return body, ""
+    return body[:cut].rstrip().rstrip("+").rstrip(), body[cut:].strip()
+
+
+def step_size(low: float, high: float) -> float:
+    """One click of a coefficient's increment buttons.
+
+    A two-hundredth of its range, which is what the sliders these replaced
+    stepped by -- and which comes to a round 0.01 for both boxes this form
+    uses, so the numbers a person steps through stay ones they would have
+    typed.
+    """
+    return round((high - low) / 200.0, 6)
+
+
+def stepped(value, direction: int, low: float, high: float) -> float:
+    """``value`` moved one step, kept inside the box and off float dust.
+
+    An empty box steps from zero rather than refusing to move: the button
+    said it would change the number and doing nothing looks broken. Rounding
+    is there because 1.15 + 0.01 is 1.1600000000000001 in binary and a
+    coefficient panel that accumulates that is unreadable within a few clicks.
+    """
+    start = 0.0 if value is None else float(value)
+    return round(min(max(start + direction * step_size(low, high), low), high), 6)
+
+
+_STEP_BUTTON = {
+    "width": "24px", "height": "24px", "lineHeight": "1", "padding": "0",
+    "border": "1px solid #d4d9e0", "background": "#f6f7f9", "borderRadius": "4px",
+    "color": "#4a525c", "cursor": "pointer", "fontSize": "14px",
+}
+
+
+def coefficient_rows(bounds) -> list:
+    """A typed box per coefficient, with a step button on either side.
+
+    Text rather than a slider because these are numbers a person has a value
+    in mind for -- reproducing a published theta, or nudging one digit of the
+    trial on screen -- and a slider is a poor way to say 1.15. The buttons
+    keep the one thing a slider was good at, which is moving by a known
+    amount without aiming.
+
+    The id shape is unchanged from the sliders, so the submit callback that
+    collects them does not know these are different components.
+    """
+    return [
+        html.Div(
+            [
+                html.Label(f"c{index}", style={"width": "24px", "fontFamily": "monospace",
+                                               "fontSize": "12px", "color": "#4a525c"}),
+                html.Button("−", id={"type": "theta-down", "index": index},
+                            n_clicks=0, style=_STEP_BUTTON),
+                dcc.Input(
+                    id={"type": "theta", "index": index}, type="number",
+                    value=1.0 if index == 0 else 0.0,
+                    min=low, max=high, step=step_size(low, high),
+                    style={"width": "82px", "margin": "0 4px", "padding": "3px 6px",
+                           "border": "1px solid #d4d9e0", "borderRadius": "4px",
+                           "fontFamily": "monospace", "fontSize": "12px"},
+                ),
+                html.Button("+", id={"type": "theta-up", "index": index},
+                            n_clicks=0, style=_STEP_BUTTON),
+                html.Span(f"[{low:g}, {high:g}]",
+                          style={"marginLeft": "8px", "fontSize": "11px",
+                                 "color": "#9aa1a9", "fontFamily": "monospace"}),
+            ],
+            style={"display": "flex", "alignItems": "center", "marginBottom": "4px"},
+        )
+        for index, (low, high) in enumerate(bounds)
+    ]
+
+
+def functional_card(human=None, new_run=None) -> html.Div:
+    """The functional panel: the formula in parts, and a way to propose one.
+
+    Both modes show the same two boxes. The difference is that in a human
+    session the exchange box also carries the coefficients, which is where
+    they belong: every searched parameter of this form is an exchange
+    parameter, and correlation is fixed LDA with nothing to set. Putting the
+    inputs beside the term they are the coefficients *of* is the whole reason
+    the panel is split.
+    """
+    exchange = [dcc.Markdown(id="formula-x", mathjax=True)]
+    if human is not None:
+        check_human_endpoint(human)
+        exchange += [
+            html.Div(style={"borderTop": "1px solid #eceef1", "margin": "8px 0 7px"}),
+            *coefficient_rows(human.bounds),
+        ]
+
+    children = [
+        _subbox("exchange", *exchange),
+        _subbox(
+            "correlation",
+            dcc.Markdown(id="formula-c", mathjax=True),
+            html.Div("fixed -- the search proposes no correlation coefficients",
+                     style={"fontSize": "11px", "color": "#9aa1a9", "marginTop": "2px"}),
+        ),
+        html.Div(id="theta"),
+    ]
+
+    if human is not None:
+        children += [
+            html.Button("submit", id="submit", n_clicks=0,
+                        style={"marginTop": "8px"}),
+            # What was last submitted, so the line under the button can be
+            # recomputed on the tick instead of frozen at the click.
+            dcc.Store(id="last-submission"),
+            html.Div(id="submitted", style={"fontSize": "13px", "marginTop": "6px"}),
+            # A session runs one trial per submission for as long as you keep
+            # submitting, so "start a new run" is the only run-shaped control
+            # it needs: there is no length to declare up front.
+            *([
+                html.Hr(style={"border": "none", "borderTop": "1px solid #eceef1",
+                               "margin": "12px 0 10px"}),
+                html.Button("start a new run", id="new-run", n_clicks=0),
+                html.Div(id="new-run-status",
+                         style={"fontSize": "13px", "marginTop": "6px",
+                                "color": "#4a525c"}),
+            ] if new_run is not None else []),
+        ]
+
+    hint = _FUNCTIONAL_HINT if human is None else f"{_FUNCTIONAL_HINT}\n\n{_PROPOSAL_HINT}"
+    return _card("functional", *children, hint=hint)
 
 
 _RELOAD_ADVICE = (
@@ -375,114 +570,84 @@ def build_layout(store_path: str, human=None, new_run=None) -> html.Div:
         # three reads of the same history per poll and a race on a run switch
         # -- a callback could fire with the new run and the old index.
         dcc.Store(id="selected"),
-        _card(
-            "run",
-            dcc.Dropdown(
-                id="run", options=runs,
-                value=runs[0]["value"] if runs else None,
-                clearable=False,
+        # Two rows of two. Reading order is the order the question is asked
+        # in: which trial (and how the run got there), what functional that
+        # was, where it wins and loses, and then one system in detail. Side
+        # by side rather than stacked because the first two are read against
+        # each other -- a coefficient means something next to the score it
+        # earned -- and so are the last two.
+        _row(
+            _card(
+                "run",
+                dcc.Dropdown(
+                    id="run", options=runs,
+                    value=runs[0]["value"] if runs else None,
+                    clearable=False,
+                ),
+                dcc.Graph(id="history", config={"displayModeBar": False}),
+                html.Div(
+                    # "trial", because that is what the slider's value is. It
+                    # was labelled "candidate" while carrying the trial index,
+                    # so the UI was actively wrong rather than ambiguous (B9).
+                    [html.Span("trial", style={"marginRight": "8px"}),
+                     dcc.Slider(id="scrubber", min=0, max=0, step=1, value=0,
+                                tooltip={"placement": "bottom"})],
+                    style={"marginTop": "6px"},
+                ),
+                html.Div(id="selection", style={"fontSize": "12px", "color": "#4a525c",
+                                                "marginTop": "2px"}),
+                hint=_RUN_HINT,
             ),
-            dcc.Graph(id="history", config={"displayModeBar": False}),
-            html.Div(
-                # "trial", because that is what the slider's value is. It was
-                # labelled "candidate" while carrying the trial index, so the
-                # UI was actively wrong rather than merely ambiguous (B9).
-                [html.Span("trial", style={"marginRight": "8px"}),
-                 dcc.Slider(id="scrubber", min=0, max=0, step=1, value=0,
-                            tooltip={"placement": "bottom"})],
-                style={"marginTop": "6px"},
-            ),
-            html.Div(id="selection", style={"fontSize": "12px", "color": "#4a525c",
-                                            "marginTop": "2px"}),
-            hint=_RUN_HINT,
+            functional_card(human, new_run),
         ),
-        _card("formula", dcc.Markdown(id="formula", mathjax=True), html.Div(id="theta"),
-              hint=_FORMULA_HINT),
-        _card(
-            "regime x metric, against a baseline",
-            dcc.Dropdown(
-                id="baseline", options=baselines,
-                value=data.default_baseline(store_path), clearable=False,
+        _row(
+            _card(
+                "regime x metric, against a baseline",
+                dcc.Dropdown(
+                    id="baseline", options=baselines,
+                    value=data.default_baseline(store_path), clearable=False,
+                ),
+                # What set the two means were taken over (D19). A comparison
+                # across populations is over their intersection, and saying so
+                # is part of the comparison rather than a footnote to it.
+                html.Div(id="heatmap-scope",
+                         style={"fontSize": "12px", "color": "#7a828c",
+                                "margin": "2px 0"}),
+                # Colour scale, not data: both draw the same differences.
+                dcc.RadioItems(
+                    id="heatmap-scale",
+                    options=[{"label": "linear", "value": "linear"},
+                             {"label": "log magnitude", "value": "logabs"}],
+                    value="linear", inline=True,
+                    style={"fontSize": "12px", "color": "#4a525c"},
+                    inputStyle={"marginRight": "4px"},
+                    labelStyle={"marginRight": "12px"},
+                ),
+                dcc.Graph(id="heatmap", config={"displayModeBar": False}),
+                hint=_HEATMAP_HINT,
             ),
-            # What set the two means were taken over (D19). A comparison
-            # across populations is over their intersection, and saying so is
-            # part of the comparison rather than a footnote to it.
-            html.Div(id="heatmap-scope",
-                     style={"fontSize": "12px", "color": "#7a828c", "margin": "2px 0"}),
-            # Colour scale, not data: both settings draw the same differences.
-            dcc.RadioItems(
-                id="heatmap-scale",
-                options=[{"label": "linear", "value": "linear"},
-                         {"label": "log magnitude", "value": "logabs"}],
-                value="linear", inline=True,
-                style={"fontSize": "12px", "color": "#4a525c"},
-                inputStyle={"marginRight": "4px"},
-                labelStyle={"marginRight": "12px"},
+            _card(
+                "system detail",
+                dcc.Dropdown(
+                    id="system", options=systems,
+                    value=systems[0]["value"] if systems else None,
+                    clearable=False,
+                ),
+                html.Div(id="system-metrics",
+                         style={"fontSize": "13px", "margin": "6px 0"}),
+                dcc.Graph(id="density", config={"displayModeBar": False}),
+                dcc.Graph(id="potential", config={"displayModeBar": False}),
+                hint=_SYSTEM_HINT,
             ),
-            dcc.Graph(id="heatmap", config={"displayModeBar": False}),
-            hint=_HEATMAP_HINT,
-        ),
-        _card(
-            "system detail",
-            dcc.Dropdown(
-                id="system", options=systems,
-                value=systems[0]["value"] if systems else None,
-                clearable=False,
-            ),
-            html.Div(id="system-metrics", style={"fontSize": "13px", "margin": "6px 0"}),
-            dcc.Graph(id="density", config={"displayModeBar": False}),
-            dcc.Graph(id="potential", config={"displayModeBar": False}),
-            hint=_SYSTEM_HINT,
         ),
     ]
-
-    if human is not None:
-        check_human_endpoint(human)
-        panels.append(
-            _card(
-                "propose a functional",
-                html.Div(
-                    [
-                        html.Div(
-                            [
-                                html.Label(f"c{i}", style={"width": "34px",
-                                                           "display": "inline-block"}),
-                                dcc.Slider(
-                                    id={"type": "theta", "index": i},
-                                    min=lo, max=hi, step=(hi - lo) / 200.0,
-                                    value=1.0 if i == 0 else 0.0,
-                                    tooltip={"placement": "bottom", "always_visible": True},
-                                ),
-                            ],
-                            style={"marginBottom": "4px"},
-                        )
-                        for i, (lo, hi) in enumerate(human.bounds)
-                    ]
-                ),
-                html.Button("submit", id="submit", n_clicks=0),
-                # What was last submitted, so the line under the button can be
-                # recomputed on the tick instead of frozen at the click.
-                dcc.Store(id="last-submission"),
-                html.Div(id="submitted", style={"fontSize": "13px", "marginTop": "6px"}),
-                # A session runs one trial per submission for as long as you
-                # keep submitting, so "start a new run" is the only run-shaped
-                # control it needs: there is no length to declare up front.
-                *([
-                    html.Hr(style={"border": "none", "borderTop": "1px solid #eceef1",
-                                   "margin": "12px 0 10px"}),
-                    html.Button("start a new run", id="new-run", n_clicks=0),
-                    html.Div(id="new-run-status",
-                             style={"fontSize": "13px", "marginTop": "6px",
-                                    "color": "#4a525c"}),
-                ] if new_run is not None else []),
-                hint=_PROPOSAL_HINT,
-            )
-        )
 
     return html.Div(
         panels,
         style={
-            "maxWidth": "900px", "margin": "0 auto", "padding": "18px",
+            # Wider than it was, because the panels now sit two across: at the
+            # old 900 each pane would be narrower than the heatmap needs.
+            "maxWidth": "1320px", "margin": "0 auto", "padding": "18px",
             "fontFamily": "system-ui, sans-serif", "background": "#f6f7f9",
         },
     )
@@ -666,7 +831,8 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
         )
 
     @app.callback(
-        Output("formula", "children"),
+        Output("formula-x", "children"),
+        Output("formula-c", "children"),
         Output("theta", "children"),
         Output("heatmap", "figure"),
         Output("heatmap-scope", "children"),
@@ -677,16 +843,17 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
     )
     def _candidate(selected, baseline_id, scale, _tick):
         if not selected or baseline_id is None:
-            return "*no candidate selected*", "", figures.heatmap([]), ""
+            return ("*no candidate selected*", "", "", figures.heatmap([]), "")
         candidate_id = selected["candidate_id"]
 
         record = data.candidate(store_path, candidate_id) or {}
         exact = baseline_id == data.EXACT
         baseline = {} if exact else (data.candidate(store_path, baseline_id) or {})
-        latex = record.get("form_latex", "")
+        exchange, correlation = split_formula(record.get("form_latex", ""))
         theta = ", ".join(f"{c:.4f}" for c in record.get("theta", []))
         return (
-            f"$${latex}$$",
+            f"$${exchange}$$" if exchange else "",
+            f"$${correlation}$$" if correlation else "",
             html.Div(
                 [
                     html.Span(f"candidate {candidate_id}", style={"fontWeight": 600}),
@@ -788,6 +955,33 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
         return status() if status is not None else ""
 
     if human is not None:
+        match, context = dash_match(), dash_context()
+
+        @app.callback(
+            Output({"type": "theta", "index": match}, "value"),
+            Input({"type": "theta-down", "index": match}, "n_clicks"),
+            Input({"type": "theta-up", "index": match}, "n_clicks"),
+            State({"type": "theta", "index": match}, "value"),
+            prevent_initial_call=True,
+        )
+        def _step(_down, _up, value):
+            """Move one coefficient by one step, in the direction clicked.
+
+            The one place here that asks dash which input fired, and the one
+            place it is the honest answer: the two buttons differ in nothing
+            but direction, and unlike the submit line there is no previously
+            published state to read the difference out of. The bounds come
+            from the endpoint rather than from the component's own min/max,
+            so the box a value is clipped into is the form's and not whatever
+            the browser sent back.
+            """
+            fired = context.triggered_id
+            if fired is None:
+                return no_update
+            low, high = human.bounds[fired["index"]]
+            return stepped(value, -1 if fired["type"] == "theta-down" else 1,
+                           low, high)
+
         @app.callback(
             Output("submitted", "children"),
             Output("last-submission", "data"),
@@ -813,6 +1007,13 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
             if submitting:
                 if not n_clicks:
                     return no_update, no_update
+                empty = [f"c{i}" for i, c in enumerate(theta) if c is None]
+                if empty:
+                    # The click is still recorded, with no theta on it. Not
+                    # doing so would leave this looking like an unsubmitted
+                    # click on every tick after, and it would resubmit.
+                    return (f"nothing submitted: {', '.join(empty)} empty",
+                            {"clicks": n_clicks})
                 accepted = human.submit(theta)
                 last = {"clicks": n_clicks,
                         "theta": [float(c) for c in accepted],
@@ -852,6 +1053,20 @@ def dash_all():
     from dash import ALL
 
     return ALL
+
+
+def dash_match():
+    """``MATCH``, for the per-coefficient step callback. See :func:`dash_all`."""
+    from dash import MATCH
+
+    return MATCH
+
+
+def dash_context():
+    """``ctx``, the only thing here that asks dash which input fired."""
+    from dash import ctx
+
+    return ctx
 
 
 def main() -> None:
