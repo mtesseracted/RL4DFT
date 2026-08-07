@@ -645,9 +645,12 @@ def build_layout(store_path: str, human=None, new_run=None) -> html.Div:
     return html.Div(
         panels,
         style={
-            # Wider than it was, because the panels now sit two across: at the
-            # old 900 each pane would be narrower than the heatmap needs.
-            "maxWidth": "1320px", "margin": "0 auto", "padding": "18px",
+            # Sized for the screen this is read on: 1920 wide, less a
+            # scrollbar, this padding, and room left over for a side menu if
+            # one ever arrives. Wide matters more than it did now that the
+            # panels sit two across -- at the old 900 each pane came out
+            # narrower than the heatmap needs.
+            "maxWidth": "1600px", "margin": "0 auto", "padding": "18px",
             "fontFamily": "system-ui, sans-serif", "background": "#f6f7f9",
         },
     )

@@ -774,8 +774,10 @@ stated reason rather than a vague one.
       width rather than a number in a stylesheet kept in step with them by
       hand, and each cell carries `minWidth: 0` — without it a plotly graph
       reports a wide minimum, the row refuses to narrow, and the page scrolls
-      sideways instead of stacking. The container went from 900px to 1320px,
-      because two panes at the old width are narrower than the heatmap needs.
+      sideways instead of stacking. The container went from 900px to 1600px:
+      two panes at the old width are narrower than the heatmap needs, and
+      1600 is what a 1080p screen leaves after a scrollbar, the page padding,
+      and room for a side menu should one ever arrive.
 
       The functional panel is now **split the way the form is**: an exchange
       box and a correlation box. That is not a decorative division.
