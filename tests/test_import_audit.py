@@ -55,6 +55,16 @@ ALLOWED: dict[str, set[str]] = {
     # Its row is in STAGE2B.md's updated ownership table, which supersedes
     # STAGE2.md's printed one.
     "provenance": {"numpy", "subprocess"},
+    # Stage 3's form representation (Core B). The rows *are* the design: the
+    # module that decides a form's identity may import nothing at all, the
+    # checker sees only the document, and JAX is confined to exactly one
+    # module in the whole package (D23). `fractions` is architectural here --
+    # powers are exact rationals, not floats (D22) -- so it is declared rather
+    # than swept in with the plumbing.
+    "document": {"fractions"},
+    "checker": {"document", "fractions"},
+    "library": {"document", "fractions"},
+    "compile": {"document", "fractions", "jax", "numpy"},
     # `store` for the near-duplicate index the driver feeds (2.5). It is the
     # index's *type*, not a second persistence path: the driver still writes
     # through the RecordStore port.
@@ -97,8 +107,16 @@ ALLOWED: dict[str, set[str]] = {
     # sqlite3 is declared, like the store's own row: the viewer opens its own
     # read-only connections rather than sharing the writer's.
     "data": {"store", "records", "sqlite3", "numpy"},
-    "figures": {"records", "numpy", "plotly"},
-    "app": {"store", "records", "data", "figures", "dash"},
+    # `data` for the CONDITIONS bin name: the string the store's queries put
+    # rung-0 rows under is one fact, and a figure that spelled it a second
+    # time would drift from the query that produces it. Same argument as
+    # `ranking` importing `evaluators` for its metric name.
+    "figures": {"records", "numpy", "plotly", "data"},
+    # flask is dash's own server, and `refuse_stale_pages` reaches for it to
+    # answer a stale page with a 409 rather than a traceback. Declared rather
+    # than swept into the plumbing set, because "the dashboard may touch the
+    # HTTP layer" is an architectural permission, not Python housekeeping.
+    "app": {"store", "records", "data", "figures", "dash", "flask"},
     # The composition root is the one module that may see everything -- that
     # is what makes it the only composition point.
     "run_stage2": None,

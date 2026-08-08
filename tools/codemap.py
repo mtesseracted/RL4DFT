@@ -748,6 +748,15 @@ LAYERS = [
         "reads, and all they should have to read.",
     ),
     (
+        "forms",
+        "The form representation",
+        ["document", "checker", "library", "compile"],
+        "Core B (Stage 3): a functional as a canonical typed expression DAG, "
+        "its one identity, the checker that reads it, and the JAX path that "
+        "turns it into numbers. Imports nothing from the rest of the package "
+        "-- a world publishes its supply table as plain data.",
+    ),
+    (
         "reference",
         "Reference truth",
         ["world", "solver", "dataset"],
@@ -1123,6 +1132,7 @@ CSS = """
   --layer-reference: #2a78d6;
   --layer-candidate: #eb6834;
   --layer-driver:    #1baf7a;
+  --layer-forms:     #0f9bd0;
   --layer-unknown:   #99a2ad;
   --warn:        #a8580f;
   --shadow: 0 1px 2px rgba(20, 24, 29, .06), 0 4px 16px rgba(20, 24, 29, .05);
@@ -1146,6 +1156,7 @@ CSS = """
     --layer-reference: #3987e5;
     --layer-candidate: #d95926;
     --layer-driver:    #199e70;
+    --layer-forms:     #35b3e0;
     --layer-unknown:   #6d7681;
     --warn:      #e0a35c;
     --shadow: 0 1px 2px rgba(0, 0, 0, .4);
@@ -1167,6 +1178,7 @@ CSS = """
   --layer-reference: #3987e5;
   --layer-candidate: #d95926;
   --layer-driver:    #199e70;
+  --layer-forms:     #35b3e0;
   --layer-unknown:   #6d7681;
   --warn:      #e0a35c;
   --shadow: 0 1px 2px rgba(0, 0, 0, .4);
@@ -1286,6 +1298,7 @@ li.collapsed > .row .twist::before { transform: rotate(0deg); }
 .dot.layer-reference { background: var(--layer-reference); }
 .dot.layer-candidate { background: var(--layer-candidate); }
 .dot.layer-driver    { background: var(--layer-driver); }
+.dot.layer-forms     { background: var(--layer-forms); }
 
 .name { font-family: var(--mono); font-size: 13px; white-space: nowrap; }
 .name .mod { color: var(--ink-3); }
@@ -1354,6 +1367,7 @@ table.matrix td.hit.layer-viz { color: var(--layer-viz); }
 table.matrix td.hit.layer-reference { color: var(--layer-reference); }
 table.matrix td.hit.layer-candidate { color: var(--layer-candidate); }
 table.matrix td.hit.layer-driver { color: var(--layer-driver); }
+table.matrix td.hit.layer-forms { color: var(--layer-forms); }
 table.matrix td.self { background: var(--surface-2); }
 table.consts td { padding: 3px 8px 3px 0; vertical-align: top; border-bottom: 1px solid var(--line-soft); }
 table.consts .dot { display: inline-block; margin-right: 6px; }

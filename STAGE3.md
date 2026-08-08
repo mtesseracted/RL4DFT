@@ -589,6 +589,33 @@ dependency here — the stage's first new runtime dependency.
    written into this file's performance notes at implementation
    time.
 
+**Implementation notes (measured at build time)**:
+
+- *Performance (acceptance 7)*: steady-state compiled evaluation of
+  `stage2_local_ansatz` over the cached systems is **3.7 ms/system**, i.e.
+  **0.235 s over 63 systems** against the 0.353 s Stage 2 closed-form trial
+  cost — inside the 2× gate. JIT warmup is excluded and is a pass per
+  *distinct grid width*, not per system: jitted code is cached per input
+  shape. Two things mattered more than the arithmetic: converting the input
+  arrays to device arrays once per call rather than once per term (a 2×), and
+  the per-form compile cache.
+- *Equivalence is machine-precision, not bitwise, and here is why*. The
+  compiled document reproduces `functionals.py` to ~5e-16 relative in `E_xc`
+  and ~3e-16 absolute in `v_xc` — but not bit for bit, for two independent
+  reasons. (a) The compiled path sums **per term** (D23's compile unit) while
+  the closed form assembles one energy density and integrates once, so the
+  summation order differs. (b) XLA's `log1p`, `exp` and `x^(1/2)` differ from
+  glibc's in the last bit — measured at ~2-3e-16 relative on this box, while
+  `arctan`, `sqrt` and `x^(3/2)` agree bitwise. Pure LDA (`lda_x + lda_c`,
+  no power terms) *does* come out bitwise identical, which isolates the cause
+  to the power terms' summation rather than to the primitive leaves.
+  **Consequence for 3.2's D15 gate**: the trial *sequence* and the best theta
+  are bitwise, because TPE's decisions depend on the ordering of scores and
+  no last-bit difference flips one; the *score* agrees to 1 ulp rather than
+  exactly. That is recorded here as a measured property, not adopted as a
+  loosened tolerance: the original closed-form D15 fixture stays untouched
+  and stays bitwise, and it is still the anchor.
+
 ### 3.2 — Migration: the flat-θ modules move to the representation
 
 The flat-θ modules — `composed.py`, the store's serialization, the

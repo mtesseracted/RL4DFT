@@ -12,6 +12,10 @@ dependencies = [
     "numpy",
     "scipy",
     "optuna",
+    # Stage 3, D23: v_xc is one reverse-mode pass over the compiled energy, so
+    # differentiation is a core capability rather than an extra. Confined to
+    # xcsearch/forms/compile.py -- the ownership table is what keeps it there.
+    "jax",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +33,7 @@ viz = ["dash"]
 [tool.setuptools]
 packages = [
     "xcsearch",
+    "xcsearch.forms",
     "xcsearch.optimizers",
     "xcsearch.viz",
     "xcsearch.worlds",
