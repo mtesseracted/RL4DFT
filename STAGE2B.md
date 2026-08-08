@@ -6,8 +6,10 @@ B8 design review concluded. `STAGE2.md`'s plan sections stay fixed; its tail —
 by this document, which merges those items with the design decisions the
 review settled. Decision numbering continues from D16.
 
-**Status: implemented**, except F1, which is still a stub awaiting scope —
-eleven self-contained usability items have landed under it, listed there. The
+**Status: implemented.** F1 is delivered as eleven self-contained items,
+listed there; the structural revamp it was originally a stub for turned out
+to be two rewrites rather than a revamp, and they are specified at the end
+under **Beyond Stage 2B**. The
 decisions below are written in the voice they were settled in; where the
 built shape differs from the decision as drafted, an *as built* note says how
 and why, rather than quietly editing the decision to match the code. The
@@ -290,15 +292,16 @@ the test that holds it, so a clause with no test is a clause not met.
 | B11–B13 | post-review | `test_populations.py`, `test_score.py` |
 | F1 (the eleven usability items) | post-review | `test_viz.py`, `test_repairs.py` |
 
-Suite: 282 tests before Stage 2B, 318 after with every extra installed, and
-twenty-five more with the F1 items below. The D15 fixture is still bitwise.
-Measured without the `[cmaes]` extra the suite is 332 passed and 1 skipped,
-the skip being `test_cmaes.py` declining to run against an optimizer that is
-not there. Thirty-nine of the 332 are `test_viz.py` and are collected only
-with the `[viz]` extra — without it the run collects 291, which is dash's absence
-rather than a gap: every acceptance clause is held by a test that runs either
-way. (This line previously said six tests were viz-gated, which was never
-true of the module as a whole.)
+Suite: 282 tests before Stage 2B, 318 after, and **355 collected** with the
+eleven F1 items below — the app work is where most of the growth since the
+review has gone. The D15 fixture is still bitwise. Counted without the
+`[cmaes]` extra, so one of the 355 is `test_cmaes.py` declining to run
+against an optimizer that is not there. **Sixty-two of the 355 are
+`test_viz.py`** and are collected only with the `[viz]` extra — without it
+the run collects 293, which is dash's absence rather than a gap: every
+acceptance clause is held by a test that runs either way. (This line
+previously said six tests were viz-gated, which was never true of the module
+as a whole.)
 
 ### 2B.1 — System versions and protocol rows (D17, D18)
 
@@ -534,14 +537,28 @@ stated reason rather than a vague one.
 
 ## Features
 
-- **F1 — revamp the app.** Still a stub as a whole: scope to be settled before
-  any further code moves. The constraints that survive any redesign: D13 —
-  every number on screen is in a record or reachable from one, the dashboard
-  imports no physics module — and now D20: the score a panel shows is the
-  stored told score, never a re-derivation.
+- **F1 — revamp the app. DELIVERED, as eleven items.** It was entered as a
+  stub — "scope to be settled before any further code moves" — and the scope
+  arrived the way scope actually arrives, one report at a time from somebody
+  using the thing. Every item below started as a sentence from a reader: a
+  run opened on its worst trial, a panel that did not say what it showed, a
+  figure that was half empty, a traceback on a loop. None was designed in
+  advance and the list is better for it.
 
-  **Eleven usability items landed ahead of that scope**, each small enough to
-  stand alone and none of them touching the constraints:
+  **The constraints held throughout and none of the eleven touched them:**
+  D13 — every number on screen is in a record or reachable from one, and the
+  dashboard imports no physics module — and D20, the score a panel shows is
+  the stored told score and never a re-derivation. The import rule is not a
+  convention here; `tests/test_import_audit.py` holds a per-module allowlist
+  (`app`: store, records, data, figures, dash) and the eleven items did not
+  add an entry to it.
+
+  **What F1 turned out not to be** is the structural revamp the stub
+  imagined. Two things that were assumed to be app work are not: arbitrary
+  functional forms, and a dashboard that computes physics. Both are rewrites
+  rather than increments, both are specified at the end of this document
+  under **Beyond Stage 2B**, and both were scoped by trying to do them and
+  finding what they cost. The eleven:
 
   1. *A run opens on its best trial.* The scrubber's initial value was 0, so
      a loaded run opened on the worst thing the search ever proposed — on the
@@ -865,15 +882,26 @@ stated reason rather than a vague one.
       dividing by that is worse than naming which kind of difference the cell
       is — but its test is now constructed rather than fixtured, and says so.
 
-  **One test came out of using it.** What the episode exposed is that the tests drove the panel *functions* and
-  never the endpoint, so the wiring between a callback's declared inputs and
-  its signature was unheld: add an `Input` to a decorator and forget the
+  **One test came out of all this**, and it came out of item 9's stale-page
+  episode. What that exposed is that the tests drove the panel *functions*
+  and never the endpoint, so the wiring between a callback's declared inputs
+  and its signature was unheld: add an `Input` to a decorator and forget the
   parameter, and every panel 500s in a browser while the suite stays green.
   `test_every_callback_survives_a_real_dispatch` now posts to
   `/_dash-update-component` for every published callback, with each body built
   from the app's own `/_dash-dependencies`. Confirmed to fail against exactly
   that mutation — dropping `scale` from `_candidate`'s parameters while
   leaving it in the decorator — before being kept.
+
+  **What the eleven did not resolve, and could not.** Two of them ran into
+  the same two walls from opposite sides. Item 11's exchange/correlation
+  split had to be done by string surgery on a stored latex string, because a
+  form publishes no parts — that is **R1**. Item 3 answered "why does the
+  detail panel show only `n_ref`" with "because drawing more means an SCF
+  solve, and the dashboard does no physics", which is the correct answer
+  today and the wrong answer eventually — that is **R2**. Both are specified
+  under *Beyond Stage 2B* at the end of this document, with the measurements
+  and the obstacles that scoping them turned up.
 - **F2 — tests that exercise the finite-difference `v_xc` path and surface
   B5. LANDED** (`04cc32e`, `tests/test_fd_potentials.py`). Written against
   the pre-fix helpers first and confirmed to fail there — 2.6e−07, flat
@@ -998,7 +1026,227 @@ small adapter into `SystemRecord`, since a Stage-1-format cache carries no
 No re-measuring of stored candidates — a candidate persists as `form_key` +
 `theta_json`, the store holds no mapping back to a `FunctionalForm`, and the
 no-registry rule stands: stale is now *visible* (D17–D19), which is the goal;
-healing is the composition root's business on the day it matters. No F1 app
-revamp (stub until specified). No schema support for rung 2+ references or
-protocol *escalation* — D18 records the protocol a run used; choosing
-protocols per candidate is A1's business in a later stage.
+healing is the composition root's business on the day it matters. No schema
+support for rung 2+ references or protocol *escalation* — D18 records the
+protocol a run used; choosing protocols per candidate is A1's business in a
+later stage.
+
+F1 is delivered (eleven items), but the two structural changes it was a stub
+for are not, and are specified below rather than left as a stub: arbitrary
+functional forms (**R1**) and a dashboard that computes physics (**R2**).
+
+## Beyond Stage 2B — the two rewrites
+
+Lettered **R** rather than **F** because neither is a feature that could land
+under this stage's constraints. Both were scoped by *attempting* them during
+the F1 work and finding what they actually cost, which is why the numbers and
+the obstacles below are measured rather than estimated. They are recorded
+here, at length, so the next session inherits the scoping instead of
+repeating it.
+
+The common shape: each breaks an invariant that Stage 2 chose deliberately
+and that is load-bearing in several modules. Neither is a mistake in the
+current design — a fixed-arity parametric form and a physics-free dashboard
+are the right calls for what Stage 2 set out to do. They are the walls this
+design has, and both are now in view.
+
+### R1 — Arbitrary functional forms
+
+**What is wanted.** A functional as a composable structure rather than a
+fixed coefficient vector:
+
+- **Named sub-components.** A form declares its parts — exchange,
+  correlation, and beyond — instead of being one opaque expression, so
+  anything downstream can address a part by name.
+- **Much richer forms**, with a general representation that both a person and
+  a proposer can read, write and mutate.
+- **User-defined intermediate variables.** A form declares derived quantities
+  — a reduced density gradient, r_s, spin polarization — and writes its terms
+  over *those* rather than over `n` directly.
+- **Non-local functionals**, and **v_ext-aware functionals**.
+
+**The tell that this is needed already showed up in F1.** Item 11 split the
+formula panel into exchange and correlation by *string surgery on the stored
+latex*, cutting at the last `\epsilon_c`. It works, it degrades gracefully,
+and it is a panel reverse-engineering a structure the form never published.
+The honest fix is written into that item and is R1: the form should publish
+its parts. Item 10 leans on the same soft spot from the other side — the
+coefficient boxes sit inside the exchange box because *this* form happens to
+put all five parameters in exchange, a fact the panel knows by reading
+`functionals.py`, not by asking the form.
+
+**What today's contract is.** `FunctionalForm` is `n_params`, `bounds() ->
+[(lo, hi)]`, `build(theta) -> Functional`, `to_latex()`. A fixed-arity box.
+One form exists: `exp1d.local_ansatz`, five parameters, c0 ∈ [0, 2] and
+c1..c4 ∈ [−1, 1], every one of them an exchange parameter, correlation fixed
+LDA.
+
+**Why it is a rewrite: `theta` being a flat vector is load-bearing in five
+places.**
+
+| module | what it assumes |
+|---|---|
+| `optimizers/composed.py` | `FixedFormOptimizer` pairs a form with a *coefficient* optimizer over a box |
+| `optimizers/{optuna_tpe,cmaes,human}.py` | all three take `bounds: list[tuple[float, float]]` and nothing else |
+| `store.py` | `theta_json` is a flat list; `fingerprint` is one string |
+| `store.NearDuplicateIndex` | exact SQL partition on a scalar `form_key`, LSH over one theta vector |
+| `viz/app.py` | one latex string, N numeric boxes, one `[lo, hi]` per box |
+
+Each is the correct design for a fixed-arity parametric family. None of them
+survives a tree.
+
+**What R1 is *not*: it is not A2.** `STAGE2.md`'s A2 addendum already
+specifies the taxonomy (locality / dependence / v_ext tags) and composite
+*identity* (the multiset of leaves, minhashed, with tags as a tie-breaker)
+for the proposer and the LSH index. A2 answers "how near are two
+functionals". R1 answers "what *is* a functional, and how does someone write
+one". They meet at composites — A2 already requires that `fingerprint()` be
+able to express one — but A2 can be built on top of R1's representation and
+not the other way round.
+
+**The parts with no precedent anywhere in the codebase**, and therefore the
+ones to design first:
+
+1. *An expression representation with a variable domain.* Today every term is
+   a pointwise numpy expression in `n`, written by hand. Declaring
+   intermediate variables and composing terms over them needs a
+   representation that can be evaluated, serialized into `theta_json`'s
+   successor, hashed for identity, and rendered to latex.
+2. *Differentiation.* `v_xc = d(n ε)/dn` is currently hand-written in closed
+   form per term and exact, with `numerics`' finite differences kept as the
+   cross-check (F2). Arbitrary forms mean symbolic differentiation or paying
+   FD in the hot loop — and B5/F2 measured what FD costs: 2.6e−07 against
+   3.6e−19 for the closed forms, flat across 80 vacuum points. That is a real
+   decision for R1 to make, not a detail to discover later.
+3. *The editor is the search space.* Feature 4b's claim is that a person is
+   an optimizer — same port, same driver, records indistinguishable from
+   TPE's, which a test asserts. That works today only because the human edits
+   a 5-vector and the machine searches a 5-vector. When forms become trees,
+   "a person is an optimizer" requires a *structural* editor, or the human
+   quietly becomes a different kind of participant and 4b's claim stops being
+   true without anything failing. This is the requirement most likely to be
+   dropped by accident, so it is written here as a first-class one.
+
+**What survives R1 untouched**, and is worth knowing before anyone proposes
+starting over: the ports themselves; the long-format `evaluations` table —
+one row per scalar, already shape-agnostic, so a form that learns a new part
+needs no migration; D17–D19's provenance spine; and D20.
+
+### R2 — The dashboard computes physics
+
+**What is wanted.** Post-run diagnostics that go deeper than what the search
+paid for at optimization time: solve a stored candidate self-consistently for
+one system on demand, or for all of them, and look at the result. Eventually
+the ability to add systems and rungs from a session.
+
+**Why it is inevitable rather than a nice-to-have.** The human optimizer has
+to be able to do what the machine optimizer can do. The moment the machine
+can escalate rungs or extend a population, a human who cannot is no longer
+the same kind of participant, and 4b's claim narrows to "a person is an
+optimizer, at whatever level somebody else fixed before the session started".
+Separately, asking *why* a candidate is good is a legitimate question that
+the search's own cheap measurements cannot always answer.
+
+**Which half of D13 actually breaks — only one of them.** The *import* half
+need not break at all, and this was designed and checked rather than assumed:
+the dashboard reaches physics as an **injected callable**, exactly as it
+already reaches `status()`, `new_run()` and `human.submit()`. `run_stage2` is
+the composition root and its entry in the audit table is already `None`. So
+`tests/test_import_audit.py` does not change — which is the strongest
+available evidence that the ports hold.
+
+The half that does break is the other one: *"if a number is on the screen, it
+is in a record or reachable from one."* An on-demand SCF density is in no
+record, and it cannot simply be written to one — putting rung-2 numbers in a
+run whose D18 protocol says rung 0 + 1 is exactly the B8 error class this
+stage exists to end. Storing them needs A1: a protocol per measurement, and
+`scf_residual` rows so that non-convergence is data rather than an exception.
+
+**The amendment D13 would need**, stated so it is a decision and not a drift:
+
+> The dashboard computes no physics itself. Any number on screen is either in
+> a record, reachable from one, or **explicitly marked as a live diagnostic
+> that is not**.
+
+The hazard D13 names is a panel that *quietly* computes a quantity the search
+never measured and presents it beside ones it did. A user-requested,
+visibly-marked, composition-root-computed result is not quiet.
+
+**What it costs — measured 2026-08-08, this 63-system cache, one box.**
+
+| | cost |
+|---|---|
+| rung 0 + rung 1, all 63 systems | **0.353 s**, 192 rows — today's per-trial cost |
+| SCF sweep, all 63 systems | **~128 s** — **363×** |
+| the 45 stretched/dissociating systems | 126.4 s, of which **9 never converged** |
+
+A caution worth keeping with those numbers: a first extrapolation from the
+ten *easiest* systems said 5.9 s per sweep and was wrong by more than 20×.
+`solve_ks_robust` walks its whole mixing ladder when a solve will not settle,
+so the hard geometries cost ~30× the easy ones. **SCF cost is not uniform per
+system and cannot be estimated from a convenient sample.** The 9 failures are
+not a bug — they are the endemic near-degeneracy Stage 1 already found (16 of
+126), which is why A1 requires non-convergence to be recorded rather than
+raised.
+
+This is also why SCF cannot simply become the default rung: at ~128 s/trial a
+3000-trial run is over four days against today's eight minutes.
+
+**The design worked out and ready to build**, so it is not re-derived:
+
+- `dataset.grid_of(record)` / `system_of(record)` promoted out of `plots.py`'s
+  privates. **No allowlist change** — `world` and `records` are already
+  declared for `dataset` — and it removes a duplicate.
+- A solver service in `run_stage2`: request queue, a thread, a result cache
+  keyed by (candidate, system), injected as callables.
+- `viz/app.py` gains the buttons and one callback: request on click, collect
+  on the existing 3 s tick. That is the submit pattern, and it is what keeps
+  a 30-second solve from hanging a dash callback.
+- `figures.density_figure` gains optional overlay curves; it already carries
+  the `CANDIDATE` / `BASELINE` / `REFERENCE` accents.
+- `tests/test_import_audit.py` unchanged.
+
+**The blocker that makes this a rewrite and not an afternoon.** Capability is
+currently smeared across four constructor parameters — `human`, `status`,
+`follow_run`, `new_run` — and SCF would make five, each independently
+toggling a piece of layout. They are all facets of one question: **is a
+session attached to this dashboard?** A session is what can accept a
+proposal, open a run, report worker health, and solve a system. Collapsing
+them into one injected `session` object would give: one layout always, with
+the disabled state data-driven rather than a fourth branch in `build_layout`;
+`solve` as another session capability rather than a fifth parameter; and
+callbacks registered unconditionally that refuse when there is no session —
+which retires the failure mode F1.9 exists for, where a callback's
+*existence* depended on a constructor argument and the served page's arity
+moved with it.
+
+**An obstacle found while scoping the greyed-out inputs, worth recording
+because it is not obvious: a store-only viewer cannot render a proposal box
+at all.** The bounds are not in the store. `protocol_payload` carries the
+world, the evaluator stack, libraries, git commit, ranking policy, optimizer
+and seed — but not the form or its box — and the no-registry rule means there
+is no way back from `form_key` to a `FunctionalForm`. A viewer can read a
+candidate's theta and count five coefficients; it cannot learn that c0 lives
+in [0, 2]. So the entry points genuinely differ in what they can offer:
+
+| entry point | needs on disk | coefficient area |
+|---|---|---|
+| `run_stage2 --human` | store + dataset cache | editable, submit live |
+| `run_stage2 --view` (to be built) | store + dataset cache | greyed out, form known |
+| `python -m xcsearch.viz.app` | **store only** | a line saying why |
+
+The third row is worth keeping rather than collapsing: it opens a store on a
+machine with no dataset cache and no physics at all.
+
+**One more consequence of no-registry.** Rebuilding something callable from a
+stored candidate is `form.build(theta)` at the composition root, and today's
+`LocalAnsatzForm` may not be the form that produced that theta — the same "a
+name is not an identity" hazard as B8, with no way to check. Tolerable for a
+marked diagnostic; fatal for a stored record. That is an independent second
+argument for display-only, reached from a different direction than the
+protocol one.
+
+**Suggested order**, since the two interact: the session collapse first (it
+is contained, touches no physics, and every other item rides on it), then the
+SCF diagnostic on top of it, then R1 — whose structural editor is a dashboard
+change that wants the session object to already exist.
