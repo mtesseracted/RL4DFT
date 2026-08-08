@@ -1,79 +1,1255 @@
-# Stage 3 — pre-spec queue
+# Stage 3 — Widen the search space: richer forms, harder references
 
-Settled design items collected ahead of the Stage 3 spec iteration. This
-is not yet a spec: when Stage 3 is planned properly (design decisions +
-sub-stages, as `STAGE2.md` and its continuation `STAGE2B.md` did for
-Stage 2), these items get folded in. Stage 2's decision numbering runs
-through D20 (D1–D16 in `STAGE2.md`, D17–D20 in `STAGE2B.md`), so Stage 3
-decisions start at D21; sub-stages start at 3.1. PLAN.md's "Stage 3+"
-list holds the one-line bullets; this file holds the designs that are
-already settled.
+The Stage 3 spec, built design-first: the design goal, agreed scope, and
+three core designs are settled first; each sub-stage has its
+implementation section (decisions, ownership, acceptance tests) below,
+the way `STAGE2.md` and `STAGE2B.md` did for Stage 2. Stage 2's decision
+numbering runs through D20 (D1–D16 in `STAGE2.md`, D17–D20 in
+`STAGE2B.md`), so Stage 3 decisions start at D21; sub-stages are
+3.1–3.7. `PLAN.md`'s Stage 3 section holds the one-line scope; the ML
+and orbital work live in its Stage 4+ bucket.
 
-Shared context for the exchange-related items below: at 2 electrons,
-Hartree–Fock exchange is a *density* functional — for a closed-shell
-singlet (one doubly occupied orbital), `E_x^HF = −½ E_H[n]` exactly, and
-its functional derivative `v_x = −½ v_H(x)` is multiplicative. So the D10
-port contract already expresses exact exchange in the current world as a
-non-local density-functional adapter; the items below are what remains to
-make non-local and orbital-dependent forms first-class.
+## Design goal — ML-first; the human is an add-on
 
-## Queued items
+The end state of this project is a **purely ML-driven search with
+minimal human input**. The dashboard and the human optimizer matter —
+they make the search inspectable and they are what other people will
+first get excited by — but they are add-ons, and they must never drive
+core design. The enforcing rule, applied to every human-facing
+affordance in this stage: **it must ride a component the machine path
+already needs, and that component is designed for the machine first.**
+The human plays through the optimizer port like any adapter (feature
+4b); the form checker exists so a machine proposer's output can be
+refused, and the editor's check button merely calls it; the session
+object serves the dashboard, but the driver never knows it exists. A
+component that would exist only for the human is presumptively out of
+core.
 
-### Q1 — `XCInput` gains grid coordinates `x`
+## Scope decisions
 
-Any non-local functional must form `|x − x′|` to evaluate its kernel;
-`XCInput` carries `n` and `w` but not the node positions. Add `x` as an
-**optional field defaulting to `None`** — the standard D10 additive-field
-extension — with the A2 `locality = non-local` tag declaring the
-requirement. Evaluators populate it exactly when a candidate's tags
-demand it (the `SystemRecord` already carries `x`); local functionals
-never see it. This is the only hard blocker between the current port and
-a working exact-exchange adapter.
+The agreed Stage 3 scope; decision numbers run D21–D40, assigned in
+the sub-stage specs below.
 
-### Q2 — Exchange/Hartree evaluation is a swappable strategy; the world's obligation is operator application, never a matrix
+**In — physics/DFT:**
 
-The naive non-local implementation materializes the (N,N) kernel
-`v(|x_i − x_j|)` and pays O(N²) per application — prohibitive enough,
-even in 1D, that a whole family of methods (ACE-style compression,
-low-rank/density fitting, Poisson-type solves) exists to avoid it. The
-design must admit all of them:
+- Non-local *density* ingredients: grid coordinates in `XCInput` and
+  the interaction-application service (Core A; the frozen `v_hartree`
+  array is not a form ingredient — D28).
+- Semi-local ingredients: ∇n, ∇²n, a reduced density gradient re-derived
+  for 1D (the 3D exponent conventions do not copy), kinetic-energy
+  density τ.
+- v_ext-aware ingredients: well positions and charges, v_ext(x) itself.
+- Exact-conditions expansion: 1D analogs of known constraints as the
+  ingredient set grows; first steps toward a constraint-satisfying
+  family.
+- N > 2 in 1D: a DMRG (TeNPy) reference adapter beside the Lanczos
+  solver, gated on reproducing the N = 2 results; T_s extraction via a
+  swappable kinetic strategy — iterative KS inversion first, prescribed
+  kinetic functionals allowed (D37); spin resolution (ζ stops being
+  identically zero).
+- Higher evaluation rungs, tiered: DMRG-class rung-2 references on a
+  strong-correlation stress set; rung-3 SCF spot-checks.
 
-- **The world-owned service is `apply_interaction(f) →
+**In — non-physics:**
+
+- The term algebra — composite sums, canonical fingerprints, separable
+  leaves — built once, inside the form representation (Core B). With
+  exact exchange deferred (below), the acceptance target is no longer a
+  hybrid containing HF exchange: it is rebuilding the current local
+  functional from LDA-x + LDA-c leaves and reproducing the Stage 2
+  result through the composite path — an equivalence gate in the
+  spirit of D15.
+- Form representation, first tier: a general polynomial (the current
+  ansatz shape) whose powers are *proposed rather than fixed*. Powers
+  are **structure, not coefficients** (decided; rationale in Core B):
+  the form proposer supplies the exponents — in Stage 3 the human,
+  via a seeded form list or the structural editor — and the
+  coefficient optimizer sees only the linear and mixing coefficients.
+  Powers are exact rationals `p = a/b` (identity, hashing, honest
+  latex), with `b ≤ 8` as a checker well-formedness default. The
+  representation is designed against the full `STAGE2B.md` R1
+  ingredient catalogue so later tiers extend it rather than rework it.
+- The form checker, limited at first to what the codebase currently
+  supports: declared capability, circularity, and domain/singularity
+  checks over today's ingredient and condition set.
+- The structural editor, so the feature-4b claim (a person is an
+  optimizer, through the same port) survives variable structure.
+- Per-term evaluation caching, keyed by the canonical per-term
+  fingerprint, its θ-slice, and the system.
+- Per-run prescribable populations: the systems a run *optimizes
+  over* and *evaluates over* are two individually prescribed
+  selections, resolved and frozen into the run's D19 rows at start —
+  the data model the Stage 4+ adversarial dataset game plays on
+  (sub-stage 3.7).
+- Protocol escalation, tiered: post-hoc top-k re-scoring at higher
+  rungs — multiple protocol rows per run, rung-tagged records, and a
+  ranking policy that reads mixed-rung rows. **Sequenced last: this
+  lands only after everything above is in.** The full noise-floor
+  successive-halving policy is the mature tier and waits beyond the
+  stage.
+- The dashboard-computes-physics rework (`STAGE2B.md` R2), cut as
+  follows — all four points settled:
+  - **The session collapse comes first.** The four dashboard
+    constructor parameters (`human`, `status`, `follow_run`,
+    `new_run`) collapse into one injected `session` object — one
+    layout always, disabled states data-driven with a stated reason,
+    callbacks registered unconditionally and refusing when the
+    session lacks the capability.
+  - **The D13 amendment is adopted**: *the dashboard computes no
+    physics itself; any number on screen is either in a record,
+    reachable from one, or explicitly marked as a live diagnostic
+    that is not.* The recorded path and the live path stay disjoint:
+    numbers in the store come only from the driver under a D18
+    protocol row (which is how tiered escalation writes higher-rung
+    rows); a dashboard solve is display-only and never stored.
+  - **On-demand SCF is per-system click only** — request queue, a
+    worker thread, result cache keyed by (candidate, system),
+    collected on the existing refresh tick; non-convergence is
+    displayed as data, not raised. A whole-population sweep (measured
+    at ~363× the per-trial cost, with endemic non-convergence on
+    stretched geometries) is a possible future feature, not Stage 3.
+  - **There are no separate view modes.** Entry points differ only in
+    the capability of the session they inject: a live run enables
+    everything; a dataset cache without a run enables solves while
+    submission refuses with a reason; a store alone disables
+    physics-dependent areas with a stated reason (candidate bounds
+    are not in the store, deliberately — the no-registry rule).
+
+**Deferred — the orbital cluster, deliberately.** Orbital dependence in
+any form waits for a later stage, *including exact exchange*: at N = 2,
+`E_x^HF = −½E_H[n]` is a plain density functional, but implementing
+exact exchange in that disguise would commit the design to orbital
+machinery — subspace contracts, generalized-KS frames, orbital-based
+SCF — whose real problems only surface at N > 2, so a cheap partial
+implementation would validate nothing it needs to validate. The fence
+section at the end of this file keeps the *maps* of that territory, so
+Stage 4+ starts from a map rather than a rediscovery; the motivating
+first hybrid (`a·HF-x + LDA-c`) defers with it.
+
+**Deferred — with the seams named now:** regularized evolution as a
+form proposer (the D11 `FormProposer` port is its reserved seat; Stage
+3 structure proposals — exponents included — come from the human via
+seeded forms or the structural editor); `ask_batch`
+parallel evaluation; tier-7 ingredients (∂E/∂N, response functions);
+3D worlds; all ML/RL-driven search.
+
+## The three core designs
+
+Most Stage 3 items are instances of three designs. Each is stated once
+here; the sub-stages build them.
+
+### Core A — The capability contract: ingredients, and who supplies them
+
+One mechanism, previously described three ways (optional `XCInput`
+fields with A2 requirement tags; `STAGE2B.md` R1's declared capability;
+the checker's capability and cost checks):
+
+- **Forms declare what they require** — the ingredients their terms are
+  written over. A2's meta tags are the declaration surface.
+- **Worlds and evaluators declare what they supply, and at what cost.**
+  Admissibility is a property of the (ingredient, world) pair, never of
+  the ingredient alone (R1's central sentence), so there is no global
+  allow/deny list — a supply table per world.
+- **Evaluators populate exactly what a candidate's declarations
+  demand** into `XCInput`'s optional fields (default `None`), under the
+  D10 rule: populate only what you can vouch for.
+- **The pairing composes or refuses at composition time, with a named
+  reason** — a form asking for τ in a world that supplies no gradients
+  fails loudly at startup, never quietly at trial 1,900. The checker's
+  capability check (Core B) is *this same code path*, called earlier.
+
+The Stage 3 supply table for the exp1d world:
+
+- **Grid coordinates `x`.** Any non-local functional must form
+  `|x − x′|` to evaluate its kernel; the `SystemRecord` already carries
+  `x`, and the evaluator forwards it on demand. This was the only hard
+  blocker between the current port and any non-local form.
+- **The interaction application, `apply_interaction(f) →
   ∫ v(|x−x′|) f(x′) dx′`** — a linear-operator *application*, with the
-  implementation free per world and per algorithm. For exp1d the natural
-  choice is O(N): the exponential kernel is the Green's function of a
-  tridiagonal operator — `e^{−κ|x−x′|}/(2κ)` solves
-  `(−d²/dx² + κ²)G = δ`, so the convolution is one tridiagonal solve of
-  `(−∂² + κ²)v = 2Aκ·f` using the Laplacian machinery that already
-  exists. The brute-force O(N²) kernel matvec stays available as the
+  implementation free per world and per algorithm. For exp1d the
+  natural choice is O(N): the exponential kernel is the Green's
+  function of a tridiagonal operator — `e^{−κ|x−x′|}/(2κ)` solves
+  `(−d²/dx² + κ²)G = δ`, so the convolution is one tridiagonal solve
+  of `(−∂² + κ²)v = 2Aκ·f` over the existing stencil — with **Robin
+  boundary rows** (`v′ ± κv = 0` at the box edges), not the box's
+  hard-wall Dirichlet rows: outside the density's support the true
+  convolution decays as `e^{−κx}`, so the Robin condition is exact
+  once the density has decayed (which the edge-density guard
+  certifies), whereas Dirichlet would pin v to zero where it is
+  genuinely `~e^{−κ·margin}` — a boundary error, not a quadrature
+  one. The brute-force O(N²) kernel matvec stays available as the
   validation reference (likely never the production path), and future
-  compressed strategies slot in as alternative implementations without
-  touching any port. Nothing anywhere may demand a materialized (N,N)
-  matrix. Any singular-kernel treatment a future world needs (Poisson
-  solve or cell-averaged diagonal in 3D; note bare Coulomb is ill-posed
-  in 1D — soft-Coulomb or exponential kernels only) is that world's
-  business, behind the same service.
-- **The linear `v_hartree` rung.** `XCInput` gains an optional
-  `v_hartree` field, populated only when the evaluator holds a Hartree
-  potential *consistent with the `n` in the same input* — the frozen
-  protocol has exactly that from the post-2.4 `SystemRecord` fields,
-  and D17's content hash covers both arrays, so the consistency is
-  version identity rather than convention (the same D10 rule as every
-  optional field: populate only what you can vouch for). When present, exact exchange at N = 2 costs O(N) with
-  no interaction application at all: `E_x = −¼ Σ w·n·v_hartree`,
-  `v_x = −½·v_hartree`. This is the cheapest rung and the short-term 1D
-  workhorse; the cost ladder mirrors A1's protocol axes — protocols
-  that can afford more information get charged more.
-- **Forward-compatibility for Q4:** at N > 2 the generalized-KS
-  extension should likewise be shaped as *apply-exchange-to-an-orbital*,
-  not build-the-exchange-matrix — exactly the seam ACE lives in.
-- **Acceptance identities, honestly scoped:** `E_x^HF = −½E_H` to
-  machine precision when both sides use the same application algorithm;
-  *cross*-algorithm agreement (tridiagonal vs matvec vs frozen rung) to
-  discretization tolerance, not bitwise — they are different quadratures
-  of the same integral.
+  compressed strategies (ACE-style, low-rank) slot in as alternative
+  implementations without touching any port. **Nothing anywhere may
+  demand a materialized (N,N) matrix.** Any singular-kernel treatment
+  a future world needs (Poisson solve or cell-averaged diagonal in 3D;
+  bare Coulomb is ill-posed in 1D — soft-Coulomb or exponential
+  kernels only) is that world's business, behind the same service.
+- **The frozen `v_hartree` array is *not* a form ingredient** (D28):
+  a precomputed array is a constant to autograd, so its hidden
+  n-dependence would be silently missing from `v_xc`. Forms wanting
+  v_H[n] reference the `apply_interaction` operator — for exp1d one
+  differentiable tridiagonal solve, O(N), so the demotion costs this
+  world nothing. The array keeps its `SystemRecord` roles
+  (v_s reconstruction, evaluator-side identities, the future fence),
+  with D17's content hash still guaranteeing its consistency with
+  `n` as version identity.
+- **Density derivatives**: ∇n and ∇²n (`np.gradient` and the stored
+  CSR Laplacian already exist), and from them the reduced density
+  gradient — **with the 1D exponent conventions re-derived, not copied
+  from 3D** — and the kinetic-energy density τ.
+- **v_ext data**: well positions and charges, v_ext(x) itself —
+  legitimate, not cheating: the exact functional for a dissociating
+  molecule is v_ext-aware.
 
-### Q3 — Orbital provisioning: `orbitals_ref` at build time, virtuals on demand, subspace contract
+Each supply row declares its cost — the ladder principle mirrors A1's
+protocol axes (protocols that can afford more information get charged
+more) — and the checker's cost estimate reads these declarations.
+
+**Acceptance identities, honestly scoped:** identities between a
+supply and a stored reference array (e.g. Hartree energy via
+`apply_interaction(n)` vs the dataset's frozen `v_hartree`) hold to
+machine precision when both sides use the same application algorithm;
+*cross*-algorithm agreement (tridiagonal vs brute-force matvec) holds
+to discretization tolerance, not bitwise — they are different
+quadratures of the same integral.
+
+**Forward-compatibility note:** if a later stage opens the orbital
+fence, the generalized-KS extension must likewise be shaped as
+*apply-exchange-to-an-orbital*, never build-the-matrix — the same seam
+ACE-style methods live in (details in the fence section).
+
+### Core B — The form representation, and its one identity
+
+A functional is a **structure, not a flat vector**: leaves are terms
+over declared ingredients (Core A), an explicit weighted-sum node
+combines them, and parts are named (exchange, correlation, and beyond),
+each with its own θ-slice, bounds, latex, and requirement tags. Built
+once — the term algebra is the sum node of this representation, not a
+separate adapter.
+
+- **First-tier leaves**: the current polynomial shape with powers
+  *proposed rather than fixed*. **Decided: powers are structure, not
+  coefficients.** The form proposer supplies the exponents (`a·n^{1/2}
+  + b·n^{3/2}` arrives as a form; in Stage 3 the proposer is the
+  human, via a seeded form list or the structural editor; in Stage 4+
+  it is regularized evolution mutating exponent sets through the D11
+  `FormProposer` seat), and the coefficient optimizer sees only the
+  linear and mixing coefficients. Two defects killed the alternative
+  (powers as continuous θ dimensions): in `a·n^p + b·n^q` nothing
+  stops p → q, where the model goes rank-deficient in (a, b) — flat
+  directions, huge cancelling coefficients, and a p↔q permutation
+  symmetry that double-counts the space; and collapse interacts
+  fatally with canonicalization, which merges duplicate leaves — at
+  p = q the canonical object changes arity out from under a running
+  optimizer. With powers as structure, collapse is impossible by
+  construction: the optimizer cannot move powers, and a proposer who
+  submits duplicate powers has them merged at check time, visibly.
+  Powers are exact rationals `p = a/b` — exact identity, exact
+  hashing, honest latex (physical exponents live on small
+  denominators: 2, 3, 4, 6 across the LDA/GGA/meta-GGA literature) —
+  with `b ≤ 8` as a checker well-formedness default rather than a
+  search parameter, raisable per world or study without breaking
+  identity. Stage 2's frozen `EXPONENTS` set becomes simply the first
+  seeded form.
+- **Distribution is term-by-term with no new physics**: `exc = Σ
+  wᵢ·excᵢ`, `vxc = Σ wᵢ·vxcᵢ` (functional derivatives are linear),
+  latex joins children with `+`, mixing weights enter θ alongside the
+  concatenated child slices, and requirement tags **join upward** —
+  each axis takes the maximum over children — so a composite containing
+  one expensive term is tagged (and charged) as such wholesale.
+- **One canonical form, one identity.** Canonicalization — flatten
+  nested sums, merge duplicate leaves by summing weights, sort leaves
+  by their canonical sub-document bytes — is computed first, and
+  *everything* identity-shaped
+  derives from it: `fingerprint()`, the near-duplicate LSH bucketing
+  (composite identity is the multiset of leaves, as A2 requires), the
+  per-term cache key, and serialization (`theta_json`'s successor). Any
+  two assembly routes to the same mathematical object within the
+  algebra collide by construction. This guarantees *structural*
+  identity only; mathematical equivalence of arbitrary leaf code is
+  undecidable, hence the discipline rule: **leaves must be atomic** —
+  never register a leaf expressible as a sum of existing leaves.
+  Behavioral dedup beyond that (hashing evaluations on probe
+  densities, LSH-style) is a Stage 4+ option if ever needed.
+- **Decided: the form document — a canonical typed expression DAG,
+  stored as data.** A form serializes to one canonical JSON document:
+  a typed expression DAG whose nodes are ingredient references (with
+  argument lists that may bind slots — range-separation parameters,
+  tier-7 arguments), declared intermediate variables (`s =
+  |∇n|/n^a`, written once, used by terms), operators, and coefficient
+  slots (with bounds and units); parts are named roots into the DAG;
+  the weighted-sum node stays distinguished (it is what canonical
+  flatten/merge/sort acts on). Canonicalization precedes
+  serialization, so there is exactly one document per mathematical
+  form, and the document's content hash *is* the form's identity —
+  `form_key`'s successor, one serialize-then-hash code path shared
+  with latex and the LSH leaf-multiset identity. Storage follows the
+  provenance pattern already trusted for systems and protocols: an
+  append-only `forms` table `(id, hash, json)`, insert-if-new,
+  immutable, with a nullable `parent_form_id` lineage edge (a seam
+  for Stage 4+ evolution, an edge not a mechanism); candidates gain a
+  `form_id` foreign key. `theta_json` stays a flat list of floats
+  over the canonically-ordered non-derived slots — powers live in the
+  document, so θ has no mixed types. A `schema` version field plus
+  the refusal discipline (unknown node kinds or reference names are
+  refused with a named reason — Core A's declared-capability rule
+  applied to the schema vocabulary itself) makes partial support the
+  normal state; a `constraints` block (derived slots, equalities —
+  the 2c constraint-family's need) is a named extension point,
+  reserved but not built in Stage 3. Sub-stage 3.1 implements the
+  polynomial *profile* of this schema. Two consequences: `build(
+  document, θ)` at the composition root becomes trustworthy — the
+  document is the form, not a name pointing at code, killing the
+  recorded "a name is not an identity" hazard for candidates while
+  keeping the no-registry rule in spirit (documents are interpreted
+  data; the residual naming surface shrinks to leaf/node kinds,
+  pinned by D18's git-commit provenance) — and a store-only viewer
+  regains coefficient bounds, a side effect of machine-path needs,
+  not a driver.
+- **Separable leaves.** LDA-x and LDA-c become standalone leaves, so
+  composites always build from atomic single-term leaves.
+  `LocalAnsatz` stays untouched for reproduction runs but is recorded
+  as *not composable* — wrapping it violates atomicity by
+  construction.
+- **Per-term evaluation caching** rides the same identity: memoize a
+  term's `(exc, vxc)` per (term fingerprint, θ-slice, system), so a
+  fixed term is never recomputed while only its siblings' parameters
+  move.
+- **Decided: differentiation is JAX-compiled evaluation.** The
+  representation compiles a form document into a JAX-traced
+  `E_xc(n, ingredients…)`, and `v_xc` is one reverse-mode pass: the
+  discrete functional derivative is `(1/wᵢ)·∂E/∂nᵢ` — the exact
+  gradient of the quadrature-discretized energy, divided by the
+  weights. The variational adjoints that would otherwise need
+  hand-derivation (integration by parts for ∇n, the self-adjoint
+  Laplacian, `apply_interaction` as its own adjoint) are just what
+  backpropagation does through the jnp forward computations, so a new
+  ingredient is differentiable the moment its forward pass is written.
+  The port surface stays plain — `build(document, θ)` returns a
+  `Functional` taking and returning numpy arrays; JAX lives entirely
+  behind that boundary, with JIT compilation cached per form hash
+  (few forms, many θ — pairs with per-term caching). Honest subtlety:
+  autograd `v_xc` is the exact derivative of the *discretized* E,
+  differing from the discretized continuum derivative at
+  discretization order — the right side of the trade, since it is
+  exactly consistent with the number the search optimizes; against
+  `vxc_ref` the existing discretization tolerances cover it. The
+  finite-difference cross-check (F2) stays as the acceptance gate at
+  its measured tolerance, and hot-loop FD stays rejected (~1e−7
+  accuracy against ~1e−16, plus the known vacuum failure surface).
+  **No in-house AD, by rule: hand-written derivative machinery is
+  entertained only for a needed capability no library provides** —
+  and the only foreseeable case (tier-7 implicit solves) is served by
+  `jax.custom_vjp`, the library's own extension point, not an engine
+  of ours. Bonus recorded for the design goal: the same trace yields
+  `∂E/∂θ` for free — gradient-based coefficient optimizers, and
+  eventually neural-network leaves, become drop-ins.
+- **The checker is a façade, not machinery.** Its checks are analyses
+  of things that already exist: (1) capability — Core A's
+  composition-time refusal, called at proposal time; (2) circularity /
+  ill-posedness — reachability on the expression graph (the
+  KS-inversion case: an ingredient that presupposes the answer);
+  (3) dimensional consistency — free if quantities carry units in the
+  representation, which is a reason to put them there; (4) domain and
+  singularity — division by quantities that reach zero on the grid,
+  √ of possibly-negative expressions (the B5 scar-tissue class);
+  (5) cost — a lookup over Core A's declared costs; (6) probe
+  evaluation — one cached system, milliseconds, through an injected
+  callable. Checks 1–5 are static and free. **The checker is designed
+  for the machine proposer; the editor's check button merely calls
+  it** — one code path, or human and machine diverge (the design
+  goal's rule, applied). Refusals name what is wrong and why
+  ("`v_xc` depends on `v_xc` through `invert(n)`"), never a bare
+  boolean.
+- **Designed against tier 7.** The representation is chosen against
+  the full `STAGE2B.md` R1 ingredient catalogue — including
+  ingredients whose evaluation triggers a second calculation — so
+  later tiers extend it rather than rework it, even though Stage 3
+  implements only the density-side tiers.
+
+### Core C — Measurement provisioning: one SCF service, one emission rule
+
+- **One candidate-SCF service**: solve a stored candidate
+  self-consistently for one system — request queue, worker thread,
+  result cache keyed by (candidate, system), non-convergence returned
+  as data, never raised (the near-degeneracy behind it is endemic:
+  16/126 Stage 1, 9/63 measured in `STAGE2B.md` R2). Built over a
+  `Functional`-taking generalization of `scf.solve_ks`, which today
+  hardwires the local ansatz's θ and assembles its energy via T_vW
+  — 2e-singlet-only on both counts; the service's solve accepts the
+  port object and, past N = 2, occupies the N lowest spin-orbitals
+  and takes its kinetic energy from them. It has exactly
+  two faces, and the boundary between them is the amended D13:
+  - **The recorded face** — driven by the driver under a D18 protocol
+    row. This is how rung-3 SCF spot-checks and tiered escalation
+    write higher-rung rows: legitimate protocol'd measurements.
+  - **The live face** — the dashboard's per-system-click diagnostic:
+    display-only, visibly marked, never stored.
+- **The emission rule** (general, stated once): a (system, metric) row
+  exists exactly when *the protocol offers it and the candidate admits
+  it* — absent rows, never NULLs or exceptions. The 2.2 shape-identity
+  acceptance generalizes accordingly: candidates measured under the
+  same protocol with the same requirement tags must have identical
+  (system, metric) row-sets over the run's D19 population. Mixed-rung
+  records consume this rule *now* (row-sets differ per protocol row);
+  the orbital fence consumes it later (row-sets differ per tag-class),
+  with no new mechanism needed on the day it opens.
+- **References grow past N = 2**: a DMRG adapter via TeNPy beside
+  `solve_2e_singlet` — the exponential interaction has an exact
+  compact MPO (why Baker et al. chose it), so N > 2 stays cheap at
+  dataset-build time — gated on reproducing the Lanczos N = 2
+  results. Extraction generalizes with it — the kinetic piece is a
+  swappable per-build strategy (D37): iterative KS inversion (the
+  N-electron version of the 2.4 machinery) as the exact path,
+  prescribed kinetic functionals as the alternative (T_vW is exact
+  only for 2e singlets) — and spin resolution (ζ stops being
+  identically zero). Rung-2 references on a strong-correlation stress
+  set follow — in 1D the rung-2 reference class *is* DMRG.
+
+## Sub-stages (overview — specs below)
+
+- **3.1 — The form representation and its identity** (D21–D24). Core B
+  built against today's single form: rational-power leaves, sum node,
+  named parts, canonical form and fingerprints, per-term caching, the
+  static checker (checks 1–5). The formerly-open decisions — powers,
+  serialization, differentiation — are settled in Core B.
+- **3.2 — Migration** (D25–D26). The flat-θ modules (`composed.py`,
+  `store.py` serialization, `NearDuplicateIndex`, the viz coefficient
+  area) move to the representation. Acceptance: two D15-style
+  equivalence gates — fixed powers reproduce the Stage 2 seeded run;
+  the leaf-rebuilt functional reproduces it through the composite path.
+- **3.3 — The capability contract and the supply table** (D27–D29).
+  Core A: the contract with named refusal, then the supplies — grid
+  `x`, `apply_interaction`, gradients/τ, the 1D reduced gradient,
+  v_ext data. Acceptance: refusals name the missing supply; the
+  interaction identities at their honest tolerances.
+- **3.4 — Exact-conditions expansion** (D30–D32). 1D analogs of known
+  constraints over the new ingredients; first constraint-family steps.
+  Delineation: the checker rejects the *ill-defined* (static, free,
+  pre-search); conditions penalize the *unphysical* (evaluated,
+  rung 0).
+- **3.5 — Session collapse, live diagnostics, structural editor**
+  (D33–D35). The
+  R2 cut as settled in scope: session object first, then the SCF
+  service's live face, then the editor (which needs 3.1's
+  representation and this sub-stage's session; its check button calls
+  3.1's checker). The editor has two submission paths: manual
+  coefficients through `HumanOptimizer` as in Stage 2, and **the
+  delegate path — an optimize button that composes (current document ×
+  selected objective policy × protocol) into a driver-side run via the
+  session's `new_run` capability**: the human as form proposer over
+  the machine's coefficient loop, which is D11's two-level search with
+  a person in the outer seat. Objectives map onto the swappable
+  ranking policy — dataset error is the existing rung-1 loss over a
+  chosen population; "satisfy conditions" is a small policy adapter
+  scalarizing rung-0 violations (machine-path legitimate on its own:
+  it is the projection move the 2c constraint-family wants). The
+  button launches a *recorded* run under a D18 protocol row — never
+  dashboard-side computation — so it is consistent with the amended
+  D13 by construction.
+- **3.6 — N > 2 references and higher rungs** (D36–D38). The DMRG
+  adapter, kinetic-strategy extraction, spin resolution; the rung-2
+  stress set; rung-3 spot-checks through the SCF service's recorded
+  face; tiered top-k escalation **last, after everything else in the
+  stage**.
+- **3.7 — Prescribable populations** (D39–D40). The optimize and
+  evaluate populations of a run become two individually prescribed
+  selections, resolved to frozen D19 rows at run start; the 3.6
+  stress set and escalation consume the prescription surface.
+
+3.6 is nearly independent of 3.1–3.5 (dataset-build physics) and may
+proceed in parallel; 3.2 lands before 3.3 so ingredients arrive into a
+representation rather than into hand-written throwaway forms; 3.6's
+escalation step waits for 3.7's prescription surface. The derived 1D
+Lieb–Oxford conditions and the associated correlation-refit decision
+(`notes/lieb-oxford-exp1d.md`, D30) are sequenced after everything
+above — last in the stage.
+
+## Sub-stage specs
+
+### 3.1 — The form representation and its identity
+
+Builds Core B against today's single form, touching nothing outside a
+new package: the document model and its canonical identity, the JAX
+compile path, the static checker, and the seeded form library. No
+consumer migrates in 3.1 — the store, `functionals.py`, the optimizers,
+and the viz are all untouched until 3.2 — so the sub-stage is
+acceptance-testable in isolation against the existing dataset cache.
+
+**D21 — The form document.** As settled in Core B, made normative:
+
+- The document is a typed expression DAG. The 3.1 profile implements
+  the node kinds the polynomial forms need — ingredient reference
+  (with argument list), intermediate-variable reference, coefficient
+  slot, rational power, product, weighted sum, and the **registered
+  primitive leaf**: a named closed-form energy-density leaf
+  (`lda_x`, `lda_c`) whose body lives in `forms/` code, because the
+  arctan and Padé closed forms are not expressible over the other
+  node kinds, and adding elementary-function nodes for two leaves
+  would grow the checker's domain-analysis surface for no other
+  consumer. A primitive leaf is exactly the residual
+  name-points-at-code surface Core B admits — pinned by D18's
+  git-commit provenance and semantically by acceptance test 3. The
+  vocabulary is open and versioned (`schema` field; a document
+  using node kinds or reference names this build does not know is
+  refused with a named reason, never partially interpreted).
+- Structure holds no floats: powers are exact rationals serialized as
+  `[a, b]` integer pairs in lowest terms with `b > 0`; every
+  continuous quantity is a slot, and slot *values* live in θ, never in
+  the document. Slots and ingredient references carry units; slots
+  carry bounds. Parts are named roots (`exchange`, `correlation`, …).
+- Canonicalization precedes serialization: flatten nested sums, merge
+  duplicate leaves by summing weights, sort terms by their canonical
+  sub-document bytes, reduce rationals, sort JSON keys. The form's
+  identity is the hash of the canonical serialization; a term's
+  identity is the hash of its canonical sub-document (the per-term
+  cache key and the unit of latex grouping).
+- θ is a flat float list over the canonically-ordered slots. The
+  document fully determines the order, the bounds, and the latex — a
+  reader with the document and θ can reconstruct the functional with
+  no other source of truth.
+- The `forms` store room (append-only `(id, hash, json, latex_json,
+  parent_form_id)`, insert-if-new) is *specified* here but *lands* in
+  3.2 with the candidate foreign key — 3.1 writes no storage.
+
+**D22 — Powers are structure, not coefficients** (rationale in Core
+B). Normative consequences: no θ dimension is a power; the checker's
+well-formedness default rejects `b > 8` (a configurable limit of the
+world or study, not of the schema); a proposal containing duplicate
+powers within a part is legal input and canonicalizes to the merged
+form — the checker reports the merge so a proposer sees what its form
+became.
+
+**D23 — JAX-compiled evaluation** (rationale in Core B). Spec-level
+choices: the **compile unit is the term** — each term compiles to a
+jitted `(θ-slice, ingredients) → (exc contribution, vxc
+contribution)`, cached by term hash, and the weighted-sum node is
+evaluated by the adapter in numpy, which is what makes per-term
+caching and per-term latex real (an intermediate variable used by two
+terms is recomputed per term — pointwise-cheap; revisit only if
+measured). `jax.config` enables x64 at import, guarded by a test. The
+`Functional` the composition root sees takes and returns numpy arrays;
+JAX types never cross the port boundary.
+
+**D24 — The checker contract.** One function beside the
+representation: `check(document, supplied, probe=None) → findings`,
+where `supplied` is the set of ingredient names a world declares,
+each with its cost and value-range metadata (the domain/singularity
+check reads ranges from this same declaration, which is what keeps
+check 4 static) — in 3.1 passed as plain data; 3.3 wires real world
+declarations — and `probe` is an optional injected evaluation callable
+for check 6. Checks 1–5 (capability, circularity via DAG
+reachability, units, domain/singularity against the grid's range,
+cost) are static and run with no physics import. Every finding names
+what is wrong, why, and a remedy, in the `check_human_endpoint`
+manner; there is no bare-boolean mode. **This is the only validation
+path**: machine proposers and the editor's check button call this
+same function.
+
+**Module layout**: a new core package `xcsearch/forms/` —
+`document.py` (node types, canonicalization, serialization, hashing,
+latex; stdlib only: `fractions`, `json`, `hashlib`), `compile.py`
+(JAX; imports `document`), `checker.py` (imports `document`; physics
+reachable only through the injected probe), `library.py` (seeded
+documents: `stage2_local_ansatz`, `lda_x`, `lda_c`). Nothing else in
+the codebase imports `forms/` yet; `forms/` imports nothing from the
+rest of the codebase. JAX enters `pyproject.toml` as a core
+dependency here — the stage's first new runtime dependency.
+
+**Acceptance tests**:
+
+1. *Round-trip*: document → objects → document is byte-identical for
+   every seeded form.
+2. *Canonical collision*: nested vs flat sums, permuted terms, split
+   vs pre-combined weights, and duplicate-power submissions all hash
+   identically to their canonical form; the p = q merge is reported
+   by the checker.
+3. *Closed-form equivalence*: the `stage2_local_ansatz` document with
+   a stored run's θ, and the `lda_x + lda_c` composite, reproduce
+   `functionals.py`'s `exc` and `v_xc` at machine precision
+   (~1e−13 relative) across the cached densities.
+4. *FD cross-check*: compiled `v_xc` for every seeded form passes the
+   F2 finite-difference gate at FD's measured tolerance, vacuum
+   region included.
+5. *Refusal suite*: a circular document ("v_xc depends on v_xc
+   through invert(n)"), an unknown node kind, a reference absent from
+   `supplied`, a `something/n` domain hazard, and a `b > 8` power
+   each produce a finding naming the cause — and the machine-path
+   claim is tested literally: the same `check` call, not a wrapper,
+   serves both entry points.
+6. *Latex by structure*: parts render under their own names — the
+   panel behavior F1.11 reverse-engineered by string surgery becomes
+   a property of the form (consumed by the viz in 3.2).
+7. *Performance recorded, loosely gated*: steady-state compiled
+   evaluation of the Stage 2 document over the 63-system cache —
+   JIT warmup excluded, since compilation is cached per term hash
+   and amortizes over a run — stays within 2× of the current
+   closed-form trial cost (0.353 s), with the measured number
+   written into this file's performance notes at implementation
+   time.
+
+### 3.2 — Migration: the flat-θ modules move to the representation
+
+The flat-θ modules — `composed.py`, the store's serialization, the
+`NearDuplicateIndex`, the viz coefficient area — move to the form
+document, and the `forms` store room lands. A useful narrowing
+discovered in drafting: **the three coefficient optimizers do not
+change.** Their interface — `bounds: list[tuple[float, float]]`, ask
+θ, tell score — is already exactly what a document's slot list
+provides, so the migration lives in the composition layer
+(`composed.py`), the store, and the viz; TPE, CMA-ES, and
+`HumanOptimizer` receive their bounds from a document instead of a
+hard-coded form and never know it.
+
+**D25 — The forms room, and no legacy migration.** `store.py` gains
+the fourth append-only room: `forms(id, hash, json, latex_json,
+parent_form_id)`, insert-if-new on `hash`, immutable rows;
+`candidates` gains a `form_id` foreign key. Latex — whole-form and
+per-part — is rendered by `forms/` **at insertion time** and stored
+in the row, so the viz keeps reading strings from the store and
+imports nothing (the D13 posture unchanged; F1.11's string surgery is
+deleted, replaced by structure the form publishes). The store schema
+version bumps; legacy stores are refused in the
+`_refuse_legacy_schema` manner — a named reason and the remedy
+(regenerate via the D15 fixture-regeneration protocol), never an
+in-place migration of old rows. The store itself does not import
+`forms/`: it receives hash, json, and latex as data, the same
+provenance pattern as `systems` and `protocols`.
+
+**D26 — Candidate identity and the near-duplicate index, migrated.**
+A candidate's identity becomes `(form hash, θ)`; the
+`NearDuplicateIndex` keeps its Stage 2 shape with the form hash as
+the exact partition key and LSH over θ within a partition. Cross-form
+similarity (the A2 leaf-multiset minhash over canonical documents) is
+*not* built in 3.2 — no Stage 3 consumer needs it before machine
+proposers arrive — but the canonical document already contains the
+leaf multiset, so it is a pure index addition later, recorded here as
+the seam.
+
+**One equivalence subtlety, decided here rather than discovered in a
+failing gate**: canonical slot order (terms sorted by canonical
+sub-document bytes) need not match Stage 2's hand-written θ order,
+and the mapping must be applied **on the optimizer side, at
+composition**: the reproduction run hands the coefficient optimizer
+its bounds in the Stage 2 hand-written order and permutes θ into
+canonical slot order at `build` time. A seeded sampler consumes its
+RNG in bounds order, so canonical-order bounds would change the
+trial sequence itself — no post-hoc record mapping can undo that.
+The permutation is data derivable from the document, not a fudge
+factor; energies, scores, and trial sequences must still match
+exactly, compared bitwise after the mapping.
+
+**Module/ownership changes**: `composed.py` and `run_stage2` import
+`forms/` (document building, compile, library); `viz/` and `store.py`
+do not; `tests/test_import_audit.py` gains the `forms/` rows and must
+pass unchanged otherwise.
+
+**Acceptance tests**:
+
+1. *The D15 gate, through documents*: the seeded Stage 2
+   reproduction run, driven by `stage2_local_ansatz` as a document,
+   reproduces the fixture records exactly (through the slot
+   permutation; scores and trial sequence bitwise).
+2. *The composite path gate*: an `lda_x + lda_c` leaf-built document
+   yields records identical to the `stage2_local_ansatz` document
+   under the mapped θ — machine precision per evaluation row.
+3. *Store rooms*: insert-if-new dedupes identical canonical
+   documents to one row; `parent_form_id` round-trips; the candidate
+   foreign key is enforced; a legacy store is refused with the named
+   remedy.
+4. *Index*: near-θ candidates of the same form still bucket together
+   (Stage 2 tests ported); candidates of distinct forms never share
+   a partition.
+5. *Viz by structure*: coefficient boxes group under their part with
+   bounds from the stored document — including in a store-only
+   viewer, which now renders bounds (the R2 obstacle gone as a side
+   effect); the formula panel uses stored per-part latex; the
+   surgery code is deleted, not bypassed.
+6. *Human parity preserved*: `HumanOptimizer` submits against
+   document-derived bounds through the unchanged port; the Stage 2
+   records-indistinguishability test passes as-is.
+
+### 3.3 — The capability contract and the exp1d supply table
+
+Core A instantiated: the contract as code, then the supplies. Drafting
+this section against D23 exposed one rule that Core A's prose did not
+have and needs, recorded as D28.
+
+**D27 — The capability contract, with derived requirements.** A
+form's requirement set is **computed from its canonical document** —
+the set of ingredient references it contains — never declared
+separately, so requirements cannot drift from the form (the A2 meta
+tags become derived properties: a form is `locality = non-local`
+because its document references the interaction, not because someone
+remembered to tag it). A world publishes a supply table: for each
+ingredient name, its kind (below), its declared cost, and its
+populate logic. The evaluator populates exactly the required fields
+into `XCInput` (all optional, default `None`, the D10 additive
+pattern — including the operator-valued fields, which ride
+`XCInput` as descriptors, D28). **The port surface**: `Functional`
+gains one method, `requires()` — the set of ingredient names beyond
+the always-present `n`/`w` — implemented by the compiled adapter as
+a read of its canonical document (derived, never declared) and by
+`LocalAnsatz` as the empty set, the honest answer for a form
+reading only `n` and `w`; the evaluator's populate step consumes
+this method per candidate, and the composition-time contract check
+reads the same requirement set off the run's document. Composition
+either matches requirements against supplies or refuses with the
+missing names — and this refusal *is* checker check 1: one
+function, called at `run_stage2` startup and at proposal time.
+
+**D28 — The differentiability rule for supplies.** Because `v_xc` is
+the autograd derivative of the compiled energy (D23), an ingredient
+that *depends on n* must enter the JAX trace as a **differentiable
+operator** (the grid gradient, the Laplacian, `apply_interaction`),
+never as a precomputed array — a frozen array is a constant to
+autograd, so any n-dependence it hides would be silently missing
+from `v_xc`. Supplies therefore come in exactly two kinds:
+- **Constants**: n-independent data — `x`, `w`, `v_ext`, `wells` —
+  supplied as arrays.
+- **Operators**: n-dependent quantities — ∇, ∇², the interaction
+  application — supplied as operator *descriptors* (kind plus
+  parameters: the record's CSR Laplacian triple, the interaction's
+  (A, κ), the grid), compiled to jnp-differentiable callables and
+  applied *inside* the trace, so their variational contribution
+  (the integration by parts, the kernel application) is generated
+  by backpropagation.
+
+**Who writes the jnp bodies**: worlds never import JAX. A world's
+supply table publishes each operator as kind plus parameters —
+plain data — and `forms/compile.py` owns the jnp implementation of
+every operator kind in the schema vocabulary, refusing an unknown
+kind namedly (the D21 refusal discipline applied to operators).
+`XCInput`'s operator-valued fields therefore carry descriptors, not
+callables; `records.py` stays numpy-and-stdlib data, D23's boundary
+holds — JAX appears in exactly one module — and D28 is enforced by
+construction: an ingredient reaches the trace only through
+`compile.py`, which builds it differentiable or not at all.
+(Implementation note for the interaction solve: JAX's tridiagonal
+primitive has thin AD coverage; `lax.custom_linear_solve` — the
+library's differentiable-linear-solve seam, transpose rules
+included — is the intended home, not a hand-rolled VJP.)
+
+A consequence worth stating loudly: **the frozen `v_hartree` array is
+not an admissible form ingredient.** A form wanting v_H[n] uses the
+`apply_interaction` operator (for exp1d one differentiable
+tridiagonal solve — O(N), so the cost argument for the frozen rung
+evaporates here anyway); the frozen array remains a `SystemRecord`
+field for evaluator-side and future-fence uses, but a document
+referencing it is refused by the kind rule. The rest of the
+`apply_interaction` spec is as Core A states: operator application
+only, nothing may demand a materialized (N,N) matrix, the brute-force
+matvec kept as validation reference, singular-kernel treatments a
+future world's business.
+
+**D29 — The exp1d supply table and the standard-variable library.**
+The supply rows: `x`, `w`, `v_ext`, `wells` (constants);
+`grad`, `laplacian`, `apply_interaction` (operators), each with
+declared cost. On top of the primitives, the conventions live in
+**`forms/library.py` as document fragments, written once**: `r_s_1d`,
+`t_vw` (= |∇n|²/8n, exact T_s density for the 2e singlet), and
+`s_1d` — the reduced density gradient with its exponents *re-derived
+for 1D from the uniform-gas scaling argument* (k_F ∝ n in 1D, so
+s ∝ |n′|/n², unlike the 3D n^{4/3} convention), with the derivation
+in the fragment's docstring. Forms reference the fragments; nobody
+re-derives per form; the checker sees through fragments to the
+primitive requirements.
+
+**Module/ownership changes**: `worlds/exp1d/world.py` gains the
+supply table (declaration objects consumed by `forms/checker.py` as
+plain data — the 3.1 seam filled); the evaluator gains the populate
+step; `XCInput` gains the new optional fields. `forms/` still
+imports nothing from worlds; worlds do not import `forms/` (the
+declaration objects live with the ports).
+
+**Acceptance tests**:
+
+1. *Named refusal, one path*: a document requiring
+   `apply_interaction` composed against a world without it fails at
+   startup naming the missing supply, and the checker returns the
+   identical finding for the same document — asserted to be the same
+   function, not similar messages.
+2. *Derived requirements*: reference sets computed from documents
+   reproduce the A2 tag axes on the seeded forms (local forms carry
+   no non-local requirement; a fragment using `grad` induces the
+   semi-local requirement transitively).
+3. *Interaction identities at honest tolerances*: Hartree energy via
+   `apply_interaction(n)` against the dataset's stored value —
+   same-algorithm machine precision; tridiagonal against brute-force
+   matvec — discretization tolerance, not bitwise.
+4. *Autograd through operators*: a seeded s_1d-bearing test form
+   passes the FD `v_xc` gate — this is the test that catches a wrong
+   or missing integration-by-parts term, the classic semi-local
+   error.
+5. *The kind rule enforced*: a document referencing `v_hartree` as
+   an ingredient is refused with the D28 reason.
+6. *Variable-library physics*: `s_1d` is dimensionless and invariant
+   under the 1D uniform scaling n_γ(x) = γn(γx); `t_vw` integrates
+   to `dataset.t_vw` on cached densities.
+7. *Costs surface*: checker cost estimates change when a document
+   adds an operator-tier reference, per the declared table.
+
+### 3.4 — Exact-conditions expansion
+
+The conditions component (feature 2, landed in 2.3 with three
+conditions) grows with the ingredient set — under the same
+per-world discipline Core A applies to ingredients, because
+constraints, like admissibility, are properties of the (condition,
+world) pair.
+
+**D30 — The exp1d condition set, with derivations and a rejected
+list.** Conditions divide into three classes, each recorded
+explicitly:
+
+- **Kept — interaction-agnostic**: one-electron self-interaction
+  (`E_xc[n] = −E_H[n]` for any one-electron density — holds for any
+  interaction); exchange non-positivity; correlation non-positivity.
+  The first two are the 2.3 conditions, ported.
+- **Kept — derived for this world**: *uniform-gas reduction* — at
+  zero density variation every term must reduce to its LDA value
+  (equivalently the enhancement over LDA satisfies F(s → 0) → 1),
+  generalizing 2.3's uniform-gas consistency to semi-local
+  ingredients; and *size consistency* — for fragments separated far
+  beyond the interaction range, `E_xc[n_A ∪ n_B] = E_xc[n_A] +
+  E_xc[n_B]` to a tolerance set by the exponential tail `e^{−κd}`.
+  Size consistency is cheap rhetoric for local forms (disjoint
+  integrals add automatically) and **the load-bearing guard for
+  v_ext-aware forms**: a form consuming well positions can fake
+  dissociation energetics in ways no equilibrium metric sees, and
+  this condition is what catches it.
+- **Rejected for this world, with the reason recorded**: the
+  Coulomb uniform-scaling identities. The Coulomb derivation rests
+  on `1/r` being homogeneous of degree −1; `e^{−κ|x|}` is
+  homogeneous of no degree, and the world's own uniform gas proves
+  the consequence — Baker et al. (arXiv:1504.05620) give the
+  low-density exchange as `e_X = −An²/(2κ)` and the full LDA
+  exchange is a function of `n/κ` (the arctan form in
+  `functionals.py`), not the scale-free power law a scaling
+  identity would force. The identity that *does* survive is joint
+  covariance under `x → γx, κ → γκ` (κ⁻¹ is the world's length
+  unit) — a consistency relation *between worlds of different κ*,
+  usable someday as a cross-world check, never a rung-0 condition
+  within one world. Spin scaling of exchange (the relation Baker
+  et al. do use) is interaction-agnostic and joins the kept list
+  when spin resolution arrives (3.6). The Lieb–Oxford bound is
+  rejected *as a 3D import* — its constant is Coulomb-specific —
+  but has since been **derived for this world**
+  (`notes/lieb-oxford-exp1d.md`), with both optimal constants
+  exact: `I_xc ≥ −(A/2)N` at high density, `I_xc ≥ −(A/κ)∫n²` at
+  low, giving two rung-0-able conditions (LO-a, LO-b) plus a
+  bound-driven finding — the world's fixed Padé correlation
+  violates LO-b at low density through its Wigner-crystal `√y`
+  term (structure this liquid-not-crystal gas does not have), with
+  a constrained β = 0 refit executed in
+  `notes/lieb_oxford_refit.py`. **Incorporation is sequenced after
+  everything else in the stage**: the two conditions and any
+  correlation-refit adoption (which mints a new immutable world
+  version and deliberately breaks the D15 bitwise gate) land only
+  once 3.1–3.7, escalation included, are in. PPLB waits for
+  fractional-N machinery (tier 7 / the N > 2 world). A condition without a
+  recorded derivation or rejection does not ship — the `s_1d`
+  lesson at the level of physics law.
+
+**D31 — Conditions evaluate compiled documents on synthetic
+probes.** A condition builds its probe `XCInput`s (a uniform density
+with zero-returning gradient operators and the interaction operator
+in its uniform limit — `apply_interaction(f) = (2A/κ)·f` for
+constant f, the infinite-gas value, so a finite probe segment leaks
+no edge effects into a non-local term's reduction; a normalized
+one-electron density; a far-separated fragment pair) and calls the *same*
+compiled evaluation path as real scoring — never a bespoke
+reimplementation of the functional, so a condition violation is a
+statement about the candidate, not about a second copy of it.
+Violations are recorded structured (3c): which condition, what
+magnitude, as rung-0 rows under Core C's emission rule.
+
+**D32 — The condition-satisfaction ranking policy.** A swappable
+`RankingPolicy` adapter that scalarizes rung-0 violation records
+into an objective. Machine-path first: it enables condition-guided
+coefficient optimization (numerically projecting a form family onto
+the constraint set — the first, optimization-side step toward 2c's
+by-construction families, ahead of the reserved `constraints`
+schema block); 3.5's delegate button then merely selects it.
+
+**Module/ownership**: conditions stay in the world-pluggable
+component (`worlds/exp1d`), consuming `forms/` compile through the
+evaluator's path; the policy adapter lives with the other ranking
+policies in core. No new imports for `viz/` or `store.py`.
+
+**Acceptance tests**:
+
+1. *Port equivalence*: the 2.3 conditions, re-expressed as probe
+   evaluations of compiled documents, flag exactly the candidates
+   the Stage 2 implementation flags on the seeded forms.
+2. *Uniform-gas reduction*: a GGA-style test form with F(0) = 1
+   passes; one with F(0) ≠ 1 produces a violation row with the
+   deviation as its magnitude.
+3. *Size consistency as the v_ext guard*: a synthetic wells-abusing
+   form (energy shifted by a function of well separation) is
+   flagged on the fragment-pair probe while passing equilibrium
+   metrics — the test that proves the guard guards.
+4. *Non-locality tolerance honesty*: a legitimately non-local form
+   (`apply_interaction`-bearing) passes size consistency within the
+   `e^{−κd}` tolerance at the probe separation, not bitwise.
+5. *Policy behavior*: under the condition-satisfaction policy, a
+   violating candidate ranks below a satisfying one at equal energy
+   error, from records alone.
+6. *Emission compliance*: rung-0 rows appear exactly for candidates
+   run under a protocol offering rung 0, per-protocol row-set
+   identity preserved.
+
+### 3.5 — Session collapse, live diagnostics, structural editor
+
+The R2 cut plus the editor, in the order R2's scoping prescribed:
+the session object first, everything else rides it.
+
+**D33 — The session object.** The four dashboard constructor
+parameters (`human`, `status`, `follow_run`, `new_run`) collapse into
+one injected `session` whose capabilities are data: `submit`,
+`status`, `follow`, `new_run`, and the new `solve` and `check`. One
+layout always; areas whose capability is absent render disabled with
+the stated reason; callbacks are registered unconditionally and
+refuse namedly without their capability. This retires the F1.9
+failure mode (a callback's existence depended on a constructor
+argument, so the served page's arity moved with configuration) —
+the acceptance test asserts page arity is identical across all
+capability combinations. Entry points differ *only* in the session
+they inject.
+
+**D34 — The amended D13, adopted; the SCF service's live face.**
+The rule, now a numbered decision: *the dashboard computes no
+physics itself; any number on screen is either in a record,
+reachable from one, or explicitly marked as a live diagnostic that
+is not.* The live face is Core C's candidate-SCF service driven by
+per-system click: request queue, worker thread, cache keyed by
+(candidate, system), results collected on the existing refresh
+tick, non-convergence rendered as data, every live number visually
+marked as live, nothing ever written to the store. One argument
+from the R2 scoping is retired with gratitude: display-only was
+originally double-justified (protocol honesty *and* the
+untrustworthy rebuild — "today's form class may not be the form
+that produced that theta"). D25's forms room killed the second
+leg: `build(document, θ)` from the stored document is now
+trustworthy. The protocol leg stands alone and suffices — live
+numbers are unprotocol'd, so they stay unstored.
+
+**D35 — The structural editor and the delegate path.** The editor
+is a **palette-and-list document builder**, not a formula parser:
+add/remove terms from the palette of leaves and library fragments,
+set rational powers (the human *is* the form proposer — powers are
+structure, D22), see slots with their bounds grouped by part.
+Freeform text/latex input is out of scope — the Dash-era editor
+manipulates documents structurally, and the representation's latex
+renders the preview. Its two submission paths: manual coefficients
+through the unchanged `HumanOptimizer` port, and the delegate
+path — the optimize button composing (current document × selected
+objective policy, D32 included × protocol) into a driver-side run
+through `new_run`: the recorded face, a proper D18 protocol row,
+records indistinguishable from a script-composed run. The check
+button calls the 3.1 checker through the session's `check`
+capability — the same function the machine path calls, wired, not
+reimplemented.
+
+**Viz stays import-free.** All forms operations the UI needs —
+canonicalize, latex preview, check — reach the dashboard as
+session-injected callables, like `solve`; documents transit the UI
+as plain JSON. `tests/test_import_audit.py` is unchanged, which
+remains the strongest evidence the ports hold. Supporting moves
+from R2's ready-to-build list: `grid_of`/`system_of` promoted out
+of `plots.py` privates (no allowlist change), overlay curves on
+`figures.density_figure`.
+
+**Acceptance tests**:
+
+1. *One layout*: served page arity identical across every session
+   capability combination; absent capabilities render disabled
+   with stated reasons; capability-less callback invocations refuse
+   namedly.
+2. *Live means live, and only live*: click → queued → rendered on
+   tick with the live marking; a non-converged solve renders its
+   residual as data; the store's row counts and hashes are
+   byte-identical before and after a session of solves.
+3. *Editor round-trip*: the Stage 2 ansatz rebuilt by hand in the
+   palette canonicalizes to the same hash as the library document.
+4. *One checker*: the editor's check button and a direct
+   `forms.checker.check` call return equal findings for the same
+   document — asserted to be the same function invocation, not
+   similar output.
+5. *Delegate parity*: a button-launched run and a script-composed
+   run over the same (document, policy, protocol) produce
+   indistinguishable store state — form row, protocol row,
+   record shapes.
+6. *Manual parity preserved*: the Stage 2
+   records-indistinguishability test for `HumanOptimizer` passes
+   unchanged.
+
+### 3.6 — N > 2 references, spin resolution, higher rungs
+
+The world track: harder references and the rungs they enable. All
+reference work is dataset-build time — the hot loop never sees a
+DMRG solve — and every new system enters as an append-only D17
+version with regime as assignment.
+
+**D36 — The DMRG reference adapter.** A TeNPy-based solver ships
+beside `solve_2e_singlet` as a second adapter of the
+reference-solver port, exploiting the exponential interaction's
+exact compact MPO (the reason Baker et al. chose it — N > 2 stays
+cheap at build time). Gate: it must reproduce the Lanczos N = 2
+energies and densities within stated tolerances before any N > 2
+system it produces is registered. Solver metadata (bond dimension,
+truncation, TeNPy version) is recorded with the build provenance;
+the D17 content hash still covers physics arrays only.
+
+**D37 — N-electron extraction and spin resolution.** The kinetic
+piece of extraction is a **swappable strategy, prescribed per
+build**, with two adapters:
+
+- **Iterative KS inversion** — the exact path, implemented first:
+  adjust v_s until its N lowest-orbital density matches n_ref, the
+  N-electron generalization of the 2.4 read-backwards machinery,
+  reusing its anchor and margin conventions; its kinetic energy is
+  taken with the record's own Laplacian — `T_s = Σᵢ occᵢ
+  ⟨φᵢ|−½L|φᵢ⟩` over the recovered orbitals, the same discrete
+  operator the inversion identity itself uses. The gate is the same
+  closure discipline: solving KS with the recovered v_s must
+  reproduce n_ref to tolerance, margin-invariant (the 2.4d
+  doubling pattern). Densities that defy inversion (the
+  ill-defined-functional cases Wagner et al. document) are
+  *recorded as data* at build time — a system version either
+  carries a certified inversion or an explicit refusal.
+- **A prescribed kinetic functional** T_s[n], expressed as a form
+  document over the same ingredient vocabulary and differentiated
+  by the same D23 machinery for the potential side: `v_xc_ref =
+  μ − v_ext − v_H − δT_s/δn` evaluated at n_ref, the additive
+  constant fixed by the same anchor-window convention the
+  inversion uses. The seeded document is t_vw in its **Laplacian
+  spelling** — `T_s = −∫ √(n/2) ∇²√(n/2) dx` over the record's
+  `laplacian` operator, exact for the 2e singlet — not D29's
+  `|∇n|²/8n` gradient spelling, which stays for XC-form use: the
+  two differ discretely at stencil order, and the Laplacian
+  spelling is the one whose autograd derivative reproduces the
+  inversion identity `½Lφ/φ` in the same discrete arithmetic. One
+  representation serves XC and kinetic functionals alike. (Honest
+  history: the Stage 2 cache is itself a hybrid extraction —
+  energy via the `np.gradient` t_vw, potential via Laplacian
+  inversion — and stays frozen as its own version; neither
+  strategy is asked to reproduce it bitwise.)
+
+The semantic consequence, stated so it is a choice and not a
+surprise: with an approximate T_s, the extracted `e_xc_exact`
+*redefines the target* to absorb the kinetic residual — the
+orbital-free-DFT decomposition, legitimate and deliberate.
+Provenance keeps the two worlds apart mechanically: the extraction
+strategy is recorded in build provenance, and different strategies
+produce different `e_xc_exact`/`vxc_ref` arrays, hence different
+D17 content hashes — distinct system versions, so decompositions
+cannot silently mix in one population. Spin resolution arrives here
+as a per-build **spin-treatment flag** with two values.
+`restricted` is today's shape — one `n`, one `vxc_ref`, hashing
+exactly as today, so every existing version's identity is
+preserved — and it is **refused for odd N with a named reason** at
+build time, never a silent ζ = 0. `unrestricted` stores
+spin-resolved arrays (`n_up`, `n_dn`, `vxc_ref_up`, `vxc_ref_dn`;
+inversion runs per spin channel), and the labeled spin arrays join
+the content-hash stream only when present — restricted hashes are
+untouched while an unrestricted build of the same system is a
+distinct version by construction, its flag recorded in build
+provenance. `XCInput` gains the spin-resolved optional fields (D10
+additive, populated on requirement), ζ stops being identically
+zero for odd-N systems, and two 3.4-adjacent pieces activate — the
+spin-scaling exchange condition (interaction-agnostic, per Baker
+et al.) joins the kept list, and the paper's spin-resolved 1D gas
+parametrization becomes available as a leaf where provided.
+
+**D38 — Rungs 2 and 3, and tiered escalation.** Rung 2: a
+strong-correlation stress population — stretched and odd-N chains,
+the near-degenerate equal-well cases — with DMRG references (in 1D
+the rung-2 reference class *is* DMRG), entering runs through the
+population prescription surface (3.7). Rung 3: SCF spot-checks
+through the candidate-SCF service's *recorded* face, under their
+own D18 protocol row, non-convergence stored as data
+(`scf_residual` rows — the endemic near-degeneracy is signal, not
+error). Escalation, the tier decided in scope: a driver step that
+re-scores the current top-k under the higher-rung protocol row —
+post-hoc or periodic, never in-loop — with the ranking policy
+reading mixed-rung rows per Core C's emission rule. **Sequenced
+last in the stage, after 3.7** (the full noise-floor
+successive-halving policy remains Stage 4+).
+
+**The store decision escalation needs, stated with D25's weight.**
+`evaluations` gains a nullable `protocol_id` column: `NULL` means
+"the protocol of the candidate's run" — every existing row's
+meaning, unchanged, with run-less baseline rows staying
+unprotocol'd as today — and escalation rows carry theirs
+explicitly. The store gains one write beside `add`:
+`add_records(candidate_id, records, protocol_id)` — append-only,
+stamping the candidate id onto the rows in one transaction, never
+touching the candidate row itself. `candidates.score` stays the
+told score, written once (D20): the escalated ranking is computed
+from mixed-rung records by the policy at read time, never stored
+as a second score. This is what "multiple protocol rows per run"
+is mechanically — the run keeps its opening protocol FK and
+higher-rung rows name their own — and per-protocol row-set
+identity (test 7) reads through `COALESCE(e.protocol_id,
+run.protocol_id)`. The schema bump rides the same
+`_refuse_legacy_schema` discipline as D25's.
+
+**Module/ownership**: the solver adapter and inversion
+generalization live with the dataset build (`worlds/exp1d/`
+dataset machinery plus a new reference-solver adapter); the
+escalation step lives in the driver; TeNPy is a build-time
+dependency only — the search loop's import set is unchanged.
+
+**Acceptance tests**:
+
+1. *The adapter gate*: DMRG reproduces Lanczos N = 2 energies and
+   densities within stated tolerances on every cached N = 2
+   system.
+2. *Inversion closure at N > 2*: eigensolving the recovered v_s
+   reproduces n_ref to tolerance; doubling the vacuum margin moves
+   results less than tolerance.
+3. *Strategy coincidence at N = 2*: the inversion adapter and the
+   Laplacian-spelled t_vw adapter extract `e_xc_exact` and
+   `vxc_ref` agreeing to `np.isclose(rtol=1e-12, atol=1e-12)` on
+   the cached N = 2 systems — φ = √(n/2) makes both strategies
+   exact there, and the shared discrete operator (D37) makes the
+   agreement an identity of the same arithmetic, so the tolerance
+   covers roundoff only, never discretization differences.
+4. *Refusal as data*: a deliberately ill-conditioned density
+   yields a recorded inversion refusal, not an exception or a
+   silent gap.
+5. *Decompositions cannot mix*: the same reference solve
+   extracted under two kinetic strategies mints two system
+   versions with distinct content hashes, each carrying its
+   strategy in build provenance.
+6. *Spin fields honest*: a `restricted` build of an odd-N system
+   is refused with the named reason; an `unrestricted` odd-N
+   version carries ζ ≠ 0; an `unrestricted` closed-shell version
+   carries ζ ≡ 0 and a content hash distinct from its `restricted`
+   sibling; the spin-scaling exchange condition passes for the
+   spin-scaled LDA-x leaf.
+7. *Rung rows under their protocols*: rung-2 and rung-3 rows
+   appear only under their protocol rows; per-protocol row-set
+   identity holds across the mixed-rung store.
+8. *Escalation shape*: after a seeded run plus escalation, exactly
+   the top-k candidates carry higher-rung rows, ranked by a
+   mixed-rung-aware policy without re-evaluating the rest.
+
+### 3.7 — Prescribable populations
+
+The systems a run optimizes over and the systems it evaluates over
+become two individually prescribed selections. The provenance spine
+anticipated this — D19 already makes populations run-scoped frozen
+rows and `seed_baseline` is already keyed by (label, population) —
+so this sub-stage builds the *prescription surface* over a small,
+named data-model addition (a junction `role` column, a record field,
+a population-hash version bump) rather than a new model.
+
+**D39 — The prescription model.** A run is opened with two
+prescriptions, `optimize` and `evaluate`, each either an explicit
+list of system-version ids or a **selector** — a predicate over
+system-version attributes (name, N, regime, extraction strategy,
+default split membership), with union and difference for
+composition. Selectors are what a machine proposer would naturally
+emit; explicit lists are what a critic replaying a specific attack
+would emit; both are legal from day one. Resolution happens **once,
+at run start**: the selector evaluates over the dataset's loaded
+`SystemRecord`s — the selector's attribute surface is the record
+itself (name, `n_elec`, regime, default split, extraction strategy —
+the last a new field the D37 build stamps on the npz, the record,
+and the `systems` row; the store's `systems` table alone carries
+identity, not assignment, and is not the resolution surface) — and
+the selection freezes into the run's D19 population — *one*
+population, the union of the two selections — via a new **`role`**
+column on the junction rows: `optimize`, `evaluate`, or `both`
+(membership in both selections), beside the existing descriptive
+`split`, whose world vocabulary (train/holdout/extrapolation) is
+untouched. Roles enter the population hash (a
+`POPULATION_HASH_VERSION` bump); the rows are the truth, and the
+prescription *expressions* are recorded on the run row (a nullable
+column) as provenance — so intent is replayable, but a
+re-resolution against a grown registry is a new run, never a
+mutation. Overlap between the two selections is legal and explicit:
+it is exactly role `both`, which is also what keeps overlap
+representable under the junction table's primary key. The **default
+prescription reproduces the world's standard split** — `optimize`
+selects the train systems, `evaluate` selects every system, so the
+roles are `both` for train and `evaluate` for the rest — and an
+unprescribed run is exactly a Stage 2 run.
+
+**D40 — Consumer semantics.** The objective (`tell`, and every
+optimization-side ranking) is computed over rows whose role admits
+optimization — `optimize` or `both`. The mechanism is the record:
+`EvaluationRecord` gains a `role` field (additive, the D12
+dataclass rule), copied by the evaluator from the system's
+run-resolved assignment exactly as `regime` and `split` are, so
+records stay self-sufficient; the ranking policy's selection
+migrates from `split == "train"` to the role filter, and under the
+default prescription the two select identical row sets — which is
+what keeps the seeded run's scores bitwise, the additive record
+field itself riding the D15 fixture-regeneration protocol.
+Evaluation records are emitted over the union population under the
+emission rule (shape identity now per (tag-class, protocol,
+population)); baselines are seeded per population — opening a run
+over a novel population seeds LDA (and any configured baselines)
+for it before trial 1, keeping every heatmap comparison honest.
+Consumers already built gain their inputs without redesign: 3.5's
+delegate button takes a prescription as part of its objective
+selection; 3.6's rung-2 stress set is a selector (`regime =
+strong-correlation`) rather than a bespoke list; escalation
+protocols name their population by prescription.
+
+**The Stage 4+ door, named**: an adversarial critic varying the
+dataset is a *proposer of prescriptions between rounds* — the
+attack loop of the self-play design emits selector expressions or
+explicit lists into this same surface, sharing the record store
+with the functional loop. Proposing *novel systems* (not yet
+registered) additionally requires a reference-solve-and-register
+step at attack time; that pipeline is Stage 4+ work, and its seam
+is exactly D36's build-time adapter plus D17 registration — named
+here so nobody rediscovers it.
+
+**Module/ownership**: prescription types and resolution live in
+core beside the provenance machinery; the driver consumes resolved
+rows only; no world, evaluator, or viz changes beyond the delegate
+button's selection input.
+
+**Acceptance tests**:
+
+1. *Legacy equivalence*: an unprescribed run writes a population
+   with the same system versions, splits and regimes as the Stage 2
+   default, roles carrying the default assignment (`both` for
+   train, `evaluate` for the rest); the D15-gated seeded run passes
+   through the prescription path with bitwise-identical scores and
+   trial sequence.
+2. *Freezing*: a selector-opened run's rows are unchanged by
+   later system registration; reopening the same selector after
+   registering new versions resolves to a different population in
+   a new run, with both expressions recorded.
+3. *Role semantics*: with overlapping prescriptions, objective
+   values are computed from `optimize`/`both` rows only, and
+   records exist across the union population with correct roles.
+4. *Baselines per population*: a run over a novel population has
+   its baselines seeded before trial 1; the dashboard baseline
+   dropdown resolves against that population's rows.
+5. *Stress set as selector*: the 3.6 rung-2 population is opened
+   by regime selector and its escalation rows scope to it —
+   per-(protocol, population) row-set identity holds.
+
+## The fence — maps of the deferred orbital cluster
+
+Everything below is **Stage 4+ work**, kept here as settled maps so the
+later stage starts from a map rather than a rediscovery. Shared context:
+at 2 electrons, Hartree–Fock exchange is a *density* functional — for a
+closed-shell singlet (one doubly occupied orbital), `E_x^HF = −½ E_H[n]`
+exactly, and its functional derivative `v_x = −½ v_H(x)` is
+multiplicative. So the D10 port contract can already express exact
+exchange in the current world as a non-local density-functional adapter;
+the deferral is deliberate anyway, because that disguise validates none
+of the orbital machinery below.
+
+### Orbital provisioning: `orbitals_ref` at build time, virtuals on demand, subspace contract
 
 `XCInput.orbitals` exists as a field but nothing yet says who populates
 it, from what. The physics is already determined by frozen data: the
@@ -128,15 +1304,14 @@ shortcut is φ = √(n/2), no eigensolve at all.)
   pass is consuming box states — exactly what the test exists to
   expose.
 
-### Q4 — The generalized-KS cluster (N > 2 orbital-dependent exchange): what is behind the D10 fence
+### The generalized-KS cluster (N > 2 orbital-dependent exchange)
 
 At N > 2 exact exchange stops being a density functional and its
 potential stops being multiplicative — the candidate becomes a
 generalized-KS form. D10 already fences this as a future port
-extension, not a reshape; this item maps what is behind the fence so
-Stage 3 planning starts from a map, not a rediscovery.
+extension, not a reshape.
 
-- **(a) The `ks.py` extension is operator-shaped**, per Q2's
+- **(a) The `ks.py` extension is operator-shaped**, per Core A's
   forward-compatibility note: the one-body Hamiltonian gains an
   optional non-local term as an *apply-to-a-vector* callable (scipy's
   eigensolvers accept `LinearOperator`s natively), never a materialized
@@ -151,59 +1326,11 @@ Stage 3 planning starts from a map, not a rediscovery.
   differs from the exact multiplicative KS potential even when both
   functionals are exact (the derivative-discontinuity / gKS-vs-KS
   story), so any vxc-shaped metric would penalize an exact
-  orbital-dependent candidate. The rule: a metric row is emitted only
-  when the protocol offers it *and* the candidate's tags admit it —
-  absent rows, never NULLs or exceptions (the tag-side mirror of A1's
-  protocol-side rule; D18's protocol row already records the metric
-  list a run offers, and tag-gating is its candidate-side complement).
-  Consequently the 2.2 shape-identity acceptance becomes *per
-  tag-class*: candidates with identical meta tags must have identical
-  (system, metric) row-sets over the run's D19 population — which
-  degenerates to exactly the current test while only one tag-class
-  exists.
+  orbital-dependent candidate. The machinery this needs already exists
+  the day the fence opens: Core C's emission rule handles the absent
+  rows and the per-class shape identity; the frame principle here
+  merely supplies the tag classes.
 - **(c) A1's converged-SCF axis becomes orbital-based iteration** for
   such candidates: density mixing over a multiplicative `v_xc` no
-  longer applies. Designing that SCF loop is real Stage 3+ work, noted
+  longer applies. Designing that SCF loop is real Stage 4+ work, noted
   here only so the axis is not assumed portable.
-
-### Q5 — Hybrids need a term algebra; `LocalAnsatz` is not composable
-
-A2's taxonomy describes hybrids as multisets of leaf forms, but nothing
-can *combine* functionals — and the workhorse adapter, `LocalAnsatz`,
-hard-wires LDA correlation into its `exc`, so it cannot serve as a
-clean term. The first hybrid worth building (`a·HF-x + LDA-c` or
-similar) needs two mechanical pieces and one discipline rule:
-
-- **A `SumOfFunctionals` composite adapter** — a `Functional` holding
-  child functionals and weights. Everything distributes term-by-term
-  with no new physics: `exc = Σ wᵢ·excᵢ`, `vxc = Σ wᵢ·vxcᵢ`
-  (functional derivatives are linear), `to_latex()` joins children
-  with `+`, and the weights enter the composite's θ vector alongside
-  the concatenated child vectors, so the store's θ-derivation works
-  unchanged. The A2 meta tags *join upward* — each axis takes the
-  maximum over children — so a hybrid containing one non-local
-  orbital-dependent term is tagged as such wholesale, which is what
-  evaluator field-population and Q4's metric gating must see.
-- **Fingerprints are computed on a canonical form.** The composite's
-  `fingerprint()` first canonicalizes: flatten nested sums, merge
-  duplicate leaves by summing weights, sort leaves by form-key. Any
-  two assembly routes to the same mathematical object — one wrapper
-  vs nested wrappers, orderings, split vs pre-combined terms *within
-  the algebra* — collide on the same fingerprint by construction.
-  This guarantees structural identity only; mathematical equivalence
-  of arbitrary leaf code is undecidable, hence the discipline rule:
-  **leaves must be atomic** — never register a leaf expressible as a
-  sum of existing leaves. Behavioral dedup beyond that (hashing
-  evaluations on probe densities, LSH-style) is a Stage 3+ option if
-  ever needed.
-- **Separable leaves.** LDA-x and LDA-c become standalone leaf
-  adapters, so composites always build from atomic single-term
-  leaves. `LocalAnsatz` stays untouched for the current search —
-  nothing forces a refactor — but it is recorded as *not composable*:
-  the first hybrid builds from the leaves, never by wrapping it (it
-  violates the atomicity rule by construction).
-- **Cost caveat, stated honestly:** the tag-join rule charges a
-  composite the full evaluation cost of its most expensive term even
-  when that term is a small admixture. Fine at current scale; the
-  natural seam (per-term evaluation caching) is Stage 3+ work, not
-  queue material.

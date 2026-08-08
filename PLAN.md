@@ -45,9 +45,13 @@ ABCs, with everything external (optimizers, DFT engines, storage) plugged
 in as adapters. Class-level mechanics are GoF **Strategy** (each swappable
 component slot) and **Adapter** (third-party wrappers); the optimizer port
 uses the optimization community's named **ask–tell** interface. This
-enforces the standing constraint that the framework stays agnostic to the
+enforces the standing constraint that the *ports* stay agnostic to the
 ML framework that will eventually drive the optimization — no port may
-assume Optuna, an RL library, or any specific framework. Concretely:
+assume Optuna, an RL library, or any specific framework. The rule
+governs interfaces only: adapter and implementation internals use
+whatever libraries serve them best (Optuna inside an optimizer adapter,
+JAX inside the functional representation), hidden behind the port
+boundary. Concretely:
 
 - **The framework owns the search loop; optimizers are ask–tell
   adapters.** The driver runs `optimizer.ask()` → evaluate through the
@@ -81,7 +85,7 @@ feature (definitions under Features below):
 - **Feature 1 — proposer context.** First version of the LSH database of
   attempted functionals: record every candidate with its evaluation
   records, support near-duplicate lookup so the optimizer can skip
-  repeats. (Agents *conditioning* on it as context come in Stage 3.)
+  repeats. (Agents *conditioning* on it as context come in Stage 4+.)
 - **Feature 2 — form restriction.** The exact-conditions component,
   pluggable per world because constraints are dimension- and
   interaction-dependent (the PBE/SCAN constraint values — Lieb–Oxford
@@ -120,17 +124,33 @@ Notably: the optimizer port decomposes into a *form proposer* and a
 drop-in), and "same functionality after the refactor" is pinned to an
 exact-equivalence gate against a seeded Stage 1 run (D15).
 
-## Stage 3+ — ML-guided search
+## Stage 3 — Widen the search space: richer forms, harder references
 
-The heavy lift. Each bullet below could be a stage of its own; kept as a
-single 3+ bucket until we get closer.
+Goal: remove two walls Stage 2 left standing — what a functional *is* (a
+fixed five-parameter local polynomial) and what it is measured against
+(N = 2 exact solves at rungs 0–1) — while staying in the 1D exponential
+world and **deferring orbital dependence entirely**. Exact exchange
+defers with it, deliberately: at N = 2, `E_x^HF = −½E_H[n]` is a plain
+density functional, but building exact exchange in that disguise would
+commit the design to orbital machinery (subspace contracts,
+generalized-KS frames, orbital-based SCF) whose real problems only
+surface at N > 2. Nothing orbital-shaped enters Stage 3.
 
-- **ML learners as the optimizer**: actor–critic first (critics race to
-  find failure systems for proposed functionals), then AlphaGo-style
-  self-play.
-- Proposer agents conditioning on the feature-1 LSH database as context,
-  so the search does not circle through similar candidates.
-- Widening the search space: non-locality, symbolic forms, the
+Physics/DFT scope:
+
+- **Non-local density ingredients**: `XCInput` gains grid coordinates;
+  the world-owned interaction service is operator *application*, never a
+  materialized matrix — for exp1d an O(N) differentiable tridiagonal
+  solve.
+- **Semi-local ingredients**: density gradients, a reduced density
+  gradient re-derived for 1D (the 3D exponent conventions do not copy),
+  kinetic-energy density τ — the GGA/meta-GGA tier of `STAGE2B.md`'s
+  ingredient catalogue.
+- **v_ext-aware ingredients**: well positions and charges, v_ext(x)
+  itself — legitimate, not cheating: the exact functional for a
+  dissociating molecule is v_ext-aware.
+- **Exact-conditions expansion** (2b): 1D analogs of the known
+  constraints, growing with the ingredient set; first steps toward the
   constraint-satisfying family of 2c.
 - **Past 2 electrons in 1D, before any move to 3D**: replace exact
   diagonalization with DMRG via **TeNPy** for the reference solves — the
@@ -138,8 +158,68 @@ single 3+ bucket until we get closer.
   chose it), so N > 2 stays cheap at dataset-build time. Ships as a new
   adapter beside `solve_2e_singlet`, gated on reproducing the Lanczos
   N = 2 results. Extraction needs the generalization that comes with any
-  N > 2 move: T_s via iterative KS inversion (the N-electron version of
-  the Stage 2.4 machinery), since T_vW is exact only for 2e singlets.
+  N > 2 move — the kinetic piece becomes a swappable per-build strategy:
+  iterative KS inversion (the N-electron version of the Stage 2.4
+  machinery) as the exact path, with prescribed kinetic functionals
+  T_s[n] allowed as the alternative, since T_vW is exact only for 2e
+  singlets. Spin resolution arrives here (ζ stops being identically
+  zero).
+- **Higher rungs of the fidelity ladder (3a), tiered**: rung-2
+  references on a strong-correlation stress set (in 1D the rung-2
+  reference class is DMRG rather than CI/CCSD(T)) and rung-3 SCF
+  spot-checks.
+
+Non-physics scope:
+
+- **Term algebra**: a sum-of-functionals composite with canonical
+  fingerprints and separable LDA-x / LDA-c leaves.
+- **Form representation, first tier**: a general polynomial whose powers
+  are *proposed, not fixed* — powers are structure supplied by the form
+  proposer (the human, in Stage 3) as small exact rationals, never
+  coefficient dimensions — designed against the full `STAGE2B.md` R1
+  ingredient catalogue so later tiers extend it rather than rework it.
+- **Form checker**, limited to what the codebase currently supports.
+- **Structural editor**, so the feature-4b claim (a person is an
+  optimizer, same port) survives variable structure.
+- **Per-term evaluation caching**.
+- **Prescribable populations**: the systems a run optimizes over and
+  the systems it evaluates over are two individually prescribed
+  selections, frozen into the run's population rows at start — the
+  data model the Stage 4+ adversarial dataset game plays on.
+- **Protocol escalation, tiered**: post-hoc top-k re-scoring at higher
+  rungs. Sequenced last in the stage, after everything above; the full
+  noise-floor successive-halving policy is the mature tier and can wait.
+- **Dashboard-computes-physics** (`STAGE2B.md` R2): the session
+  collapse (four capability parameters become one injected session
+  object; one layout, disabled states data-driven), then a
+  **display-only, per-system-click** SCF diagnostic under the amended
+  D13 rule — any on-screen number is in a record, reachable from one,
+  or explicitly marked as a live diagnostic that is not. Recorded
+  numbers come only from the driver under a protocol row.
+  Whole-population sweeps are a future feature, and there are no
+  separate view modes: entry points differ only in session capability.
+
+Scope decisions and settled designs live in `STAGE3.md`, the
+implementation spec (decisions D21–D40, sub-stages 3.1–3.7).
+
+## Stage 4+ — ML-guided search and the orbital frontier
+
+The heavy lift. Each bullet below could be a stage of its own; kept as a
+single 4+ bucket until we get closer.
+
+- **ML learners as the optimizer**: actor–critic first (critics race to
+  find failure systems for proposed functionals), then AlphaGo-style
+  self-play.
+- Proposer agents conditioning on the feature-1 LSH database as context,
+  so the search does not circle through similar candidates.
+- **The orbital cluster**: orbital provisioning with the subspace
+  contract, the generalized-KS operator extension and orbital-based SCF,
+  exact exchange, and HF-x hybrids — mapped in `STAGE3.md`'s fence
+  section.
+- Regularized evolution as a form proposer over discrete structure (the
+  D11 `FormProposer` port is its reserved seat).
+- Tier-7 ingredients: ∂E/∂N and the derivative discontinuity, response
+  functions — each needs a second calculation per number.
 - **Parallel evaluation — `ask_batch()`.** The Stage 2 optimizer ports
   mandate strict ask–tell alternation (`STAGE2.md` D11): one proposal
   outstanding at a time, which costs nothing while evaluations are
@@ -147,9 +227,10 @@ single 3+ bucket until we get closer.
   having, extend the ports with `ask_batch(n)` and tells keyed by
   proposal id (θ values are ambiguous under duplicates) — a designed
   port revision, not adapter improvisation.
-- Higher rungs of the fidelity ladder (3a): CI/CCSD(T)-class references, a
-  strong-correlation stress set, SCF spot-checks, and the noise-floor
-  escalation policy.
+- The full noise-floor escalation policy over the fidelity ladder
+  (successive halving with fidelity as the budget axis), maturing Stage
+  3's tiered top-k version.
+- **3D worlds.**
 - The adversarial game built *as the top rung of the ladder* (3d): critics
   perform lazy minimax evaluation; match outcomes feed Elo/TrueSkill
   ratings; intransitivity detection steers where the critic attacks.
@@ -157,7 +238,7 @@ single 3+ bucket until we get closer.
 # Features
 
 Feature definitions, referenced by number from the stages above. First
-working versions land in Stage 2; mature versions in Stage 3+.
+working versions land in Stage 2; mature versions in Stage 3 and beyond.
 
 1. **Proposer context awareness** — the functional-proposing agent needs
    memory of past attempts so it does not circle through similar guesses.
