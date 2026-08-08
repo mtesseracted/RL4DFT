@@ -1065,6 +1065,165 @@ fixed coefficient vector:
   over *those* rather than over `n` directly.
 - **Non-local functionals**, and **v_ext-aware functionals**.
 
+#### The ingredient catalogue
+
+Every intermediate quantity raised so far, ordered by **what it needs in
+order to be computed** — which is also a sane implementation order, since
+each tier needs machinery the one below it does not. The point of writing it
+out is not that all of it gets built; it is that a representation designed
+against tier 0 and 1 alone will not stretch to tier 6, and we should know
+the whole shape before choosing one. Forms will be rolled out iteratively as
+each becomes implementable, so **partial support is the normal state, not a
+defect** — see *Declared capability*, below.
+
+| tier | ingredients | status here |
+|---|---|---|
+| **0 — pointwise in `n`** | `n` itself; powers `n^p`, today `p ∈ {0.5, 1, 1.5, 2}` (`EXPONENTS`); `eps_x_lda(n)`, `eps_c_lda(n)` | **this is all of it today.** theta is five numbers: c0 scaling LDA exchange, c1..c4 on the powers |
+| **1 — local algebraic in `n`** | a Wigner–Seitz-type radius r_s; the reduced variable `y = πn/κ` (already inside `eps_c_lda`); a Fermi wavevector k_F; spin polarization ζ | cheap, pointwise, differentiable. ζ needs a spin-resolved world — this one is a two-electron **singlet**, so ζ ≡ 0 |
+| **2 — derivatives of `n`** | ∇n; ∇²n; and from them the **reduced density gradient**, s ∝ \|∇n\|/n^a — the canonical GGA ingredient | the machinery exists and nothing consumes it: `np.gradient(n, grid.x)` is already used by `t_vw`, and `grid.laplacian()` is a stored CSR operator. **The exponent conventions for s and k_F are 3D-specific and must be re-derived for 1D, not copied** |
+| **3 — kinetic-energy densities** | τ_vW = (1/8)\|∇n\|²/n and its relatives — meta-GGA territory | `dataset.t_vw` already computes the integral, documented as *exact* T_s for the doubly occupied φ = √(n/2) |
+| **4 — non-local in `n`** | v_H[n](x) = ∫ v_int(x−x′) n(x′) dx′; weighted-density and pair-density approximations; any ingredient that is an integral over the whole density rather than a value at a point | `world.v_int` and `dataset.v_hartree` exist. **Cost changes shape**: O(N) per point becomes O(N²) per evaluation, against a measured 0.353 s/trial budget |
+| **5 — v_ext aware** | well positions and charges; v_ext(x) itself; fragmentation information | `System` already carries `wells` as (charge, position) and `v_ext(grid)`. A2 allocates the tag (0 = none, 1 = full). **Legitimate, not cheating**: the exact functional for H₂ at dissociation is v_ext aware |
+| **6 — orbital dependent** | occupied orbitals; occupied plus k virtuals (A2's integer *dependence* tag); exact exchange | this world's singlet has exactly **one** occupied spatial orbital, φ = √(n/2), which makes it the cheapest imaginable place to try orbital dependence |
+| **7 — a derivative of one observable with respect to another** | ∂E/∂N and the derivative discontinuity; ∂E/∂v_ext; response functions χ = δn/δv; any ∂A/∂B where both are outputs of a calculation | **the hardest tier and the one with no analogue anywhere in the codebase.** Each such ingredient needs a *second* calculation — a finite difference in N or in v, or a linear-response solve — to produce a single number |
+
+#### What makes an ingredient admissible
+
+Four rules, and they are what the excluded list below is measured against:
+
+1. **Computable forwards** from what `XCInput` carries, or from what a world
+   can be asked to add to it. A2 already supplies the mechanism: tags declare
+   which optional `XCInput` fields a functional requires, and evaluators
+   populate exactly those.
+2. **Bounded, known cost**, because the loop pays it per candidate per
+   system. The yardstick is the measured 0.353 s/trial over 63 systems.
+3. **Differentiable**, because v_xc = δE/δn is required and R1 has already
+   had to choose between symbolic differentiation and finite differences.
+4. **Deterministic and single-valued** — no inner search whose answer depends
+   on a starting guess.
+
+#### The excluded, and the more interesting reason why
+
+**KS inversion** is the case worth writing down properly, because the obvious
+objection is not the strongest one and *this world is a counterexample to
+it*.
+
+The obvious objection: recovering v_xc from a density is an inverse problem,
+practically unsolvable in general, needing its own search per evaluation —
+which fails rule 4, and rule 2 with it. True in a general world.
+
+**But not here.** `dataset.invert_vxc` does exactly this inversion, exactly
+and cheaply, because a two-electron singlet puts both electrons in
+φ = √(n/2), so the KS equation is one-body and can be *read backwards*:
+v_s = μ + ½φ″/φ. Its docstring records that solving with the recovered
+potential returns the reference density to machine precision.
+
+So the real reason it is inadmissible as an **ingredient** is stronger and
+has nothing to do with cost: **it presupposes the answer.** Handed a density
+it returns the v_xc for which that density is the ground state — which is
+the exact functional's answer by construction. A candidate that called it
+would *be* the exact functional for whatever density it was given, and the
+search would have nothing left to search. It is used today in precisely the
+right place and the opposite role: once, at cache-build time
+(`dataset.py:368`), to manufacture the *reference* v_xc that candidates are
+scored against.
+
+The same circularity rules out anything requiring the exact ground-state
+density of the interacting problem. Separately, anything that requires a
+self-consistent solve *inside* the functional is not an ingredient question
+at all — that is an axis of the evaluation protocol, and it belongs to A1.
+
+**The design consequence, and it is the most important sentence in R1:**
+admissibility is a property of the **(ingredient, world) pair**, not of the
+ingredient. KS inversion is closed-form here and an inverse problem
+elsewhere; ζ is identically zero here and meaningful in a spin-resolved
+world; orbital dependence is one orbital here and many elsewhere. A
+generalized framework must therefore let a **world declare which ingredients
+it can supply, and at what cost**, rather than carry a global allow/deny
+list.
+
+#### Declared capability, and iterative rollout
+
+Because forms will arrive one at a time as each becomes implementable, the
+framework has to treat a partially-supported catalogue as normal. The shape
+that gives: a world **declares what it supplies**, a form **declares what it
+requires**, and the pairing either composes or is **refused at composition
+time with a reason** — the same discipline as `check_human_endpoint`, which
+refuses an inadequate human endpoint at `create_app` rather than at click
+time, and names the missing attributes when it does. A form asking for τ in
+a world that supplies no gradients should fail loudly at `run_stage2`, never
+quietly at trial 1,900.
+
+#### Form-level structure, as distinct from ingredients
+
+Everything above is about *variables*. The other axis is how terms are
+assembled:
+
+- **Named sub-components** — exchange, correlation, and beyond — each with
+  its own theta slice, its own latex, and its own tags. This is what F1.11
+  had to reverse-engineer and what would let F1.10 group coefficient boxes
+  under the part they belong to by structure rather than by coincidence.
+- **Composites** (A2's territory): hybrids, semi-local plus a non-local
+  exact-exchange part; range-separated forms split by interaction range. A2
+  already settles their identity — the multiset of leaves — and already says
+  mixing weights are coefficients and therefore part of theta, not part of
+  form identity.
+- **Per-part bounds**, so that the box a coefficient lives in is published
+  alongside the part it belongs to rather than as one flat list.
+
+#### The proposer interface, and cheap sanity checks
+
+However complex the editing surface turns out to be — and it is not knowable
+until it exists — it needs a **check** affordance that answers *before*
+anything is submitted to the search. Propose a KS-inversion formula and the
+button should come back and say **this is ill-defined**, naming why, rather
+than accepting it and producing a run.
+
+Six classes of check, ordered by what they cost, because that ordering is
+also what decides where each one can live:
+
+| # | check | catches | cost |
+|---|---|---|---|
+| 1 | **Declared capability** — is every ingredient this form requires supplied by this world? | τ in a world with no gradients; orbital dependence in a density-only world | a set difference. Free |
+| 2 | **Circularity / ill-posedness** | **the KS-inversion case**: an ingredient that depends, directly or transitively, on the quantity being defined | reachability on the expression graph. Free |
+| 3 | **Dimensional consistency** | an energy density added to a potential | free, *if* quantities carry units in the representation — which is a reason to put them there |
+| 4 | **Domain and singularity** | division by a quantity that reaches zero on the grid; √ of a possibly-negative expression; log of zero | static inspection plus the grid's own range. Free |
+| 5 | **Cost estimate** | "this form reaches tier 4, so expect ~X s/trial against today's 0.353 s" | a lookup over the tiers used |
+| 6 | **Probe evaluation** | NaN/inf, absurd magnitudes, a v_xc that blows up in the vacuum | **one** cached system, ~6 ms — not the 63-system sweep |
+
+**Checks 1–5 are static analysis of the form and are not physics.** That is
+worth noticing: most of the checker can live wherever the form
+representation lives, and the panel can call it without any of R2's
+machinery. Only check 6 evaluates anything, and it is exactly R2's
+injected-callable pattern at its cheapest — one system, milliseconds, not a
+sweep. **This is where R1 and R2 touch**, and it is a small, well-defined
+contact rather than a merge.
+
+**Check 4 is not hypothetical.** The codebase is already scar tissue from
+exactly this class: `_N_FLOOR` guarding `t_vw`'s division by `n`,
+`VXC_FLOOR`, the `np.clip(y, 0.0, None)` under `eps_c_lda`'s square root, and
+the whole of B5 — which was a vacuum-behaviour defect in the
+finite-difference potentials, found only because F2 went looking. A form
+editor that lets a person write `something / n` and says nothing has handed
+them B5 to rediscover.
+
+**The checker must be shared with the machine proposer, not built into the
+panel.** A `FormProposer` that emits an ill-defined form has to be rejected
+by the *same* code path a person's proposal is, or the human and the machine
+diverge again — which is 4b's parity claim failing quietly, in the same way
+the structural editor above would fail it. So the checker belongs beside the
+form representation in the core, and both the dashboard panel and the
+proposer call it. The dashboard's contribution is the button and the
+rendering of the answer, nothing more.
+
+Two properties it needs. It must be **fast enough to be interactive**, which
+is what rules check 6 down to a single probe system rather than the cache.
+And it must **name what is wrong and why**, in the manner of
+`_refuse_legacy_schema` and `check_human_endpoint` — both of which decline
+with a stated reason and a remedy rather than a boolean. "Ill-defined" alone
+would send a person to read source; "`v_xc` depends on `v_xc` through
+`invert(n)`" tells them what they did.
+
 **The tell that this is needed already showed up in F1.** Item 11 split the
 formula panel into exchange and correlation by *string surgery on the stored
 latex*, cutting at the last `\epsilon_c`. It works, it degrades gracefully,
@@ -1108,10 +1267,15 @@ not the other way round.
 ones to design first:
 
 1. *An expression representation with a variable domain.* Today every term is
-   a pointwise numpy expression in `n`, written by hand. Declaring
-   intermediate variables and composing terms over them needs a
-   representation that can be evaluated, serialized into `theta_json`'s
-   successor, hashed for identity, and rendered to latex.
+   a pointwise numpy expression in `n`, written by hand — tier 0 of the
+   catalogue and nothing else. Declaring intermediate variables and composing
+   terms over them needs a representation that can be evaluated, serialized
+   into `theta_json`'s successor, hashed for identity, and rendered to latex.
+   **Design it against tier 7, not against tier 1**: an ingredient that is
+   itself the derivative of one computed observable with respect to another
+   is not a longer expression, it is an expression whose evaluation triggers
+   a second calculation, and a representation that assumes pointwise numpy
+   over one array will not grow into that.
 2. *Differentiation.* `v_xc = d(n ε)/dn` is currently hand-written in closed
    form per term and exact, with `numerics`' finite differences kept as the
    cross-check (F2). Arbitrary forms mean symbolic differentiation or paying
@@ -1246,7 +1410,17 @@ marked diagnostic; fatal for a stored record. That is an independent second
 argument for display-only, reached from a different direction than the
 protocol one.
 
-**Suggested order**, since the two interact: the session collapse first (it
-is contained, touches no physics, and every other item rides on it), then the
-SCF diagnostic on top of it, then R1 — whose structural editor is a dashboard
-change that wants the session object to already exist.
+**Suggested order**, since the two interact:
+
+1. **The session collapse.** Contained, touches no physics, and everything
+   else rides on it.
+2. **The SCF diagnostic** on top of it — the design above, display-only,
+   with the D13 amendment written down as a decision.
+3. **R1's representation and checker.** Note that checks 1–5 of R1's sanity
+   checker need *neither* of the first two: they are static analysis of a
+   form, no physics and no session. They could be built against today's
+   single form as a way of pinning the representation down before anything
+   depends on it. Only check 6, the probe evaluation, wants the injected
+   callable from step 2 — and it wants it at its cheapest, one system.
+4. **R1's structural editor**, which is a dashboard change that wants the
+   session object from step 1 to already exist.
