@@ -119,7 +119,18 @@ class DocumentFunctional(Functional):
 
     # -- the D10 surface --------------------------------------------------
     def exc(self, x: XCInput) -> float:
-        return self._evaluate(x)[0]
+        """The energy, and *only* the energy when that is all that is wanted.
+
+        A rung-0 condition never asks for ``v_xc``, so making it pay for a
+        reverse pass it discards was about half of rung 0's cost. If the
+        potential has already been computed for this input the memo answers;
+        otherwise this takes the energy-only compiled path.
+        """
+        key = self._key(x)
+        if self._memo is not None and self._memo[0] == key:
+            return self._memo[1][0]
+        inputs = self._environment(x, self.primitives)
+        return self.compiled.energy(inputs, self.theta, cache_key=x.key)
 
     def vxc(self, x: XCInput) -> np.ndarray:
         return self._evaluate(x)[1]
@@ -156,8 +167,11 @@ class DocumentFunctional(Functional):
         }
 
     # -- evaluation -------------------------------------------------------
+    def _key(self, x: XCInput):
+        return x.key if x.key is not None else id(x.n)
+
     def _evaluate(self, x: XCInput):
-        key = x.key if x.key is not None else id(x.n)
+        key = self._key(x)
         if self._memo is not None and self._memo[0] == key:
             return self._memo[1]
         inputs = self._environment(x, self.primitives)

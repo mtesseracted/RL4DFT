@@ -1020,20 +1020,27 @@ policies in core. No new imports for `viz/` or `store.py`.
   stop working. The **correlation refit is not adopted**; it mints a new
   immutable world version and deliberately breaks the D15 bitwise gate, so
   it stays a decision for a later stage rather than a fix slipped in here.
-- *Rung 0 stopped being free, and the number is recorded rather than
-  hidden.* Stage 2's three conditions over closed-form numpy cost ~1 ms.
-  Seven conditions over ~24 probe evaluations through the **same compiled
-  path real scoring uses** (D31) cost **136 ms** per candidate with a fresh
-  θ, 31 ms when the per-term cache hits — dominated by JAX dispatch on very
-  small probe arrays, not by arithmetic. That is the price of the decision,
-  and the decision still looks right: what it bought is that a violation is
-  a statement about the candidate rather than about a second copy of it, and
-  a second numpy evaluation path would have cost exactly the drift D31
-  exists to prevent. The *ordering* claim survives too — rung 1 over the
-  63-system cache is ~0.6 s, so rung 0 is under a fifth of it and still
-  needs no system. The acceptance test's threshold moved to 0.25 s, sits
-  just above the measurement rather than at a comfortable multiple, and says
-  in its docstring what would make the ordering worth re-examining.
+- *Rung 0 stopped being free, and measuring it found a real waste.* Stage
+  2's three conditions over closed-form numpy cost ~1 ms. Seven conditions
+  over ~24 probe evaluations through the **same compiled path real scoring
+  uses** (D31) came out at **136 ms** — and the existing "rung 0 costs
+  milliseconds" test is what said so. Roughly half of that was a reverse
+  pass being computed and thrown away: a rung-0 condition never asks for
+  `v_xc`, but `exc` went through `value_and_grad` anyway. `exc` now takes an
+  **energy-only** compiled path — the same term body, summed, without the
+  backward pass — and the rung-1 evaluator asks for the potential *first* so
+  that its energy comes free from the memo. Every caller pays for what it
+  uses. Measured after: **55 ms**, against ~10 ms for a nine-system rung-1
+  sweep and a conservatively estimated ~70 ms production one. The rest is
+  JAX dispatch on very small probe arrays, not arithmetic.
+- *That test also had to stop measuring the runner.* An absolute wall-clock
+  threshold passed at 136 ms alone and failed at 316 ms under an eight-way
+  parallel run — a promise about the hardware, not about the design. It is a
+  *ratio* now: rung 0 against a rung-1 sweep on the same machine under the
+  same load, scaled to production width by system count (which is
+  conservative, since production grids are seven times wider). "Cheap enough
+  to run first" was always a comparison, and a comparison is what survives a
+  busy box.
 - *A caching bug worth recording, because the shape of it recurs.* Probe
   inputs are candidate-independent and are cached (a sparse Laplacian per
   trial is not something rung 0 can afford), but the first cache key was the

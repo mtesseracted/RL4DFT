@@ -409,6 +409,54 @@ class CompiledForm:
             potential = potential + entry["weight"] * term_potential
         return float(energy), potential
 
+    def energy(self, inputs: dict, theta, cache_key: str | None = None) -> float:
+        """``E_xc`` alone, without the reverse pass.
+
+        Not a second evaluation path -- it is the *same* compiled term body,
+        summed, with no gradient taken. The distinction matters because a
+        rung-0 condition never asks for ``v_xc``, and making it pay for a
+        backward pass it discards was measured at roughly half of rung 0's
+        cost. Every caller now pays for what it uses: a condition for the
+        energy, the derivative criteria for both.
+        """
+        theta = np.asarray(theta, dtype=float)
+        if theta.shape != (self.n_params,):
+            raise ValueError(
+                f"theta has shape {theta.shape}, but this form has "
+                f"{self.n_params} slots"
+            )
+        environment = _traced_environment(inputs)
+        total = 0.0
+        for entry in self._terms:
+            piece = theta[entry["slice"]]
+            key = None
+            if cache_key is not None:
+                key = ("E", entry["hash"], piece.tobytes(), cache_key)
+                hit = self._cache.get(key)
+                if hit is not None:
+                    total += entry["weight"] * hit
+                    continue
+            function = self._compiled_energy(entry, inputs)
+            value = float(function(jnp.asarray(piece), environment))
+            if key is not None:
+                self._remember(key, value)
+            total += entry["weight"] * value
+        return float(total)
+
+    def _compiled_energy(self, entry, inputs):
+        signature = ("energy",) + _static_signature(inputs)
+        if signature not in entry["compiled"]:
+            density = self._density_body(entry, inputs)
+
+            def energy(theta_slice, environment):
+                return jnp.sum(
+                    environment["constants"]["w"]
+                    * density(theta_slice, environment)
+                )
+
+            entry["compiled"][signature] = jax.jit(energy)
+        return entry["compiled"][signature]
+
     def energy_density(self, inputs: dict, theta) -> np.ndarray:
         """The integrand ``e(x)`` with ``E = sum(w * e)`` -- for diagnostics.
 
@@ -458,10 +506,17 @@ class CompiledForm:
         weights = np.asarray(inputs["constants"]["w"], dtype=float)
         value = (float(energy), np.asarray(gradient, dtype=float) / weights)
         if key is not None:
-            if len(self._cache) > 4096:  # a bound, not a policy
-                self._cache.clear()
-            self._cache[key] = value
+            self._remember(key, value)
+            # The energy is now known, so a later `exc` on this input costs
+            # nothing -- which is what lets the rung-1 evaluator ask for the
+            # potential first and the energy second and pay for one pass.
+            self._remember(("E",) + key, value[0])
         return value
+
+    def _remember(self, key, value) -> None:
+        if len(self._cache) > 8192:  # a bound, not a policy
+            self._cache.clear()
+        self._cache[key] = value
 
     def _compiled(self, entry, inputs):
         """The jitted ``(theta-slice, env) -> (E, dE/dn)`` for one term.

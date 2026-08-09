@@ -166,11 +166,17 @@ class FrozenDensityEvaluator(Evaluator):
                     role=self.roles.get(system.name),
                 )
 
+            # The potential first when it is wanted at all: a compiled form
+            # produces the energy and its gradient in one reverse-mode pass,
+            # so asking for `vxc` first makes the `exc` below free. Asking in
+            # the other order makes it two passes -- which is exactly what a
+            # rung-0 condition avoids by never asking for the potential.
+            vxc = functional.vxc(x) if self.derivative_metrics else None
+
             error = functional.exc(x) - system.e_xc_exact
             records.append(record(EXC_SQ_ERROR, error**2))
 
-            if self.derivative_metrics:
-                vxc = functional.vxc(x)
+            if vxc is not None:
                 records.append(record(VXC_L2_ERROR, _vxc_l2_error(system, vxc)))
                 records.append(record(ONE_STEP_DN, _one_step_dn(system, vxc)))
         return records
