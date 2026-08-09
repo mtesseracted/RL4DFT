@@ -1,5 +1,16 @@
 # Stage 3 — Widen the search space: richer forms, harder references
 
+> **Status: implemented.** Every sub-stage below carries an *Implementation
+> notes (measured at build time)* block recording what the numbers actually
+> came out as, what had to be decided that the spec did not decide, and what
+> is deliberately not delivered. Read those blocks rather than assuming the
+> prose above them: several of them correct it. The four that matter most —
+> the D15 gate is bitwise in the trial sequence and 2.1e-14 in the score,
+> and why; the density floor became an *ingredient*; size consistency needed
+> one grid rather than three; and LO-b needed the gas Hartree rather than a
+> segment's — are each a case where the design was right and the arithmetic
+> was not obvious.
+
 The Stage 3 spec, built design-first: the design goal, agreed scope, and
 three core designs are settled first; each sub-stage has its
 implementation section (decisions, ownership, acceptance tests) below,
@@ -465,6 +476,13 @@ escalation step waits for 3.7's prescription surface. The derived 1D
 Lieb–Oxford conditions and the associated correlation-refit decision
 (`notes/lieb-oxford-exp1d.md`, D30) are sequenced after everything
 above — last in the stage.
+
+*Built in that order: 3.1, then 3.2–3.5 together, then 3.7, then 3.6, then
+the Lieb–Oxford conditions. 3.7 moved ahead of 3.6 because escalation
+consumes the prescription surface and there was no reason to build the
+consumer first. Both LO conditions shipped; the correlation refit they imply
+did not — it mints a new immutable world version and deliberately breaks the
+D15 bitwise gate, so it stays a decision rather than a change.*
 
 ## Sub-stage specs
 

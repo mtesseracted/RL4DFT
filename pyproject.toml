@@ -29,6 +29,11 @@ plots = ["matplotlib"]
 cmaes = ["cma"]
 # The feature-4 dashboard. Optional: a search run needs no web framework.
 viz = ["dash"]
+# The DMRG reference adapter (D36). **Build time only**: nothing in the search
+# loop imports `worlds/exp1d/dmrg.py`, and the tenpy import lives inside its
+# functions, so a checkout without this extra runs everything else -- the
+# adapter's tests skip and nothing else notices.
+dmrg = ["physics-tenpy"]
 
 [tool.setuptools]
 packages = [

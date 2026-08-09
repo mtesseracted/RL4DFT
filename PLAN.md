@@ -126,6 +126,9 @@ exact-equivalence gate against a seeded Stage 1 run (D15).
 
 ## Stage 3 — Widen the search space: richer forms, harder references
 
+*Implemented; see `STAGE3.md` for the decisions (D21–D40) and for the
+measured implementation notes each sub-stage recorded.*
+
 Goal: remove two walls Stage 2 left standing — what a functional *is* (a
 fixed five-parameter local polynomial) and what it is measured against
 (N = 2 exact solves at rungs 0–1) — while staying in the 1D exponential
