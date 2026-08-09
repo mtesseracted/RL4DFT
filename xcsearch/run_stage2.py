@@ -29,6 +29,7 @@ from .forms.checker import refuse_unsupported
 from .forms.library import stage2_local_ansatz, stage2_slot_order
 from .optimizers.composed import DocumentForm, FixedFormOptimizer
 from .optimizers.optuna_tpe import OptunaTPE
+from .populations import Prescription, roles_of
 from .provenance import protocol_payload
 from .ranking import MeanSquaredError
 from .records import SystemRecord
@@ -529,9 +530,13 @@ def main() -> None:
     optimizer = FixedFormOptimizer(form, coefficients)
     # Rung 0 first: it costs milliseconds and needs no system, so a candidate
     # is measured against the exact conditions before anything is spent on it.
+    prescription = Prescription()
     evaluators = [
         ConditionsEvaluator(default_conditions()),
-        FrozenDensityEvaluator(systems, supplies=supplies),
+        FrozenDensityEvaluator(
+            systems, supplies=supplies,
+            roles=roles_of(prescription.resolve(systems)),
+        ),
     ]
     policy = MeanSquaredError()
 
@@ -540,7 +545,15 @@ def main() -> None:
     # how each is assigned. Everything downstream -- the run, the baseline,
     # every reduction -- is scoped to it, so a rebuilt cache produces a new
     # population beside the old one rather than silently re-interpreting it.
-    population_id = store.open_population(systems)
+    #
+    # The prescription (3.7, D39): which systems this run *optimizes* over and
+    # which it *evaluates* over, resolved once, here, against the records the
+    # dataset loaded -- and then frozen into the population's rows as roles.
+    # The default reproduces the world's standard split, so an unprescribed
+    # run is exactly a Stage 2 run.
+    resolved = prescription.resolve(systems)
+    roles = roles_of(resolved)
+    population_id = store.open_population(systems, roles=roles)
     baseline_id, lda_mse = ensure_baseline(
         store, form, evaluators, policy, population_id
     )
@@ -567,6 +580,7 @@ def main() -> None:
         notes=f"seed={args.seed}",
         protocol_id=protocol_id,
         population_id=population_id,
+        prescription=prescription.to_json(),
     )
 
     driver = SearchDriver(
@@ -593,6 +607,7 @@ def main() -> None:
             return store.begin_run(
                 "human", notes=f"seed={args.seed}",
                 protocol_id=protocol_id, population_id=population_id,
+                prescription=prescription.to_json(),
             )
 
         # The live face of the candidate-SCF service (D34). Display-only by
@@ -662,6 +677,7 @@ def main() -> None:
             driver.run_id = store.begin_run(
                 "delegated", notes=f"objective={objective}",
                 protocol_id=delegated_protocol, population_id=population_id,
+                prescription=prescription.to_json(),
             )
 
         capabilities = forms_capabilities(supplies)

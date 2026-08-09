@@ -112,6 +112,12 @@ class SystemRecord:
     wells: tuple[tuple[float, float], ...]
     n_elec: int
     npz_path: str | None
+    # How this version's reference was extracted (3.6/D37) and whether it is
+    # spin-resolved. Part of a *selector's* attribute surface (D39): "every
+    # system extracted by KS inversion" is a prescription somebody will want
+    # to write, and the alternative is a hand-maintained list.
+    extraction_strategy: str | None = None
+    spin_treatment: str | None = None
     # The identity of this system's *physics content* (D17), computed by
     # `provenance.system_content_hash` at cache-build time and carried here so
     # that the store can version rather than overwrite. `None` means "not
@@ -163,3 +169,14 @@ class EvaluationRecord:
     value: float
     regime: str | None
     split: str | None
+    # What this system's role in the run's population is (3.7, D40):
+    # `optimize`, `evaluate`, `both`, or None for a record from a run that
+    # prescribed nothing. Copied by the evaluator from the run-resolved
+    # assignment exactly as `regime` and `split` are, so a record stays
+    # self-sufficient: the ranking policy decides what to average from the
+    # row itself and never through a store lookup.
+    #
+    # Additive with a default, per the D12 dataclass rule -- every existing
+    # construction site keeps working, and a policy reading it falls back to
+    # the split when it is absent.
+    role: str | None = None

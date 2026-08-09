@@ -10,15 +10,35 @@ from __future__ import annotations
 import numpy as np
 
 from .evaluators import EXC_SQ_ERROR
+from .populations import OPTIMIZING_ROLES
 from .ports import RankingPolicy
 from .records import EvaluationRecord
+
+
+def optimizes(record: EvaluationRecord) -> bool:
+    """Whether this row enters the objective (3.7, D40).
+
+    The selection migrated from ``split == "train"`` to the role the run
+    resolved for that system -- ``optimize`` or ``both``. Under the default
+    prescription the two select *identical* row sets, which is what keeps the
+    seeded run's scores bitwise while the data model underneath grows a
+    column.
+
+    A record with no role is a record from a run that prescribed nothing: it
+    falls back to the split, so every Stage 2 fixture and every test that
+    builds records by hand keeps meaning what it meant.
+    """
+    if record.role is None:
+        return record.split == "train"
+    return record.role in OPTIMIZING_ROLES
 
 
 class MeanSquaredError(RankingPolicy):
     """Mean squared XC-energy error over the training split (Stage 1's D8 loss).
 
-    Selects rung-1 ``exc_sq_error`` records with ``split == "train"`` and
-    averages them. The selection is explicit rather than "average everything"
+    Selects rung-1 ``exc_sq_error`` records the run *optimizes* over (D40,
+    and ``split == "train"`` for a record with no role) and averages them.
+    The selection is explicit rather than "average everything"
     because a candidate's record set grows with the evaluator stack -- rung-0
     conditions (2.3) and derivative metrics (2.4) land in the same list, and
     this policy must keep returning the same number when they do. That is what
@@ -34,7 +54,7 @@ class MeanSquaredError(RankingPolicy):
             [
                 r.value
                 for r in records
-                if r.rung == 1 and r.metric == EXC_SQ_ERROR and r.split == "train"
+                if r.rung == 1 and r.metric == EXC_SQ_ERROR and optimizes(r)
             ]
         )
         if values.size == 0:

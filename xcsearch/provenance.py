@@ -234,13 +234,23 @@ def protocol_hash(payload: dict) -> str:
 # --------------------------------------------------------------------------
 # The population (D19)
 # --------------------------------------------------------------------------
-POPULATION_HASH_VERSION = "xcsearch.population.v1"
+# v2 (3.7, D39): the *role* a system holds in the run -- optimize, evaluate,
+# or both -- joins the hash. Same argument as split and regime: it is
+# assignment, and a mean over the optimize rows means something different
+# from a mean over all of them, so two runs that disagree about it are not
+# measuring over the same thing.
+POPULATION_HASH_VERSION = "xcsearch.population.v2"
 
 
 def population_hash(members) -> str:
     """Identity of a population: which system versions, assigned how (D19).
 
-    ``members`` is an iterable of ``(system_version_id, split, regime)``.
+    ``members`` is an iterable of ``(system_version_id, split, regime)`` or,
+    since 3.7, ``(system_version_id, split, regime, role)``. A member with no
+    role hashes as the empty string, so the *shape* of the tuple is not what
+    the digest turns on -- but the version prefix moved to v2 either way,
+    because a population that assigns roles is a different population from
+    one that does not even when the systems match.
     Order does not matter -- a population is a set, and two runs that loaded
     the same cache in a different order measured over the same thing -- so the
     triples are sorted before hashing.
@@ -255,10 +265,11 @@ def population_hash(members) -> str:
     The ids are store-local, which is correct: a population is a set of rows
     in one store, and two stores' ids are not comparable in the first place.
     """
-    triples = sorted(
-        (int(version_id), split or "", regime or "")
-        for version_id, split, regime in members
+    rows = sorted(
+        (int(member[0]), member[1] or "", member[2] or "",
+         (member[3] if len(member) > 3 else None) or "")
+        for member in members
     )
     digest = hashlib.sha256(POPULATION_HASH_VERSION.encode())
-    digest.update(canonical_json({"members": triples}).encode())
+    digest.update(canonical_json({"members": rows}).encode())
     return digest.hexdigest()

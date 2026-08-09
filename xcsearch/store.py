@@ -68,7 +68,7 @@ LDA_LABEL = "LDA"
 # Bumped whenever a stored row's *meaning* changes shape. Version 3 is D25's:
 # the `forms` room and the candidate foreign key. There is no in-place
 # migration at any version, by rule -- see `_refuse_legacy_schema`.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -102,13 +102,18 @@ CREATE TABLE IF NOT EXISTS protocols (
     created_at TEXT NOT NULL
 );
 
+-- `prescription_json` (3.7, D39) records what the run was *asking for* --
+-- the selector expressions, not the resolution. The rows are the truth; this
+-- makes intent replayable, and a re-resolution against a grown registry is
+-- then visibly a new run rather than a mutation of this one.
 CREATE TABLE IF NOT EXISTS runs (
-    id            INTEGER PRIMARY KEY,
-    optimizer     TEXT NOT NULL,
-    started_at    TEXT NOT NULL,
-    notes         TEXT,
-    protocol_id   INTEGER REFERENCES protocols(id),
-    population_id INTEGER REFERENCES populations(id)
+    id                INTEGER PRIMARY KEY,
+    optimizer         TEXT NOT NULL,
+    started_at        TEXT NOT NULL,
+    notes             TEXT,
+    protocol_id       INTEGER REFERENCES protocols(id),
+    population_id     INTEGER REFERENCES populations(id),
+    prescription_json TEXT
 );
 
 -- Append-only (D17). The surrogate id is what evaluations point at; the
@@ -138,11 +143,16 @@ CREATE TABLE IF NOT EXISTS populations (
     created_at TEXT NOT NULL
 );
 
+-- `role` (3.7, D39) is what a run *does* with a system: optimize over it,
+-- evaluate over it, or both. One population, the union of the two
+-- prescriptions, with the overlap expressed as `both` -- which is also what
+-- keeps overlap representable under this primary key at all.
 CREATE TABLE IF NOT EXISTS population_systems (
     population_id     INTEGER NOT NULL REFERENCES populations(id),
     system_version_id INTEGER NOT NULL REFERENCES systems(id),
     split             TEXT,
     regime            TEXT,
+    role              TEXT,
     PRIMARY KEY (population_id, system_version_id)
 );
 
@@ -355,6 +365,16 @@ _LEGACY_SCHEMA_MESSAGE = (
 # opposed to which form name it went by -- is not recoverable from the rows,
 # so inventing one would be guessing at exactly the thing the forms room
 # exists to stop guessing at.
+_PRE_ROLES_SCHEMA_MESSAGE = (
+    "this store predates Stage 3.7: its `population_systems` rows carry no "
+    "`role`, so they cannot say which systems a run optimized over as opposed "
+    "to merely measured on. There is no in-place migration -- the default "
+    "assignment could be *guessed* from the splits, and guessing at what a "
+    "stored measurement meant is the whole of what D17 exists to prevent. "
+    "Regenerate via the D15 fixture-regeneration protocol, or move the file "
+    "aside; the old one stays readable with a 3.2-3.6 checkout."
+)
+
 _PRE_FORMS_SCHEMA_MESSAGE = (
     "this store predates Stage 3.2: its `candidates` table has no `form_id`, "
     "so its rows name a form rather than *being* one. There is no in-place "
@@ -429,6 +449,12 @@ class SQLiteRecordStore(RecordStore):
         ).fetchone()
         if row is not None and "form_id" not in (row["sql"] or ""):
             raise ValueError(_PRE_FORMS_SCHEMA_MESSAGE)
+        row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'population_systems'"
+        ).fetchone()
+        if row is not None and "role" not in (row["sql"] or ""):
+            raise ValueError(_PRE_ROLES_SCHEMA_MESSAGE)
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:
@@ -515,6 +541,7 @@ class SQLiteRecordStore(RecordStore):
         notes: str | None = None,
         protocol_id: int | None = None,
         population_id: int | None = None,
+        prescription: dict | None = None,
     ) -> int:
         """Open a run named after the optimizer that will drive it.
 
@@ -545,7 +572,9 @@ class SQLiteRecordStore(RecordStore):
         # started_at is stamped now, not at the first candidate: the run was
         # opened when the person opened it, whatever the search did next.
         self._pending_runs[run_id] = (
-            label, _now(), notes, protocol_id, population_id
+            label, _now(), notes, protocol_id, population_id,
+            None if prescription is None else json.dumps(prescription,
+                                                         sort_keys=True),
         )
         return run_id
 
@@ -553,13 +582,13 @@ class SQLiteRecordStore(RecordStore):
         """Write a reserved run row, once, on its first candidate (B1)."""
         if run_id is None or run_id not in self._pending_runs:
             return
-        label, started_at, notes, protocol_id, population_id = self._pending_runs.pop(
-            run_id
-        )
+        (label, started_at, notes, protocol_id, population_id,
+         prescription) = self._pending_runs.pop(run_id)
         self.connection.execute(
             "INSERT INTO runs (id, optimizer, started_at, notes, protocol_id, "
-            "population_id) VALUES (?, ?, ?, ?, ?, ?)",
-            (run_id, label, started_at, notes, protocol_id, population_id),
+            "population_id, prescription_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (run_id, label, started_at, notes, protocol_id, population_id,
+             prescription),
         )
 
     def run_population(self, run_id: int | None) -> int | None:
@@ -635,7 +664,7 @@ class SQLiteRecordStore(RecordStore):
             ids[name] = int(row["id"])
         return ids
 
-    def open_population(self, systems: list[SystemRecord]) -> int:
+    def open_population(self, systems: list[SystemRecord], roles=None) -> int:
         """Register these systems and freeze the set they form (D19).
 
         The population is *among what* every number this run produces will be
@@ -653,7 +682,10 @@ class SQLiteRecordStore(RecordStore):
         gets its own baseline (B8).
         """
         ids = self.register_systems(systems)
-        members = [(ids[s.name], s.split, s.regime) for s in systems]
+        roles = dict(roles or {})
+        members = [
+            (ids[s.name], s.split, s.regime, roles.get(s.name)) for s in systems
+        ]
         digest = population_hash(members)
 
         existing = self.connection.execute(
@@ -675,12 +707,12 @@ class SQLiteRecordStore(RecordStore):
             self.connection.executemany(
                 """
                 INSERT INTO population_systems
-                    (population_id, system_version_id, split, regime)
-                VALUES (?, ?, ?, ?)
+                    (population_id, system_version_id, split, regime, role)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 [
-                    (population_id, version_id, split, regime)
-                    for version_id, split, regime in members
+                    (population_id, version_id, split, regime, role)
+                    for version_id, split, regime, role in members
                 ],
             )
         return population_id
@@ -1024,7 +1056,7 @@ class SQLiteRecordStore(RecordStore):
         rows = self.connection.execute(
             """
             SELECT e.candidate_id, s.name AS system, e.rung, e.metric, e.value,
-                   ps.regime AS regime, ps.split AS split
+                   ps.regime AS regime, ps.split AS split, ps.role AS role
               FROM evaluations e
               JOIN candidates c ON c.id = e.candidate_id
               LEFT JOIN systems s ON s.id = e.system_id
@@ -1045,6 +1077,7 @@ class SQLiteRecordStore(RecordStore):
                 value=row["value"],
                 regime=row["regime"],
                 split=row["split"],
+                role=row["role"],
             )
             for row in rows
         ]
@@ -1073,7 +1106,7 @@ class SQLiteRecordStore(RecordStore):
             self.connection.execute(
                 """
                 SELECT s.id AS id, s.name AS name, s.content_hash AS content_hash,
-                       ps.split AS split, ps.regime AS regime
+                       ps.split AS split, ps.regime AS regime, ps.role AS role
                   FROM population_systems ps
                   JOIN systems s ON s.id = ps.system_version_id
                  WHERE ps.population_id = ?

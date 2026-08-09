@@ -38,6 +38,12 @@ from xcsearch.worlds.exp1d.functionals import (  # noqa: E402
     exc,
 )
 
+__all__ = [
+    "SEED", "TRIALS", "N_SYSTEMS", "TARGET", "FIXTURE_PATH", "SystemRecord",
+    "LocalAnsatzForm", "build_dataset", "dataset_digest", "build_stack",
+    "build_document_stack", "run", "lda_baseline", "load_pinned", "versions",
+]
+
 SEED = 0
 TRIALS = 60
 N_SYSTEMS = 9

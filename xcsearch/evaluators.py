@@ -50,7 +50,8 @@ class FrozenDensityEvaluator(Evaluator):
     before recording), and which systems count is a property of the policy.
     """
 
-    def __init__(self, systems: list[SystemRecord], supplies: dict | None = None) -> None:
+    def __init__(self, systems: list[SystemRecord], supplies: dict | None = None,
+                 roles: dict | None = None) -> None:
         if not systems:
             raise ValueError("FrozenDensityEvaluator needs at least one system")
         self.systems = list(systems)
@@ -61,6 +62,13 @@ class FrozenDensityEvaluator(Evaluator):
         # an evaluator with no supplies serves forms that read only n and w,
         # which is every Stage 2 form.
         self.supplies = dict(supplies or {})
+        # The run-resolved role per system (3.7, D40), copied onto every
+        # record exactly as `regime` and `split` are. Injected rather than
+        # read off the record, because a role is what *this run* decided to
+        # do with the system and a record must stay self-sufficient about it.
+        # Empty means unprescribed, which stamps `None` and leaves every
+        # policy on its split fallback -- a Stage 2 run, exactly.
+        self.roles = dict(roles or {})
 
         with_potentials = [s.name for s in self.systems if _has_potentials(s)]
         without = [s.name for s in self.systems if not _has_potentials(s)]
@@ -155,6 +163,7 @@ class FrozenDensityEvaluator(Evaluator):
                     value=value,
                     regime=system.regime,
                     split=system.split,
+                    role=self.roles.get(system.name),
                 )
 
             error = functional.exc(x) - system.e_xc_exact

@@ -741,7 +741,7 @@ LAYERS = [
     (
         "core",
         "Core contracts",
-        ["ports", "records", "numerics", "ks", "provenance"],
+        ["ports", "records", "numerics", "ks", "provenance", "populations"],
         "World-free, third-party-free: the ABCs every adapter implements, the "
         "data that crosses them, the shared numerics, and the identities a "
         "measurement is versioned by (D17, D18, D19). What an adapter author "

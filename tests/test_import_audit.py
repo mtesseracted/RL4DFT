@@ -74,7 +74,15 @@ ALLOWED: dict[str, set[str]] = {
     # itself: identity is a decision about physics content, and it is made in
     # one place so that the cache builder and the store cannot disagree.
     "store": {"ports", "records", "provenance", "sqlite3", "numpy"},
-    "ranking": {"ports", "records", "evaluators", "numpy"},
+    # `populations` (3.7, D39/D40) is the prescription surface: selectors,
+    # roles, and the resolution that freezes them. World-free and
+    # third-party-free -- a selector reads attributes off a record and
+    # compares them, and has no idea what a regime *means*.
+    "populations": set(),
+    # `populations` for the role filter the objective selects on (D40): the
+    # roles are one vocabulary and a policy matching on a string literal
+    # would drift from the module that resolves them.
+    "ranking": {"ports", "records", "evaluators", "populations", "numpy"},
     # Core C's candidate-SCF service (3.5, D34). World-free: it takes the
     # frozen potential data off a `SystemRecord`, the candidate through the
     # port, and the *interaction* as an injected callable -- which is the one

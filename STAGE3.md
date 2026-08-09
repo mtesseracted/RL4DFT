@@ -1366,6 +1366,28 @@ button's selection input.
    by regime selector and its escalation rows scope to it —
    per-(protocol, population) row-set identity holds.
 
+**Implementation notes (measured at build time)**:
+
+- *`SystemRecord` gained the two selector attributes 3.6 will stamp.*
+  `extraction_strategy` and `spin_treatment` are optional fields now, so a
+  selector's attribute surface is complete before the thing that fills them
+  exists — which is what stops "every system extracted by KS inversion"
+  from becoming a hand-maintained list the day it is first wanted.
+- *The safety argument is asserted as a set, not as a number.* D40's
+  migration from `split == "train"` to a role filter is only safe because
+  the two select *identical rows* under the default prescription, so the
+  acceptance test compares the selected row sets — a test on the resulting
+  score would pass for the wrong reason if both were empty.
+- *An unknown selector attribute is refused at construction.* The failure
+  mode a selector language most invites is a predicate that matches nothing,
+  quietly; `Where(colour="blue")` raises with the attribute surface named.
+  An explicit list naming a system the dataset does not have is refused for
+  the same reason: a population one system short is a different
+  measurement, not a smaller one.
+- *Resolution keeps dataset order.* A prescription decides *which* systems,
+  never in what order they are summed — the record order fixes the
+  summation order of every mean, and D15 is a bitwise gate.
+
 ## The fence — maps of the deferred orbital cluster
 
 Everything below is **Stage 4+ work**, kept here as settled maps so the
