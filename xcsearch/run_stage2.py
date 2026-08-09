@@ -260,6 +260,27 @@ def human_session(driver: SearchDriver, open_run, requests, poll: float,
             continue  # nobody has submitted yet; that is not a failure
 
 
+def resolve_paths(data: str, store: str | None, out: str | None) -> tuple[str, str]:
+    """Where the store and the best-theta payload go, given ``--data``.
+
+    Both *derive from* the dataset cache rather than being fixed at import.
+    A literal default computed from ``DATA_DIR`` meant ``--data other/cache``
+    kept writing into this world's store -- which is exactly how two worlds'
+    histories end up in one file, and ``SQLiteRecordStore._bind_world`` now
+    refuses that outright. Making the default follow the data means the
+    refusal is something you have to work at rather than something a typo
+    hands you.
+
+    An explicit ``--store`` still wins: pointing several caches at one file
+    is a legitimate thing to do *within* a world, and the store is the judge
+    of whether a given file will take them.
+    """
+    return (
+        store if store is not None else os.path.join(data, "records.sqlite"),
+        out if out is not None else os.path.join(data, "best_theta.json"),
+    )
+
+
 def coefficient_optimizer(bounds, seed: int):
     """The coefficient optimizer, constructed in exactly one place.
 
@@ -480,12 +501,15 @@ def main() -> None:
     )
     parser.add_argument("--port", type=int, default=8050)
     parser.add_argument(
-        "--store", default=os.path.join(DATA_DIR, "records.sqlite"),
-        help="record store (one file, many runs)",
+        "--store", default=None,
+        help="record store (one file, many runs of one world). Defaults to "
+             "`records.sqlite` inside --data, so pointing --data at another "
+             "world's cache moves the store with it",
     )
     parser.add_argument(
-        "--out", default=os.path.join(DATA_DIR, "best_theta.json"),
-        help="where to write the best theta",
+        "--out", default=None,
+        help="where to write the best theta (default: `best_theta.json` "
+             "inside --data)",
     )
     parser.add_argument(
         "--delete-run", type=int, default=None, metavar="N",
@@ -493,6 +517,7 @@ def main() -> None:
              "(the LDA baseline belongs to no run and is never touched)",
     )
     args = parser.parse_args()
+    args.store, args.out = resolve_paths(args.data, args.store, args.out)
 
     if args.delete_run is not None:
         store = SQLiteRecordStore(args.store)
@@ -502,6 +527,14 @@ def main() -> None:
         return
 
     # --- the composition ---------------------------------------------------
+    # The store first, and deliberately: opening it is milliseconds, and it is
+    # the one step that can *refuse* (a pre-3.2 file has no `form_id`, and
+    # there is no in-place migration). `dataset.build()` below is hours on a
+    # cold cache, so a store opened after it would spend those hours and then
+    # refuse -- which is exactly the mistake the capability check a few lines
+    # further down exists to avoid making with ingredients.
+    store = SQLiteRecordStore(args.store)
+
     dataset = Exp1dDataset(args.data)
     dataset.build()  # no-op when the cache is there; hours when it is not
     systems = dataset.load()
@@ -528,7 +561,10 @@ def main() -> None:
     # Swapping the coefficient optimizer is this one line: CMAES(form.bounds(),
     # seed=args.seed) for the D16 optimizer, HumanOptimizer(form.bounds()) for
     # a person. The form owns the search box either way.
-    coefficients = coefficient_optimizer(form.bounds(), args.seed)
+    #
+    # An if/else rather than construct-then-overwrite: a TPE study built for a
+    # human session is never asked for a single trial, and it announced itself
+    # on stderr while doing nothing, which reads like the machine is running.
     if args.human:
         # Imported here, not at module scope: the human endpoint is only
         # useful with the dashboard, and dash is an optional extra.
@@ -539,6 +575,8 @@ def main() -> None:
         # inventing a candidate when the window passes, which is what makes
         # the timeout usable as a heartbeat -- see `human_session`.
         coefficients = HumanOptimizer(form.bounds(), timeout=_HUMAN_POLL_SECONDS)
+    else:
+        coefficients = coefficient_optimizer(form.bounds(), args.seed)
     optimizer = FixedFormOptimizer(form, coefficients)
     # Rung 0 first: it costs milliseconds and needs no system, so a candidate
     # is measured against the exact conditions before anything is spent on it.
@@ -552,7 +590,6 @@ def main() -> None:
     ]
     policy = MeanSquaredError()
 
-    store = SQLiteRecordStore(args.store)
     # The population (D19): which system versions this run measures over, and
     # how each is assigned. Everything downstream -- the run, the baseline,
     # every reduction -- is scoped to it, so a rebuilt cache produces a new

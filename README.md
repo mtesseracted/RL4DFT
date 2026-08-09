@@ -95,10 +95,30 @@ caches it, and every later run reuses that cache.
 | flag | default | meaning |
 | --- | --- | --- |
 | `--data DIR` | `data/exp1d` | dataset cache; built if no `.npz` are found |
-| `--trials N` | `3000` | optimizer trials |
+| `--trials N` | `3000` | optimizer trials — **ignored with `--human`**, which has no trial count |
 | `--seed N` | `0` | sampler seed (runs are reproducible) |
 | `--store PATH` | `data/exp1d/records.sqlite` | record store; one file holds many runs |
 | `--out PATH` | `data/exp1d/best_theta.json` | where the best θ is written |
+| `--human` | off | play the search by hand, in the dashboard (see below) |
+| `--port N` | `8050` | where `--human` serves the dashboard |
+| `--delete-run N` | — | delete run N and its candidates, then exit |
+
+`--store` and `--out` default to files *inside* `--data`, so pointing `--data`
+at another world's cache moves the store with it. That matters because **one
+store holds one world's history**: records from two worlds share no scale, no
+units and no reference solver, so a file mixing them would answer every
+cross-run query wrongly and say nothing about it. The store binds to a world
+on its first `register_systems` and refuses a second by name.
+
+The store is also opened *before* the dataset is built, because it is the one
+step that can refuse: schema versions are never migrated in place, so a file
+written by an earlier stage is rejected — with the path, the missing fact and
+the remedy — in milliseconds rather than after a cold build.
+
+Which world a run lives in is not a flag. There is no world registry and no
+config-file composition: `run_stage2.py` *is* the exp1d composition root and
+imports that world directly. A second world gets a second composition root,
+not a `--world` switch.
 
 Output is the best θ, the LDA baseline, train MSE for both, the winning
 functional's formula in LaTeX, and a per-regime error table beside the LDA
@@ -128,29 +148,55 @@ takes hours. The search itself, on the cached data, takes seconds.
 .venv/bin/python -m xcsearch.viz.app --store data/exp1d/records.sqlite
 ```
 
-A Dash app over the record store (`--extra viz`). Four panels: the selected
-candidate's formula in LaTeX; a regime × metric heatmap against a baseline of
-your choosing (the LDA baseline is seeded with a label and sorts first, but any
-candidate in the store is selectable); a per-system drill-down with the wells
-marked and the reference density and potential drawn from the `.npz` the store
-points at; and a history scrubber over a run with its best-so-far strip.
+A Dash app over the record store (`--extra viz`). The selected candidate's
+formula, broken into the parts its *document* declares; a regime × metric
+heatmap against a baseline of your choosing (the LDA baseline is seeded with a
+label and sorts first, but any candidate in the store is selectable); a
+per-system drill-down with the wells marked and the reference density and
+potential drawn from the `.npz` the store points at; a history scrubber over a
+run with its best-so-far strip; and the rung-0 condition violations beside it.
+
+There is **one layout, always**. What a session can *do* is injected data, not
+a branch in the code: the command above is a store-only viewer, so every
+interactive area renders disabled with the reason stated. Every callback is
+registered either way, so a page served by one entry point cannot be posted to
+another and produce a stack trace about argument counts.
 
 It polls, and the store is in WAL mode, so the panels track a search that is
-still running. It imports no physics module — everything it shows is in a
-record or reachable from one, which is what stops a panel quietly computing a
+still running. It imports no physics module and no form representation —
+everything it shows is in a record, reachable from one, or a callable the
+composition root injected, which is what stops a panel quietly computing a
 quantity the search never measured.
 
-To play the search by hand:
+### Playing the search by hand
 
 ```bash
-.venv/bin/python -m xcsearch.run_stage2 --human --trials 20
+.venv/bin/python -m xcsearch.run_stage2 --human
 ```
 
-The proposal panel gets one slider per coefficient, bounded by the form's own
-`bounds()`. A person is an optimizer here in the literal sense — the same port,
-the same driver, the same records — so a human session is just a run whose
-optimizer is called `human`, and its candidates are indistinguishable in shape
-from TPE's in the store.
+No trial count: a fixed budget is the wrong shape for a person. The search
+runs one trial per submission, for as long as you keep submitting, and the
+session ends when you stop it. (`--trials` is accepted and ignored here.)
+
+Two ways to propose, both in the functional panel:
+
+- **coefficients** — one bounded box per slot, grouped by the part the slot
+  belongs to. Submit queues a θ for the driver. A person is an optimizer here
+  in the literal sense — the same port, the same driver, the same records — so
+  a human session is just a run whose optimizer is called `human`, and its
+  candidates are indistinguishable in shape from TPE's in the store.
+- **structure** — a palette-and-list editor, never a formula parser. Add terms
+  from the palette, set exact rational powers (powers are structure; the
+  coefficient optimizer never sees them), and the preview is rendered from the
+  *canonical* document rather than from what you typed. **check** runs the
+  form checker — the same function that refuses a machine proposer's output.
+  **optimize** hands the whole form to the optimizer, which fits its
+  coefficients under a protocol row of its own: the human proposes the form,
+  the machine fits the numbers.
+
+Selecting a candidate and a system also enables a live self-consistent solve,
+rebuilt from the stored document. Those numbers are display-only and are never
+written back — they carry no protocol.
 
 ## Plots
 

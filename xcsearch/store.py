@@ -462,29 +462,37 @@ class SQLiteRecordStore(RecordStore):
         ``CREATE TABLE IF NOT EXISTS`` is a no-op against an old table, so
         without this check a Stage 2 store would open cleanly and then fail
         one INSERT at a time, deep inside a search.
+
+        Every refusal names the file. "Move the file aside" is only a remedy
+        if the reader knows *which* file, and the usual way to meet one of
+        these is with a defaulted ``--store`` nobody typed.
         """
         row = self.connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'systems'"
         ).fetchone()
         if row is not None and "content_hash" not in (row["sql"] or ""):
-            raise ValueError(_LEGACY_SCHEMA_MESSAGE)
+            self._refuse(_LEGACY_SCHEMA_MESSAGE)
         row = self.connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'candidates'"
         ).fetchone()
         if row is not None and "form_id" not in (row["sql"] or ""):
-            raise ValueError(_PRE_FORMS_SCHEMA_MESSAGE)
+            self._refuse(_PRE_FORMS_SCHEMA_MESSAGE)
         row = self.connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' "
             "AND name = 'population_systems'"
         ).fetchone()
         if row is not None and "role" not in (row["sql"] or ""):
-            raise ValueError(_PRE_ROLES_SCHEMA_MESSAGE)
+            self._refuse(_PRE_ROLES_SCHEMA_MESSAGE)
         row = self.connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' "
             "AND name = 'evaluations'"
         ).fetchone()
         if row is not None and "protocol_id" not in (row["sql"] or ""):
-            raise ValueError(_PRE_PROTOCOL_ROWS_MESSAGE)
+            self._refuse(_PRE_PROTOCOL_ROWS_MESSAGE)
+
+    def _refuse(self, message: str) -> None:
+        """Raise a schema refusal against *this* file, by name."""
+        raise ValueError(f"{message}\n\n  the store in question is: {self.path}")
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:
@@ -639,6 +647,54 @@ class SQLiteRecordStore(RecordStore):
             row["population_id"]
         )
 
+    def world(self) -> str | None:
+        """Which world's history this file holds, or ``None`` if it is empty.
+
+        Derived from the `systems` rows rather than kept in `schema_meta`: a
+        new column would be a schema change, and a schema change refuses
+        every existing file (by rule, D25). The fact is already in the store
+        -- this just reads it, and the invariant below is what keeps the
+        answer single-valued.
+        """
+        row = self.connection.execute(
+            "SELECT DISTINCT world FROM systems ORDER BY world"
+        ).fetchall()
+        return None if not row else str(row[0]["world"])
+
+    def _bind_world(self, systems: list[SystemRecord]) -> None:
+        """One store, one world -- checked before anything is written.
+
+        A run's records are only comparable to the ones beside them, and two
+        worlds' numbers share no scale, no units and no reference solver. A
+        file mixing them would answer every cross-run query wrongly and say
+        nothing about it, so this is a refusal rather than a warning.
+
+        It is also the only thing standing between a mistyped ``--data`` and
+        a silently poisoned store, which is why it lives here -- at the write
+        -- rather than in the composition root that happens to call it.
+        """
+        incoming = sorted({s.world for s in systems})
+        if len(incoming) > 1:
+            raise ValueError(
+                f"these systems span {len(incoming)} worlds ({', '.join(incoming)}): "
+                "a population is measured within one world, so a batch that "
+                "crosses worlds cannot be registered as one."
+            )
+        if not incoming:
+            return
+        held = self.world()
+        if held is not None and held != incoming[0]:
+            raise ValueError(
+                f"this store holds the world {held!r} and these systems are "
+                f"from {incoming[0]!r}. One store holds one world's history: "
+                "records from two worlds share no scale, no units and no "
+                "reference solver, so every cross-run comparison in the file "
+                "would be meaningless and silent about it. Point --store at a "
+                f"file of its own (it defaults to `records.sqlite` beside "
+                f"--data for exactly this reason).\n\n"
+                f"  the store in question is: {self.path}"
+            )
+
     def register_systems(self, systems: list[SystemRecord]) -> dict[str, int]:
         """Insert-if-new-version, keyed by ``(name, content_hash)`` (D17).
 
@@ -654,13 +710,19 @@ class SQLiteRecordStore(RecordStore):
           keep pointing at the old version and keep reading back identically:
           nothing they were measured against has moved, because rows do not
           move.
-        * **The call cannot fail.** Immutability here is not a refusal -- the
-          old objection to append-only systems was that it would make
-          registration fallible, and versioning is what dissolves it.
+        * **Versioning never refuses.** Immutability here is not a refusal --
+          the old objection to append-only systems was that it would make
+          registration fallible, and versioning is what dissolves it. No
+          content, however changed, can make this call fail.
+
+        The one thing that *can* refuse is not about content at all: a store
+        holds one world's history (see :meth:`world`), so registering systems
+        from a second world is rejected before anything is inserted.
 
         A record with no ``content_hash`` gets one computed from its arrays,
         so a cache built before 2B.1 registers exactly like a fresh one.
         """
+        self._bind_world(systems)
         rows = [
             (
                 s.name,

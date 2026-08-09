@@ -59,6 +59,17 @@ def _rows(path: str, sql: str, parameters=()) -> list[sqlite3.Row]:
         connection.close()
 
 
+def world(path: str) -> str | None:
+    """Which world this store holds, or ``None`` if it holds none yet.
+
+    A store holds one world's history -- ``SQLiteRecordStore._bind_world``
+    refuses a second -- so this is single-valued whenever it is not empty,
+    and the header can state it as a fact rather than as a majority.
+    """
+    rows = _rows(path, "SELECT DISTINCT world FROM systems ORDER BY world")
+    return None if not rows else str(rows[0]["world"])
+
+
 # --------------------------------------------------------------------------
 # Runs, candidates, history
 # --------------------------------------------------------------------------

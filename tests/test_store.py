@@ -471,3 +471,72 @@ def test_the_store_is_usable_from_the_thread_the_driver_runs_on(systems, tmp_pat
         raise AssertionError(f"the driver died on its own thread: {failure[0]!r}")
     assert len(store.candidates(run_id)) == 2
     store.close()
+
+
+# --------------------------------------------------------------------------
+# One store, one world
+# --------------------------------------------------------------------------
+def _in_world(system, world: str):
+    """The same system, relabelled as belonging to another world."""
+    import dataclasses
+
+    return dataclasses.replace(system, world=world)
+
+
+def test_an_empty_store_holds_no_world_and_says_so(tmp_path):
+    store = SQLiteRecordStore(str(tmp_path / "empty.sqlite"))
+    assert store.world() is None
+    store.close()
+
+
+def test_registering_systems_binds_the_store_to_their_world(tmp_path, systems):
+    store = SQLiteRecordStore(str(tmp_path / "records.sqlite"))
+    store.register_systems(systems)
+    assert store.world() == systems[0].world
+    # Idempotent: re-registering the same cache neither changes nor re-binds.
+    store.register_systems(systems)
+    assert store.world() == systems[0].world
+    store.close()
+
+
+def test_a_second_world_is_refused_by_name_with_the_path(tmp_path, systems):
+    """Records from two worlds share no scale, no units and no solver, so a
+    file mixing them answers every cross-run query wrongly and silently."""
+    path = str(tmp_path / "records.sqlite")
+    store = SQLiteRecordStore(path)
+    store.register_systems(systems)
+
+    intruders = [_in_world(s, "exp2d") for s in systems[:2]]
+    with pytest.raises(ValueError) as raised:
+        store.register_systems(intruders)
+    message = str(raised.value)
+    assert systems[0].world in message and "exp2d" in message
+    assert path in message
+
+    # And it refused *before* writing: the file still holds one world.
+    assert store.world() == systems[0].world
+    store.close()
+
+
+def test_a_batch_spanning_two_worlds_is_refused_even_in_an_empty_store(tmp_path,
+                                                                      systems):
+    store = SQLiteRecordStore(str(tmp_path / "records.sqlite"))
+    mixed = [systems[0], _in_world(systems[1], "exp2d")]
+    with pytest.raises(ValueError, match="span 2 worlds"):
+        store.register_systems(mixed)
+    assert store.world() is None
+    store.close()
+
+
+def test_the_store_default_follows_the_dataset_cache():
+    """A typo in --data must not quietly write into another world's store."""
+    from xcsearch.run_stage2 import resolve_paths
+
+    store, out = resolve_paths("data/exp2d", None, None)
+    assert store == os.path.join("data/exp2d", "records.sqlite")
+    assert out == os.path.join("data/exp2d", "best_theta.json")
+
+    # An explicit path still wins: several caches of *one* world may share a
+    # file, and the store is the judge of whether a given file will take them.
+    store, out = resolve_paths("data/exp2d", "/tmp/mine.sqlite", "/tmp/best.json")
+    assert (store, out) == ("/tmp/mine.sqlite", "/tmp/best.json")

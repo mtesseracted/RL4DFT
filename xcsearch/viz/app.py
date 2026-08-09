@@ -760,10 +760,25 @@ def build_layout(store_path: str, session=None) -> html.Div:
     runs = run_options(store_path)
     baselines = baseline_options(store_path)
     systems = system_options(store_path)
+    store_world = data.world(store_path)
 
     panels = [
         html.H1("xcsearch", style={"fontSize": "20px", "marginBottom": "2px"}),
-        html.Div(os.path.abspath(store_path), style={"color": "#7a828c", "fontSize": "12px"}),
+        # Which file, and which world's history is in it. The store is not
+        # switchable from here on purpose -- in a live session the search
+        # worker owns every write to exactly one file, and a viewer that
+        # could point elsewhere would show one store while the submit button
+        # fed another. So the page *states* its store instead of choosing it.
+        html.Div(
+            [
+                html.Span(os.path.abspath(store_path)),
+                html.Span(
+                    f"  ·  world: {store_world or 'empty'}",
+                    style={"color": "#9aa1a9"},
+                ),
+            ],
+            style={"color": "#7a828c", "fontSize": "12px"},
+        ),
         dcc.Interval(id="tick", interval=_POLL_MS),
         # The watchdog line (B10). Empty while the session is healthy, so it
         # costs nothing to look at and means something when it is not.

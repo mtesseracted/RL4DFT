@@ -1336,3 +1336,32 @@ def test_the_proposal_panel_appears_only_with_a_human_endpoint(finished_run):
     human = HumanOptimizer(FORM.bounds())
     ids = _component_ids(build_layout(path, _session(human)))
     assert "submit" in ids and "submitted" in ids
+
+
+def test_the_header_states_the_store_and_its_world(finished_run):
+    """"Which file, and whose numbers" is a question the page should answer.
+
+    The store is deliberately *not* switchable from the page: in a live
+    session the search worker owns every write to one file, so a viewer that
+    could point elsewhere would render one store while the submit button fed
+    another. Stating it is the honest half of that trade.
+    """
+    path, _, _ = finished_run
+    text = " ".join(
+        node for node in _walk(build_layout(path, store_only()))
+        if isinstance(node, str)
+    )
+    assert os.path.abspath(path) in text
+    assert "world: exp1d" in text
+
+
+def test_the_header_says_empty_rather_than_guessing(tmp_path):
+    from xcsearch.store import SQLiteRecordStore
+
+    path = str(tmp_path / "empty.sqlite")
+    SQLiteRecordStore(path).close()
+    text = " ".join(
+        node for node in _walk(build_layout(path, store_only()))
+        if isinstance(node, str)
+    )
+    assert "world: empty" in text
