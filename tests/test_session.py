@@ -561,3 +561,68 @@ def test_the_objectives_are_offered_with_prose():
     assert set(OBJECTIVES) == {"dataset_error", "conditions", "both"}
 
 
+
+
+# --------------------------------------------------------------------------
+# The composition root's own catalogues, rendered
+# --------------------------------------------------------------------------
+def test_the_layout_builds_from_exactly_what_the_composition_root_hands_over(
+    store_with_run, capabilities
+):
+    """The shapes `serve_human_session` really passes, not test-shaped ones.
+
+    This is the gap that let a live `--human` session die at `build_layout`
+    while every session test passed: the tests all built sessions whose
+    `objectives` were the empty default, so the one shape the composition
+    root actually uses -- `{name: "a sentence"}`, prose as the label -- was
+    never rendered. Anything a panel lays out from is data, which means the
+    real data has to be laid out at least once.
+    """
+    path = store_with_run[0]
+    session = Session(
+        submit=lambda theta: theta,
+        coefficients=coefficients(),
+        objectives=OBJECTIVES,
+        palette=capabilities["palette"],
+        canonicalize=capabilities["canonicalize"],
+        term=capabilities["term"],
+        check=capabilities["check"],
+        propose=lambda document, objective: "handed over",
+    )
+    ids = set()
+    stack = [build_layout(path, session)]
+    while stack:
+        node = stack.pop()
+        if isinstance(getattr(node, "id", None), str):
+            ids.add(node.id)
+        children = getattr(node, "children", None)
+        if isinstance(children, (list, tuple)):
+            stack.extend(children)
+        elif children is not None:
+            stack.append(children)
+    assert {"editor-objective", "editor-palette", "editor-add"} <= ids
+
+
+def test_a_dropdown_catalogue_renders_in_all_three_shapes():
+    """dict-of-dicts (the palette), dict-of-prose (the objectives), a list."""
+    from xcsearch.viz.app import _dropdown_options
+
+    assert _dropdown_options({"a": {"label": "A term"}}) == [
+        {"label": "A term", "value": "a"}
+    ]
+    assert _dropdown_options({"a": "fit the dataset"}) == [
+        {"label": "fit the dataset", "value": "a"}
+    ]
+    assert _dropdown_options(["a", "b"]) == [
+        {"label": "a", "value": "a"}, {"label": "b", "value": "b"}
+    ]
+    assert _dropdown_options(None) == [] and _dropdown_options({}) == []
+
+
+def test_the_objective_dropdown_defaults_to_the_delegate_paths_own_fallback():
+    """One choice, one default. Alphabetising the objectives gave the dropdown
+    `both` while `delegate` falls back to `dataset_error` for an unset one."""
+    from xcsearch.viz.app import _dropdown_options
+
+    assert _dropdown_options(OBJECTIVES)[0]["value"] == "dataset_error"
+    assert list(OBJECTIVES)[0] == "dataset_error"

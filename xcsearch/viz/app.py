@@ -489,6 +489,35 @@ def propose_box(session) -> html.Div:
     return _subbox("propose", *children)
 
 
+def _dropdown_options(catalogue) -> list[dict]:
+    """A session catalogue as Dash dropdown options, whatever shape it is in.
+
+    Three shapes reach here and all three are reasonable things for a
+    composition root to hand over: ``{name: {"label": ...}}`` (the palette),
+    ``{name: "a sentence"}`` (the objectives -- the prose *is* the label),
+    and a bare list of names. Written once because the alternative was
+    written twice and only one of them handled a string, which is how a live
+    `--human` session died at `build_layout` while every test passed: the
+    tests built sessions whose objectives were the empty default.
+
+    **Declaration order, not alphabetical.** The composition root writes
+    these catalogues in a deliberate order and the first entry becomes the
+    dropdown's initial value, so sorting them silently chose the default.
+    It had already gone wrong once: alphabetising the objectives selected
+    `both`, while the delegate path's own fallback for an unset objective is
+    `dataset_error` -- two defaults for one choice, disagreeing.
+    """
+    if not catalogue:
+        return []
+    if not isinstance(catalogue, dict):
+        return [{"label": str(name), "value": name} for name in catalogue]
+    options = []
+    for name, entry in catalogue.items():
+        label = entry.get("label", name) if isinstance(entry, dict) else entry
+        options.append({"label": str(label), "value": name})
+    return options
+
+
 def editor_box(session) -> html.Div:
     """The structural editor: a palette and a list, never a formula parser (D35).
 
@@ -511,14 +540,8 @@ def editor_box(session) -> html.Div:
       the amended D13 by construction rather than by care.
     """
     can_edit = session.can("edit")
-    palette = [{"label": entry.get("label", name), "value": name}
-               for name, entry in sorted(session.palette.items())]
-    objectives = [{"label": entry.get("label", name), "value": name}
-                  for name, entry in sorted(
-                      (session.objectives or {}).items()
-                      if isinstance(session.objectives, dict)
-                      else ((o, {"label": o}) for o in (session.objectives or []))
-                  )]
+    palette = _dropdown_options(session.palette)
+    objectives = _dropdown_options(session.objectives)
     children = [
         dcc.Store(id="editor-document"),
         html.Div("build a form", style={"fontSize": "11px", "color": "#7a828c",
