@@ -46,6 +46,14 @@ def _form():
     return FORM
 
 
+@pytest.fixture(scope="module")
+def systems(tmp_path_factory):
+    """The synthetic fixture cache, for anything that needs rung 1 beside 0."""
+    path = str(tmp_path_factory.mktemp("conditions"))
+    fx.build_dataset(path)
+    return load_frozen(path)
+
+
 def _lda():
     return FORM.build(LDA_THETA)
 
@@ -253,7 +261,7 @@ def test_the_policy_ignores_rung_zero_records():
         MeanSquaredError().score(conditions)
 
 
-def test_rung_zero_costs_milliseconds():
+def test_rung_zero_costs_milliseconds(systems):
     """The cost claim is part of the design: rung 0 runs before rung 1 because
     it is cheap. If it stops being cheap, the ordering stops being obviously
     right -- so the number is measured rather than assumed, and moved
@@ -268,23 +276,38 @@ def test_rung_zero_costs_milliseconds():
     per-term cache hits, dominated by JAX dispatch on very small probe arrays
     rather than by arithmetic.
 
-    The ordering claim survives, and that is what this really guards: rung 1
-    over the 63-system cache is ~0.6 s, so rung 0 is under a fifth of it and
-    still needs no system at all. The threshold is set just above the
-    measurement, not at a comfortable multiple of it -- if this doubles
-    again, the ordering deserves re-examining and this should say so.
+    The ordering claim survives, and that is what this guards -- so it is
+    asserted as a **ratio against rung 1 on the same machine**, not as a
+    wall-clock number. An absolute threshold is a promise about the hardware
+    and the load: this exact assertion failed at 316 ms under an eight-way
+    parallel test run and passed at 136 ms alone, which measured the runner
+    rather than the design. The ratio measures the design.
     """
     import time
 
     evaluator = ConditionsEvaluator(default_conditions())
+    rung_one = FrozenDensityEvaluator(systems)
     form = _form()
-    evaluator.evaluate(form.build(LDA_THETA))  # warm the jit caches
 
-    start = time.perf_counter()
-    for index in range(5):
-        evaluator.evaluate(form.build(LDA_THETA + 0.001 * index))
-    per_call = (time.perf_counter() - start) / 5
-    assert per_call < 0.25, f"rung 0 took {per_call * 1e3:.1f} ms per candidate"
+    def timed(target, repeats=5):
+        target.evaluate(form.build(LDA_THETA))  # warm the jit caches
+        start = time.perf_counter()
+        for index in range(repeats):
+            target.evaluate(form.build(LDA_THETA + 0.001 * index))
+        return (time.perf_counter() - start) / repeats
+
+    rung_zero_cost = timed(evaluator)
+    rung_one_cost = timed(rung_one)
+
+    # Rung 1 here is over the fixture's 9 systems; production is 63. So rung 0
+    # costing less than three of these sweeps is rung 0 costing well under
+    # half a production sweep -- which is what "cheap enough to run first"
+    # has to mean, and it is measured against whatever machine is running.
+    assert rung_zero_cost < 3.0 * rung_one_cost, (
+        f"rung 0 took {rung_zero_cost * 1e3:.1f} ms against a "
+        f"{len(systems)}-system rung-1 sweep at {rung_one_cost * 1e3:.1f} ms: "
+        "rung 0 is no longer obviously the cheaper thing to do first"
+    )
 
 
 def test_the_conditions_evaluator_and_the_frozen_one_compose(tmp_path):

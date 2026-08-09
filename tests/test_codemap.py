@@ -57,6 +57,13 @@ def test_every_module_has_an_explicit_layer(graph):
     assert codemap.unassigned_modules(graph) == []
 
 
+def test_the_optimizer_helper_is_where_the_optimizer_is_named(graph):
+    """One construction site, two callers -- see `coefficient_optimizer`."""
+    assert "optuna_tpe.OptunaTPE" in _targets(
+        graph, "run_stage2.coefficient_optimizer", {"direct"}
+    )
+
+
 def test_the_composition_root_constructs_the_whole_stack(graph):
     """run_stage2 is the only composition point, so the map should show the
     entire assembled system hanging off one function."""
@@ -68,7 +75,10 @@ def test_the_composition_root_constructs_the_whole_stack(graph):
         # longer part of the assembled stack.
         "library.stage2_local_ansatz",
         "composed.DocumentForm",
-        "optuna_tpe.OptunaTPE",
+        # The coefficient optimizer is constructed in one helper now (3.5):
+        # the opening composition and the delegate path both go through it,
+        # which is what keeps "swapping it is one line" true.
+        "run_stage2.coefficient_optimizer",
         "composed.FixedFormOptimizer",
         "evaluators.FrozenDensityEvaluator",
         "ranking.MeanSquaredError",
