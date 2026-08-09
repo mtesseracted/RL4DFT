@@ -55,14 +55,29 @@ product upward, laid out in `PLAN.md`. Standing design decisions so far:
 
 ## Status
 
-Stage 1 (the 1D MVP) is implemented. Stage 2 — the ports-and-adapters
-refactor, and the first working version of each of PLAN.md's features — is in
-progress; see `PLAN.md` for the staged plan, `STAGE1.md` for the MVP's design
-decisions (D1–D8) and `STAGE2.md` for Stage 2's (D9–D16).
+Stages 1, 2 and 3 are implemented. See `PLAN.md` for the staged plan,
+`STAGE1.md` for the MVP's decisions (D1–D8), `STAGE2.md`/`STAGE2B.md` for
+Stage 2's (D9–D20) and `STAGE3.md` for Stage 3's (D21–D40), each with its
+measured implementation notes.
 
 Stage 1's entry point (`run_stage1.py`) and its search/evaluate modules were
 retired in sub-stage 2.1d, once the D15 equivalence gate proved the refactored
 pipeline reproduces their numbers bitwise. `run_stage2.py` replaces them.
+
+**What Stage 3 changed, in one paragraph.** A candidate is no longer a vector
+plus a hard-coded form: it is a **document** — a canonical typed expression
+DAG whose powers are exact rationals and whose coefficients are slots
+(`xcsearch/forms/`). The document has one identity, everything
+identity-shaped derives from it, and the store keeps it in an append-only
+`forms` room so `build(document, θ)` reconstructs exactly what was measured.
+Forms declare what they read by *being written over it*; worlds declare what
+they can supply and at what cost; the two compose or refuse with a named
+reason through one function, which is also the editor's check button.
+Evaluation is JAX-compiled and `v_xc` is one reverse-mode pass, so a new
+ingredient is differentiable the moment its forward pass is written. The
+dashboard collapsed to one layout with capability as injected data, and grew
+a structural editor that can hand a whole form to the optimizer. A run now
+prescribes what it optimizes over and what it evaluates over, separately.
 
 # Stage 1 — the 1D MVP
 
@@ -243,6 +258,16 @@ fails if it ever reaches `solver` or `dataset` — that is the "structurally
 forbidden from importing `solver.py`" claim above, checked rather than
 asserted in prose. The same file fails if a new module is added without being
 placed in a layer, so it cannot quietly inherit someone else's colour.
+
+`tests/test_import_audit.py` is the sharper version of the same idea: it
+transcribes the ownership table and fails the build on any import a module
+was not granted. Three of its rows carry most of Stage 3's design —
+`document` may import *nothing at all* (the module that decides a form's
+identity should not be able to compute a physical number by accident),
+`compile` is the only module in the package that may import JAX, and the four
+`viz/` rows still grant no `forms/`, no world and no physics, which is why
+the structural editor reaches its representation through session-injected
+callables rather than through an import.
 
 # References
 

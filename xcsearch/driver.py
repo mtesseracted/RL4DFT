@@ -109,3 +109,48 @@ class SearchDriver:
             n_trials=self.n_trials,
             duplicate_hits=self.duplicate_hits,
         )
+
+
+def escalate(
+    store, run_id: int, protocol_id: int, evaluators, build, top_k: int = 5,
+) -> list[int]:
+    """Re-score the current top-k under a higher-rung protocol row (D38).
+
+    **Post-hoc, never in-loop.** The whole point of a rung ladder is that the
+    expensive measurement is spent on the few candidates that earned it, and a
+    driver that escalated inside ``step`` would be paying for it on all of
+    them. So this is a separate call the composition root makes after a run --
+    or periodically during one -- and the loop above does not know it exists.
+
+    What it writes is rows, not a score. ``candidates.score`` stays the number
+    the optimizer was told (D20); the escalated ranking is computed from the
+    mixed-rung records by a policy at read time, which is what stops "the"
+    score from becoming a question with two answers.
+
+    ``build(candidate_id) -> Functional`` reconstructs the candidate from its
+    *stored document* -- trustworthy since D25 -- so escalation never needs the
+    original objects to still be in memory, and can run against a store from
+    last week.
+
+    Returns the candidate ids that were escalated. The count is deliberately
+    small and deliberately *stated*: a silent cap reads as "covered
+    everything" when it did not.
+    """
+    rows = store.connection.execute(
+        """
+        SELECT id FROM candidates
+         WHERE run_id = ? AND score IS NOT NULL
+         ORDER BY score ASC, id ASC
+         LIMIT ?
+        """,
+        (run_id, int(top_k)),
+    ).fetchall()
+
+    escalated = []
+    for row in rows:
+        candidate_id = int(row["id"])
+        functional = build(candidate_id)
+        records = [r for ev in evaluators for r in ev.evaluate(functional)]
+        store.add_records(candidate_id, records, protocol_id=protocol_id)
+        escalated.append(candidate_id)
+    return escalated

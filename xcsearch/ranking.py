@@ -122,3 +122,41 @@ class WeightedSum(RankingPolicy):
         return float(sum(
             weight * policy.score(records) for policy, weight in self.policies
         ))
+
+
+class HighestRungAvailable(RankingPolicy):
+    """Rank on the best measurement each system has, not on a fixed rung (D38).
+
+    What a mixed-rung store makes possible, and what escalation is *for*: a
+    candidate that has been re-scored at rung 3 is ranked on that, and one
+    that has not is ranked on its rung-1 rows. Comparing the two is a real
+    question rather than a category error, because both metrics are squared
+    errors in the same energy against the same reference -- which is why the
+    metric pair is a constructor argument and not a guess.
+
+    The consequence is deliberate and worth stating: escalation *can* reorder
+    the top-k, and that is the entire point of spending the higher rung on
+    them. What it cannot do is silently rewrite what the optimizer was told --
+    ``candidates.score`` is untouched (D20), and this is computed from records
+    at read time.
+    """
+
+    def __init__(self, rungs=((3, "scf_e_sq_error"), (1, EXC_SQ_ERROR))) -> None:
+        self.rungs = tuple(rungs)
+
+    def score(self, records: list[EvaluationRecord]) -> float:
+        by_system: dict = {}
+        for rung, metric in self.rungs:
+            for record in records:
+                if record.rung != rung or record.metric != metric:
+                    continue
+                if not optimizes(record):
+                    continue
+                by_system.setdefault(record.system, record.value)
+        if not by_system:
+            raise ValueError(
+                "no rows this policy knows how to rank on: it reads "
+                f"{list(self.rungs)} and the candidate has neither. A stack "
+                "that measures something else needs a policy that reads it."
+            )
+        return float(np.mean(np.array(sorted(by_system.values()))))

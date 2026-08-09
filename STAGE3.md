@@ -985,6 +985,23 @@ policies in core. No new imports for `viz/` or `store.py`.
   consistency at coefficient 0.05 and exactly 0 at 0, while its equilibrium
   rung-1 metrics stay in the same league as the honest form's — which is the
   whole argument for having the condition.
+- *The Lieb–Oxford bounds landed (sequenced last, as D30 required), and
+  LO-b needed the same lesson twice.* Both conditions ship: LO-a
+  (`E_xc ≥ −(A/2)N`, exact constant, no tolerance subtleties) and LO-b
+  (`E_xc ≥ −U_H[n]`). LO-b uses **Young's cheaper form
+  `−(A/κ)∫n²`**, and that is not a shortcut — on a uniform probe,
+  `e_hartree` over a finite segment misses the tails the homogeneous gas
+  has, so the bound comes out too weak and **LDA violates it by 0.07 per
+  particle**: a finite-vs-infinite comparison reported as physics. Exactly
+  the trap the uniform-gas condition avoids with its interaction override,
+  and it caught this one too. Measured after the fix: LDA satisfies both
+  bounds *exactly*, and LO-b does so even with its documented tolerance set
+  to zero — because the probes are floored at n = 0.05 and the Padé's own
+  violation only starts below n ≈ 0.02. The tolerance stays anyway: the two
+  guards fail differently, and the floor is the one that could silently
+  stop working. The **correlation refit is not adopted**; it mints a new
+  immutable world version and deliberately breaks the D15 bitwise gate, so
+  it stays a decision for a later stage rather than a fix slipped in here.
 - *A caching bug worth recording, because the shape of it recurs.* Probe
   inputs are candidate-independent and are cached (a sparse Laplacian per
   trial is not something rung 0 can afford), but the first cache key was the
@@ -1265,6 +1282,52 @@ dependency only — the search loop's import set is unchanged.
    the top-k candidates carry higher-rung rows, ranked by a
    mixed-rung-aware policy without re-evaluating the rest.
 
+**Implementation notes (measured at build time)**:
+
+- *The DMRG gate passes, and the number is roundoff.* Energy agreement with
+  the Lanczos solver is **1e-15**, density **1.5e-12**, on the coarse gate
+  grid — which is what it should be, because the two are the same
+  Hamiltonian in two representations and DMRG's truncation error there is
+  1e-20. The lattice model is the second-quantized transcription of
+  `solver.solve_2e_singlet`'s first-quantized one, term for term; anything
+  less would have made the two solvers incomparable and called the
+  difference physics.
+- *One off-by-one, worth recording because of how it presented.* TeNPy's
+  `add_exponentially_decaying_coupling` counts `λ^{j−i}`, not `λ^{j−i−1}`.
+  Getting it wrong weakens every pair coupling by 34% at dx = 1 and showed
+  up as **the two reference solvers disagreeing by 0.07 Hartree** — a
+  physics result, not a library convention. It is now checked directly by
+  `interaction_convention_error`, which parks two electrons on known sites
+  and reads the MPO's expectation value: a three-line check for a failure
+  mode that has no other tell.
+- *The N > 2 inversion needed acceleration to be a method at all.* The bare
+  van Leeuwen–Baerends iteration stalls at a residual of 1.4e-6 after four
+  thousand sweeps at N = 4 — not a tolerance, a failure to converge. Two
+  changes fix it: the update goes logarithmic (the density spans twenty
+  decades, and the additive form is stiff in the tail), and DIIS runs over
+  the corrections. Measured after: **N = 4 in 91 iterations, N = 6 in 70**,
+  both under 1e-8, in under a second.
+- *The two extraction strategies coincide at N = 2, and the number says
+  where the residue comes from.* `v_xc` agrees to **3.2e-14** — inside the
+  spec's `rtol=1e-12` with three decades to spare — while `T_s` and
+  `E_xc` agree to **1.9e-12** against a tolerance of 1.7e-12. The extra is
+  not a difference between the decompositions: it is the certified
+  inversion's own 1.2e-12 density residual propagating into a `T_s` taken
+  from eigenvectors rather than from the density directly. Stated rather
+  than rounded away.
+- *A gradient bug the ownership rule caught.* Differentiating the whole
+  environment pytree meant differentiating an operator's integer index
+  arrays, which JAX refuses — correctly, and the refusal is the right one:
+  a CSR row index is not a direction in `dE/dn`. The density is now a
+  separate traced argument.
+- *Not delivered here, and named:* the dataset *builder* still enumerates
+  the Stage 2 two-electron family. Everything an N > 2 build needs exists
+  and is tested — the DMRG adapter, the extraction strategies, the spin
+  treatments, the selector attributes on `SystemRecord` — but wiring a new
+  system family into `build_dataset` (and paying for the reference solves)
+  is a dataset decision rather than machinery, and it is left for the
+  study that wants those systems to make.
+
 ### 3.7 — Prescribable populations
 
 The systems a run optimizes over and the systems it evaluates over
@@ -1387,6 +1450,35 @@ button's selection input.
 - *Resolution keeps dataset order.* A prescription decides *which* systems,
   never in what order they are summed — the record order fixes the
   summation order of every mean, and D15 is a bitwise gate.
+
+## Module layout and ownership — Stage 3's rows
+
+`STAGE2B.md`'s table stands; these are the rows Stage 3 adds and the two it
+changes. The authoritative copy is `tests/test_import_audit.py`, which fails
+the build on any import a module was not granted — the table below is the
+prose, and the test is the rule.
+
+| module | owns | may import |
+|---|---|---|
+| `forms/document.py` | the form document: node types, canonicalization, serialization, hashing, latex, the ingredient and primitive vocabularies | **nothing** (stdlib `fractions`, `json`, `hashlib`) |
+| `forms/compile.py` | the JAX evaluation path: per-term compilation, `v_xc` by reverse mode, every operator kind's jnp body | document, jax, numpy |
+| `forms/checker.py` | `check(document, supplied, probe)` — six checks, findings with remedies, the composition-time refusal | document |
+| `forms/library.py` | seeded documents, the standard-variable fragments, the editor palette | document |
+| `populations.py` | prescriptions: explicit lists, selectors, roles, resolution | **nothing** |
+| `scf_service.py` | the candidate-SCF service (both faces) and the rung-3 evaluator | ports, records, ks, queue, threading, numpy |
+| `viz/session.py` | the session: what the dashboard may do, as data | **nothing** |
+| `worlds/exp1d/extraction.py` | N-electron extraction: the two kinetic strategies, spin treatments | ks, world, forms, records, numpy |
+| `worlds/exp1d/dmrg.py` | the DMRG reference adapter and its gate (build-time only) | world, solver, tenpy, numpy |
+| `optimizers/composed.py` | *changed*: gains `DocumentForm`/`DocumentFunctional` — the composition layer is where the representation and the ports meet | ports, records, **forms**, numpy |
+| `worlds/exp1d/world.py` | *changed*: gains the supply table and the brute-force interaction reference | numpy, scipy.sparse |
+
+Three rows carry most of the design. `document.py` may import *nothing at
+all*: the module that decides a form's identity should not be able to compute
+a physical number by accident. `compile.py` is the only module in the package
+that may import JAX. And the four `viz/` rows still grant no `forms/`, no
+world and no physics — which is why the structural editor reaches its
+representation through session-injected callables, and why
+`tests/test_import_audit.py` is unchanged by the editor existing.
 
 ## The fence — maps of the deferred orbital cluster
 

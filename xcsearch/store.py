@@ -68,7 +68,7 @@ LDA_LABEL = "LDA"
 # Bumped whenever a stored row's *meaning* changes shape. Version 3 is D25's:
 # the `forms` room and the candidate foreign key. There is no in-place
 # migration at any version, by rule -- see `_refuse_legacy_schema`.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -183,12 +183,24 @@ CREATE TABLE IF NOT EXISTS candidates (
     created_at    TEXT NOT NULL
 );
 
+-- `protocol_id` (3.6, D38) is what makes "multiple protocol rows per run"
+-- mechanical. **NULL means "the protocol of the candidate's run"** -- which
+-- is every existing row's meaning, unchanged, with run-less baseline rows
+-- staying unprotocol'd as they always were. Escalation rows carry theirs
+-- explicitly, so a candidate can hold rung-1 rows from its run's protocol and
+-- rung-2 rows from a higher one, and every reduction that has to know reads
+-- through COALESCE(e.protocol_id, run.protocol_id).
+--
+-- What is *not* here: a second score column. `candidates.score` stays the
+-- told score, written once (D20); the escalated ranking is computed from
+-- mixed-rung records by the policy at read time.
 CREATE TABLE IF NOT EXISTS evaluations (
     candidate_id INTEGER NOT NULL REFERENCES candidates(id),
     system_id    INTEGER REFERENCES systems(id),
     rung         INTEGER NOT NULL,
     metric       TEXT NOT NULL,
-    value        REAL NOT NULL
+    value        REAL NOT NULL,
+    protocol_id  INTEGER REFERENCES protocols(id)
 );
 
 CREATE TABLE IF NOT EXISTS duplicate_buckets (
@@ -365,6 +377,18 @@ _LEGACY_SCHEMA_MESSAGE = (
 # opposed to which form name it went by -- is not recoverable from the rows,
 # so inventing one would be guessing at exactly the thing the forms room
 # exists to stop guessing at.
+_PRE_PROTOCOL_ROWS_MESSAGE = (
+    "this store predates Stage 3.6: its `evaluations` rows cannot name a "
+    "protocol of their own, so a candidate holding rung-1 rows from its run "
+    "and rung-2 rows from an escalation could not be told apart from one "
+    "measured entirely under a single protocol. There is no in-place "
+    "migration -- every old row *is* its run's protocol, which is exactly "
+    "what NULL now means, but adding the column to an existing file would "
+    "leave the schema version lying about what else changed with it. "
+    "Regenerate via the D15 fixture-regeneration protocol, or move the file "
+    "aside."
+)
+
 _PRE_ROLES_SCHEMA_MESSAGE = (
     "this store predates Stage 3.7: its `population_systems` rows carry no "
     "`role`, so they cannot say which systems a run optimized over as opposed "
@@ -455,6 +479,12 @@ class SQLiteRecordStore(RecordStore):
         ).fetchone()
         if row is not None and "role" not in (row["sql"] or ""):
             raise ValueError(_PRE_ROLES_SCHEMA_MESSAGE)
+        row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'evaluations'"
+        ).fetchone()
+        if row is not None and "protocol_id" not in (row["sql"] or ""):
+            raise ValueError(_PRE_PROTOCOL_ROWS_MESSAGE)
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:
@@ -884,8 +914,9 @@ class SQLiteRecordStore(RecordStore):
             record.candidate_id = candidate_id
         self.connection.executemany(
             """
-            INSERT INTO evaluations (candidate_id, system_id, rung, metric, value)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO evaluations
+                (candidate_id, system_id, rung, metric, value, protocol_id)
+            VALUES (?, ?, ?, ?, ?, NULL)
             """,
             # The system *name* is resolved to a version id within this
             # candidate's population (D17, D19): a row records which system
@@ -906,6 +937,81 @@ class SQLiteRecordStore(RecordStore):
         )
         self.connection.commit()
         return candidate_id
+
+    def add_records(
+        self, candidate_id: int, records: list[EvaluationRecord],
+        protocol_id: int,
+    ) -> int:
+        """Append rows to an existing candidate under their own protocol (D38).
+
+        The one write beside ``add``, and deliberately narrow: append-only,
+        one transaction, and **it never touches the candidate row**.
+        ``candidates.score`` stays the number the optimizer was told (D20) --
+        an escalated ranking is computed from mixed-rung records by the policy
+        at read time, not stored as a second score that would then need a rule
+        about which one "the" score is.
+
+        ``protocol_id`` is mandatory here, unlike on ``add``: a row appended
+        outside its candidate's run has no run protocol to inherit, so leaving
+        it NULL would silently claim it was measured the way the run was.
+        """
+        if protocol_id is None:
+            raise ValueError(
+                "add_records needs a protocol: a row appended after the fact "
+                "has no run protocol to inherit, and NULL means exactly that "
+                "inheritance. Register the higher-rung protocol first."
+            )
+        population_id = self.candidate_population(candidate_id)
+        rows = [
+            (
+                candidate_id,
+                self._system_id(r.system, population_id)
+                if r.system is not None else None,
+                int(r.rung), r.metric, float(r.value), int(protocol_id),
+            )
+            for r in records
+        ]
+        with self.connection:
+            self.connection.executemany(
+                """
+                INSERT INTO evaluations
+                    (candidate_id, system_id, rung, metric, value, protocol_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        for record in records:
+            record.candidate_id = candidate_id
+        return len(rows)
+
+    def records_by_protocol(self, candidate_id: int) -> dict:
+        """``{protocol id: [(rung, metric, system name), ...]}`` for one candidate.
+
+        Reads through ``COALESCE(e.protocol_id, run.protocol_id)``, which is
+        what NULL means. This is what per-protocol row-set identity is checked
+        with: two candidates measured under the same protocol with the same
+        requirement tags must have identical (system, metric) row-sets, and a
+        mixed-rung store makes that a per-protocol question rather than a
+        per-candidate one.
+        """
+        rows = self.connection.execute(
+            """
+            SELECT COALESCE(e.protocol_id, r.protocol_id) AS protocol,
+                   e.rung AS rung, e.metric AS metric, s.name AS system
+              FROM evaluations e
+              JOIN candidates c ON c.id = e.candidate_id
+              LEFT JOIN runs r ON r.id = c.run_id
+              LEFT JOIN systems s ON s.id = e.system_id
+             WHERE e.candidate_id = ?
+            """,
+            (candidate_id,),
+        )
+        out: dict = {}
+        for row in rows:
+            out.setdefault(row["protocol"], []).append(
+                (row["rung"], row["metric"], row["system"])
+            )
+        return {key: sorted(value) for key, value in out.items()}
 
     def delete_run(self, run_id: int) -> int:
         """Delete a run and everything that belongs to it. Returns candidates removed.
@@ -1056,7 +1162,8 @@ class SQLiteRecordStore(RecordStore):
         rows = self.connection.execute(
             """
             SELECT e.candidate_id, s.name AS system, e.rung, e.metric, e.value,
-                   ps.regime AS regime, ps.split AS split, ps.role AS role
+                   ps.regime AS regime, ps.split AS split, ps.role AS role,
+                   e.protocol_id AS protocol_id
               FROM evaluations e
               JOIN candidates c ON c.id = e.candidate_id
               LEFT JOIN systems s ON s.id = e.system_id

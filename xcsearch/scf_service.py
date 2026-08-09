@@ -356,3 +356,75 @@ class CandidateSCF:
             with self._lock:
                 self.results[key] = result
                 self._pending.discard(key)
+
+
+# Metric names for the rung-3 rows. Part of the record contract, like the
+# rung-1 ones: policies and queries match on these strings.
+SCF_E_SQ_ERROR = "scf_e_sq_error"
+SCF_DN = "scf_dn"
+SCF_RESIDUAL = "scf_residual"
+
+
+class SelfConsistentEvaluator:
+    """Rung 3: what a candidate does when you actually solve with it (D38).
+
+    The **recorded** face of the service. A1's evaluation cube, one corner
+    further out than rung 1: the density is no longer the reference's, it is
+    whatever this functional produces, and the question is how far that is
+    from the truth. A functional can reproduce E_xc beautifully on the exact
+    density and still relax to somewhere else; ``one_step_dn`` sees the first
+    step of that, and this sees the end of it.
+
+    Spot-checks, not a sweep. A whole-population rung-3 pass was measured at
+    ~363x the per-trial cost with endemic non-convergence on stretched
+    geometries, so this is composed over a *prescribed* population (3.7) and
+    driven by escalation over the top-k, never inside the loop.
+
+    **Non-convergence is a row, not an exception.** ``scf_residual`` is
+    recorded for every system whether the solve settled or not, because on
+    these near-degenerate geometries the fact that it did not settle is
+    signal: a chain of well-separated identical wells sharing two electrons
+    has a manifold of KS solutions and the density genuinely slides between
+    them.
+    """
+
+    def __init__(self, systems, hartree, populate=None) -> None:
+        if not systems:
+            raise ValueError("SelfConsistentEvaluator needs at least one system")
+        self.systems = list(systems)
+        self.hartree = hartree
+        self.populate = populate
+        self.roles = {}
+
+    def describe(self) -> dict:
+        return {
+            "evaluator": type(self).__name__,
+            "rung": 3,
+            "metrics": [SCF_E_SQ_ERROR, SCF_DN, SCF_RESIDUAL],
+            "n_systems": len(self.systems),
+        }
+
+    def evaluate(self, functional) -> list:
+        from .records import EvaluationRecord
+
+        records = []
+        for system in self.systems:
+            result = solve_candidate_robust(
+                system, functional, self.hartree, self.populate
+            )
+            difference = result.n - system.n_ref
+
+            def row(metric, value, system=system):
+                return EvaluationRecord(
+                    candidate_id=None, system=system.name, rung=3, metric=metric,
+                    value=float(value), regime=system.regime, split=system.split,
+                    role=self.roles.get(system.name),
+                )
+
+            records.append(row(SCF_E_SQ_ERROR,
+                               (result.e_total - system.e_exact) ** 2))
+            records.append(row(SCF_DN, np.sqrt(
+                np.sum(system.w * difference * difference)
+            )))
+            records.append(row(SCF_RESIDUAL, result.residual))
+        return records

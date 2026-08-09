@@ -115,11 +115,10 @@ REJECTED_CONDITIONS: dict[str, str] = {
     ),
     "lieb_oxford_3d": (
         "Rejected as a 3D *import*: the Lieb-Oxford constant is "
-        "Coulomb-specific. The bound has since been derived for this world "
-        "(notes/lieb-oxford-exp1d.md) with both optimal constants exact, and "
-        "those two conditions are sequenced last in the stage because adopting "
-        "the correlation refit they imply mints a new world version and "
-        "deliberately breaks the D15 bitwise gate."
+        "Coulomb-specific, derived from 1/r being homogeneous of degree -1. "
+        "What replaced it is not an import but a derivation for this world "
+        "(notes/lieb-oxford-exp1d.md), with both optimal constants exact -- "
+        "see LiebOxfordHighDensity and LiebOxfordLowDensity in the kept list."
     ),
     "pplb_derivative_discontinuity": (
         "Needs fractional-N machinery: an ensemble over N and N+1 electrons, "
@@ -486,6 +485,122 @@ class SizeConsistency(Condition):
         return float(abs(together - (left + right)) / scale)
 
 
+class LiebOxfordHighDensity(Condition):
+    """``E_xc[n] >= -(A/2) N`` -- the exact high-density bound (D30, LO-a).
+
+    Derived for this world rather than imported from 3D
+    (``notes/lieb-oxford-exp1d.md``, section 2a): the Onsager argument with no
+    smearing, because ``e^{-kappa|u|}`` is bounded at the origin and needs
+    none. The constant is *optimal* and exact -- there is no analogue of the
+    3D bound's still-open constant here.
+
+    What it catches: any member whose power-law tail drives ``eps_xc`` below
+    ``-A/2`` at high density, which every sufficiently negative power
+    coefficient eventually does. No tolerance subtleties -- the bound is
+    exact, so the violation is the amount by which it is broken.
+    """
+
+    name = "lieb_oxford_high_density"
+
+    def __init__(self, probes=None) -> None:
+        self._probes = _namespace(self)
+        probes = probe_densities() if probes is None else probes
+        self.probes = tuple(
+            (np.asarray(n, float), np.asarray(w, float)) for n, w in probes
+        )
+
+    def violation(self, functional: Functional) -> float:
+        required = set(functional.requires())
+        worst = 0.0
+        for index, (n, w) in enumerate(self.probes):
+            grid_x = np.arange(n.size, dtype=float) * float(w[0])
+            x = probe_input(grid_x, w, n, ((1.0, 0.0),), required,
+                            key=f"{self._probes}:{index}")
+            electrons = float(np.sum(w * n))
+            bound = -0.5 * A_INT * electrons
+            # Per particle, so probes of different N are comparable.
+            worst = max(worst, (bound - functional.exc(x)) / electrons)
+        return float(max(0.0, worst))
+
+
+class LiebOxfordLowDensity(Condition):
+    """``E_xc[n] >= -U_H[n]`` -- the exact low-density bound (D30, LO-b).
+
+    Also derived here (section 2b): ``I_xc >= -U_H`` follows because the
+    interaction is positive-definite, and Young's inequality turns it into the
+    cheaper ``-(A/kappa) int n^2``. **The cheaper form is the one used**, and
+    that is not a shortcut -- it is the only consistent choice on a uniform
+    probe. ``e_hartree`` over a finite segment misses the tails the
+    homogeneous gas has, so it comes out smaller in magnitude than the true
+    ``U_H`` of the gas the LDA value describes, and the bound would then be
+    violated by 0.07 per particle *by LDA itself*: a comparison between a
+    finite segment and an infinite one, reported as a physics violation. Same
+    trap the uniform-gas condition avoids with its interaction override, and
+    it caught this one too.
+
+    **The caveat, recorded because it is load-bearing.** This world's *fixed*
+    Pade correlation violates the bound itself, by up to 1.1e-4 per particle
+    below ``n ~ 0.02`` -- the Wigner-crystal ``sqrt(y)`` term is structure a
+    liquid does not have. So a candidate containing that correlation inherits
+    the violation, and the condition would flag the LDA member for a defect
+    that is not the candidate's. Two ways out were available: a tolerance of
+    2e-4 per particle, or probe densities kept above ``n ~ 0.05``. **Both are
+    applied**, because they fail differently: the density floor keeps the
+    probes where the parametrization is trustworthy, and the tolerance covers
+    what is left. The third way out -- refitting correlation with beta = 0
+    (``notes/lieb_oxford_refit.py``) -- mints a new immutable world version
+    and deliberately breaks the D15 bitwise gate, so it is a decision for a
+    later stage rather than a fix to slip in here.
+    """
+
+    name = "lieb_oxford_low_density"
+
+    # Per-particle slack for the fixed correlation's own violation. Measured,
+    # not chosen: 1.1e-4 per particle is the worst the Pade does, and this is
+    # twice that.
+    TOLERANCE: float = 2e-4
+    # Probe densities below this are where the parametrization stops being
+    # trustworthy for this bound. See the derivation note, section 4.
+    DENSITY_FLOOR: float = 0.05
+
+    def __init__(self, probes=None, tolerance: float | None = None) -> None:
+        self._probes = _namespace(self)
+        self.tolerance = self.TOLERANCE if tolerance is None else float(tolerance)
+        probes = probe_densities() if probes is None else probes
+        self.probes = tuple(
+            (np.asarray(n, float), np.asarray(w, float)) for n, w in probes
+        )
+
+    def violation(self, functional: Functional) -> float:
+        required = set(functional.requires())
+        worst = 0.0
+        for index, (n, w) in enumerate(self.probes):
+            grid_x = np.arange(n.size, dtype=float) * float(w[0])
+            x = probe_input(grid_x, w, n, ((1.0, 0.0),), required,
+                            key=f"{self._probes}:{index}")
+            electrons = float(np.sum(w * n))
+            bound = -(A_INT / KAPPA) * float(np.sum(w * n * n))
+            excess = (bound - functional.exc(x)) / electrons - self.tolerance
+            worst = max(worst, excess)
+        return float(max(0.0, worst))
+
+
+def high_density_probes(
+    densities=(0.5, 1.0, 2.0, 4.0), length: float = 4.0, n_points: int = 16
+):
+    """Uniform probes where LO-a binds: the bound is a high-density statement."""
+    w = np.full(n_points, length / n_points)
+    return tuple((np.full(n_points, value), w) for value in densities)
+
+
+def low_density_probes(
+    densities=(0.05, 0.1, 0.2, 0.4), length: float = 4.0, n_points: int = 16
+):
+    """Uniform probes above the floor the Pade caveat sets (see LO-b)."""
+    w = np.full(n_points, length / n_points)
+    return tuple((np.full(n_points, value), w) for value in densities)
+
+
 # --------------------------------------------------------------------------
 # The default set
 # --------------------------------------------------------------------------
@@ -499,6 +614,11 @@ def default_conditions() -> list[Condition]:
         PartNonPositivity("exchange", probes),
         PartNonPositivity("correlation", probes),
         SizeConsistency(),
+        # Sequenced last in the stage, and here last in the list for the same
+        # reason: they are the newest derivations and the ones with a recorded
+        # caveat (D30).
+        LiebOxfordHighDensity(high_density_probes()),
+        LiebOxfordLowDensity(low_density_probes()),
     ]
 
 

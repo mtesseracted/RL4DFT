@@ -358,3 +358,73 @@ def test_the_kept_conditions_are_documented_in_the_module():
     for phrase in ("interaction-agnostic", "derived for this world",
                    "uniform-gas reduction", "size consistency"):
         assert phrase in text
+
+
+# --------------------------------------------------------------------------
+# The Lieb-Oxford bounds, derived for this world (D30, sequenced last)
+# --------------------------------------------------------------------------
+def test_the_lda_member_satisfies_both_lieb_oxford_bounds():
+    """Exactly, and LO-b even with the caveat tolerance set to zero.
+
+    That is worth asserting rather than assuming: the whole reason LO-b has a
+    documented tolerance is that this world's *fixed* Pade correlation
+    violates the bound below n ~ 0.02, and the probes are floored at 0.05
+    precisely to stay out of that region. If the floor ever stopped working
+    the tolerance would hide it, so the zero-tolerance form is checked too.
+    """
+    lda = lda_functional()
+    assert C.LiebOxfordHighDensity(C.high_density_probes()).violation(lda) == 0.0
+    assert C.LiebOxfordLowDensity(C.low_density_probes()).violation(lda) == 0.0
+    strict = C.LiebOxfordLowDensity(C.low_density_probes(), tolerance=0.0)
+    assert strict.violation(lda) == 0.0
+
+
+def test_the_high_density_bound_kills_a_runaway_power_term():
+    """LO-a binds where a power-law tail drives eps_xc below -A/2."""
+    document = form(library.stage2_local_ansatz(),
+                    theta_order=library.stage2_slot_order())
+    condition = C.LiebOxfordHighDensity(C.high_density_probes())
+    assert condition.violation(document.build(LDA_THETA)) == 0.0
+    runaway = document.build(np.array([1.0, 0.0, 0.0, 0.0, -0.9]))
+    assert condition.violation(runaway) > 1.0
+
+
+def test_the_low_density_bound_kills_a_negative_square_root_term():
+    """LO-b binds at low density, where n^{1/2} dominates n."""
+    document = form(library.stage2_local_ansatz(),
+                    theta_order=library.stage2_slot_order())
+    condition = C.LiebOxfordLowDensity(C.low_density_probes())
+    assert condition.violation(document.build(LDA_THETA)) == 0.0
+    assert condition.violation(
+        document.build(np.array([1.0, -0.9, 0.0, 0.0, 0.0]))
+    ) > 0.1
+
+
+def test_the_low_density_bound_uses_the_gas_hartree_not_the_segments():
+    """The trap this condition walked into once, kept shut.
+
+    ``e_hartree`` over a finite uniform segment misses the tails the
+    homogeneous gas has, so it is smaller in magnitude than the ``U_H`` the
+    LDA value describes -- and comparing the two reports a 0.07-per-particle
+    violation *by LDA itself*, which is a finite-vs-infinite comparison
+    dressed up as physics. Young's form ``-(A/kappa) int n^2`` is the
+    consistent one on a uniform probe.
+    """
+    from xcsearch.worlds.exp1d.world import A_INT, KAPPA, e_hartree
+
+    n, w = C.low_density_probes()[-1]
+    x = np.arange(n.size, dtype=float) * float(w[0])
+    segment = e_hartree(n, x, w)
+    gas = (A_INT / KAPPA) * float(np.sum(w * n * n))
+    assert gas > segment, "the segment's Hartree energy is the smaller one"
+    # And the gap is the size of the spurious violation that was seen.
+    assert (gas - segment) / float(np.sum(w * n)) > 1e-2
+
+
+def test_both_bounds_are_in_the_kept_list_and_out_of_the_rejected_one(conditions):
+    names = {c.name for c in conditions}
+    assert {"lieb_oxford_high_density", "lieb_oxford_low_density"} <= names
+    assert "lieb_oxford" not in C.REJECTED_CONDITIONS
+    # The 3D *import* stays rejected, and its row now points at the derivation
+    # that replaced it rather than at a parking space.
+    assert "notes/lieb-oxford-exp1d.md" in C.REJECTED_CONDITIONS["lieb_oxford_3d"]

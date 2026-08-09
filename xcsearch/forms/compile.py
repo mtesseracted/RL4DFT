@@ -477,16 +477,24 @@ class CompiledForm:
 
         density = self._density_body(entry, inputs)
 
-        def energy(theta_slice, environment):
-            return jnp.sum(
-                environment["constants"]["w"] * density(theta_slice, environment)
-            )
+        def energy(theta_slice, n, environment):
+            # The density is a *separate argument*, not a leaf of the
+            # environment pytree, because the gradient is taken with respect
+            # to it and nothing else. Differentiating the whole environment
+            # would try to differentiate an operator's integer index arrays --
+            # which JAX refuses, correctly, and which is the right refusal:
+            # `dE/dn` is the functional derivative, and a CSR row index is not
+            # a direction in it.
+            local = {
+                "constants": dict(environment["constants"], n=n),
+                "operators": environment["operators"],
+            }
+            return jnp.sum(local["constants"]["w"] * density(theta_slice, local))
 
         function = jax.jit(jax.value_and_grad(energy, argnums=1))
 
         def wrapped(theta_slice, environment):
-            value, gradients = function(theta_slice, environment)
-            return value, gradients["constants"]["n"]
+            return function(theta_slice, environment["constants"]["n"], environment)
 
         entry["compiled"][signature] = wrapped
         return wrapped

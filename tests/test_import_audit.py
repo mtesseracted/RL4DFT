@@ -117,11 +117,29 @@ ALLOWED: dict[str, set[str]] = {
         "scipy.sparse",
     },
     "scf": {"world", "solver", "functionals", "dataset", "numerics", "numpy"},
+    # The DMRG reference adapter (3.6, D36). Build-time only: `tenpy` is
+    # imported *inside* the functions, so a checkout without it runs
+    # everything else, and nothing in the search loop reaches this module at
+    # all. `solver` is granted for the gate -- the two reference solvers have
+    # to be compared somewhere, and comparing them anywhere else would mean a
+    # third place that knows what "the same Hamiltonian" is.
+    "dmrg": {"world", "solver", "tenpy", "numpy"},
     "plots": {
         "world", "dataset", "functionals", "scf", "ranking", "records",
         "matplotlib", "numpy",
     },
     "conditions": {"ports", "records", "world", "functionals", "numpy"},
+    # N-electron extraction (3.6, D37). Build-time only -- nothing in the
+    # search loop imports it. `forms` is granted because the *prescribed*
+    # kinetic strategy is a form document differentiated by the same D23
+    # machinery: one representation serves XC and kinetic functionals alike,
+    # which is the decision, not a shortcut. `ks` for the one-body eigensolve,
+    # for the same reason `solver` has it -- the inversion and the loop must
+    # not solve the same problem two ways.
+    "extraction": {
+        "ks", "world", "forms", "library", "compile", "document", "records",
+        "fractions", "numpy",
+    },
     # viz: store, records, dash -- plus the two the table takes for granted.
     # numpy because the .npz pointer has to be read by something, and reading
     # an array is not physics; plotly because dash's figures are plotly's.

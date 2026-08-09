@@ -759,7 +759,7 @@ LAYERS = [
     (
         "reference",
         "Reference truth",
-        ["world", "solver", "dataset"],
+        ["world", "solver", "dataset", "extraction", "dmrg"],
         "The 1D world, exact diagonalisation, and the frozen .npz cache. "
         "Runs once, off the search budget.",
     ),
