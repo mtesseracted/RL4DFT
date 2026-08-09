@@ -19,6 +19,12 @@ The tables, and the shape of each is a decision:
   inserts a new row and leaves every earlier evaluation pointing at the system
   it was actually measured against. ``register_systems`` is
   insert-if-new-version: it cannot overwrite and it cannot fail.
+* ``forms`` -- **append-only** (D25). One row per distinct canonical form
+  document: its content hash, its json, the per-part latex rendered at
+  insertion time, and a nullable ``parent_form_id`` lineage edge. A candidate
+  points at one. This is what retires "a name is not an identity" for
+  candidates: the stored document *is* the form, so ``build(document, theta)``
+  reconstructs exactly what was measured.
 * ``protocols`` -- one row per distinct measurement configuration (D18):
   grid parameters, floors, the anchor window, the evaluator stack and its
   metric list, library versions, the git commit. Hash-keyed, written once,
@@ -59,7 +65,36 @@ from .records import EvaluationRecord, SystemRecord
 # feature-4 baseline dropdown always offers it.
 LDA_LABEL = "LDA"
 
+# Bumped whenever a stored row's *meaning* changes shape. Version 3 is D25's:
+# the `forms` room and the candidate foreign key. There is no in-place
+# migration at any version, by rule -- see `_refuse_legacy_schema`.
+SCHEMA_VERSION = 3
+
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS schema_meta (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    version INTEGER NOT NULL
+);
+
+-- The fourth append-only room (D25): one row per distinct canonical form
+-- document, keyed by its content hash. Same provenance pattern as `systems`
+-- and `protocols` -- the store receives hash, json and latex as *data* and
+-- never imports `forms/`.
+--
+-- `latex_json` is rendered by the representation at insertion time and stored
+-- here, which is what lets the viz keep reading strings from the store and
+-- importing nothing (D13 posture unchanged). `parent_form_id` is a lineage
+-- edge and nothing more: a seam for Stage 4+ evolution, deliberately not a
+-- mechanism.
+CREATE TABLE IF NOT EXISTS forms (
+    id             INTEGER PRIMARY KEY,
+    hash           TEXT NOT NULL UNIQUE,
+    json           TEXT NOT NULL,
+    latex_json     TEXT NOT NULL,
+    parent_form_id INTEGER REFERENCES forms(id),
+    created_at     TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS protocols (
     id         INTEGER PRIMARY KEY,
     hash       TEXT NOT NULL UNIQUE,
@@ -119,10 +154,17 @@ CREATE TABLE IF NOT EXISTS population_systems (
 -- column is its output, written in the same transaction as the records it
 -- was computed from. NULL only for a candidate stored without one -- a
 -- driver with no policy, a test.
+--
+-- `form_id` (D25) is the candidate's form, as a row rather than as a name.
+-- Nullable, because an adapter with no document (`LocalAnsatz`, a test's
+-- hand-written functional) is still a candidate; `fingerprint` keeps its
+-- Stage 2 role as the partition key of the near-duplicate index, which for a
+-- document-backed candidate *is* the form hash.
 CREATE TABLE IF NOT EXISTS candidates (
     id            INTEGER PRIMARY KEY,
     run_id        INTEGER REFERENCES runs(id),
     population_id INTEGER REFERENCES populations(id),
+    form_id       INTEGER REFERENCES forms(id),
     label         TEXT,
     fingerprint   TEXT NOT NULL,
     form_latex    TEXT NOT NULL,
@@ -266,6 +308,18 @@ SELECT COALESCE(ps.regime, 'conditions') AS bin,
 # table does not have.
 POPULATION_SIZE_SQL = "SELECT n_systems AS c FROM populations WHERE id = ?"
 
+# The form document behind a candidate (D25), single-homed for the same
+# reason: the dashboard reads it through its own read-only connection and must
+# not grow a second spelling of "which form was this".
+FORM_FOR_SQL = """
+SELECT f.hash AS hash, f.json AS json, f.latex_json AS latex_json,
+       p.hash AS parent_hash
+  FROM candidates c
+  JOIN forms f ON f.id = c.form_id
+  LEFT JOIN forms p ON p.id = f.parent_form_id
+ WHERE c.id = ?
+"""
+
 SHARED_SYSTEMS_SQL = """
 SELECT COUNT(*) AS c FROM (
     SELECT system_version_id FROM population_systems WHERE population_id = ?
@@ -294,6 +348,20 @@ _LEGACY_SCHEMA_MESSAGE = (
     "system each stored number was measured against -- is not recoverable "
     "from the rows. Move the file aside and start a new store; the old one "
     "stays readable with any Stage 2 checkout."
+)
+
+# What a store built before 3.2 looks like (D25). Same discipline, same
+# reason: the missing fact -- *which form document* each candidate was, as
+# opposed to which form name it went by -- is not recoverable from the rows,
+# so inventing one would be guessing at exactly the thing the forms room
+# exists to stop guessing at.
+_PRE_FORMS_SCHEMA_MESSAGE = (
+    "this store predates Stage 3.2: its `candidates` table has no `form_id`, "
+    "so its rows name a form rather than *being* one. There is no in-place "
+    "migration -- a name is not an identity, and the document behind an old "
+    "row cannot be recovered from the row. Regenerate via the D15 "
+    "fixture-regeneration protocol, or move the file aside and start a new "
+    "store; the old one stays readable with a Stage 2B checkout."
 )
 
 
@@ -330,6 +398,10 @@ class SQLiteRecordStore(RecordStore):
             self.connection.execute("PRAGMA journal_mode=WAL")
         self._refuse_legacy_schema()
         self.connection.executescript(_SCHEMA)
+        self.connection.execute(
+            "INSERT OR IGNORE INTO schema_meta (id, version) VALUES (1, ?)",
+            (SCHEMA_VERSION,),
+        )
         self.connection.commit()
         # population id -> {system name: version id}. A population is frozen,
         # so this is a cache of an immutable fact rather than a shadow copy of
@@ -352,6 +424,11 @@ class SQLiteRecordStore(RecordStore):
         ).fetchone()
         if row is not None and "content_hash" not in (row["sql"] or ""):
             raise ValueError(_LEGACY_SCHEMA_MESSAGE)
+        row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'candidates'"
+        ).fetchone()
+        if row is not None and "form_id" not in (row["sql"] or ""):
+            raise ValueError(_PRE_FORMS_SCHEMA_MESSAGE)
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:
@@ -382,6 +459,52 @@ class SQLiteRecordStore(RecordStore):
         cursor = self.connection.execute(
             "INSERT INTO protocols (hash, json, created_at) VALUES (?, ?, ?)",
             (digest, canonical_json(payload), _now()),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def register_form(self, payload: dict) -> int:
+        """Insert-if-new the canonical form document a candidate is (D25).
+
+        ``payload`` is what ``Functional.document()`` returns -- ``hash``,
+        ``json``, ``latex`` and an optional ``parent_hash`` -- as plain data.
+        Hash-keyed, so the three-thousandth candidate of one form adds no row
+        and every one of them points at the same document; immutable, so a
+        stored theta is always interpretable by the form it was proposed
+        under.
+
+        ``parent_hash`` resolves to a ``parent_form_id`` when the parent is
+        already in the store and is dropped when it is not. That is the right
+        failure for a *lineage edge*: an edge to a row that does not exist is
+        not a fact about ancestry, and refusing the child because its parent
+        was never stored would make the edge load-bearing, which it is
+        deliberately not.
+        """
+        digest = str(payload["hash"])
+        existing = self.connection.execute(
+            "SELECT id FROM forms WHERE hash = ?", (digest,)
+        ).fetchone()
+        if existing is not None:
+            return int(existing["id"])
+
+        parent_id = None
+        parent_hash = payload.get("parent_hash")
+        if parent_hash:
+            parent = self.connection.execute(
+                "SELECT id FROM forms WHERE hash = ?", (str(parent_hash),)
+            ).fetchone()
+            parent_id = None if parent is None else int(parent["id"])
+
+        cursor = self.connection.execute(
+            "INSERT INTO forms (hash, json, latex_json, parent_form_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                digest,
+                str(payload["json"]),
+                json.dumps(payload.get("latex") or {}, sort_keys=True),
+                parent_id,
+                _now(),
+            ),
         )
         self.connection.commit()
         return int(cursor.lastrowid)
@@ -701,16 +824,23 @@ class SQLiteRecordStore(RecordStore):
         form_key, vector = functional.fingerprint()
         vector = np.asarray(vector, dtype=float)
         theta_json = json.dumps([float(v) for v in vector]) if vector.size else None
+        # The form document, if the candidate has one (D25). Still derived
+        # from the port and never from an adapter attribute -- `document()` is
+        # part of the contract, and an adapter without one stores a NULL
+        # rather than being refused.
+        payload = functional.document()
+        form_id = None if payload is None else self.register_form(payload)
 
         cursor = self.connection.execute(
             """
             INSERT INTO candidates
-                (run_id, population_id, label, fingerprint, form_latex,
+                (run_id, population_id, form_id, label, fingerprint, form_latex,
                  theta_json, score, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                run_id, population_id, label, form_key, functional.to_latex(),
+                run_id, population_id, form_id, label, form_key,
+                functional.to_latex(),
                 theta_json, None if score is None else float(score), _now(),
             ),
         )
@@ -918,6 +1048,24 @@ class SQLiteRecordStore(RecordStore):
             )
             for row in rows
         ]
+
+    def form_for(self, candidate_id: int) -> dict | None:
+        """The form document a candidate was proposed under, or ``None``.
+
+        Returns the row as plain data -- hash, canonical json, per-part latex,
+        and the parent's hash if it has one. This is what makes a store-only
+        viewer able to render a candidate's coefficient bounds: they are in
+        the document, and the document is now in the store.
+        """
+        row = self.connection.execute(FORM_FOR_SQL, (candidate_id,)).fetchone()
+        if row is None:
+            return None
+        return {
+            "hash": row["hash"],
+            "json": row["json"],
+            "latex": json.loads(row["latex_json"] or "{}"),
+            "parent_hash": row["parent_hash"],
+        }
 
     def population_members(self, population_id: int) -> list[sqlite3.Row]:
         """The systems a population is made of, with their assignment (D19)."""

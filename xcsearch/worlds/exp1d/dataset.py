@@ -24,7 +24,13 @@ import scipy.sparse as sp
 from ...ports import Dataset
 from ...provenance import record_content_hash, system_content_hash
 from ...records import SystemRecord
-from .world import Grid, System, v_int, e_hartree as world_e_hartree
+from .world import (
+    N_FLOOR as _N_FLOOR,
+    Grid,
+    System,
+    e_hartree as world_e_hartree,
+    v_int,
+)
 from .solver import solve_2e_singlet
 
 # Grid resolution for the reference solves. Converged then frozen (D2).
@@ -50,8 +56,9 @@ _REPO_ROOT: str = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 
-# Density floor below which 1/n terms are treated as zero.
-_N_FLOOR = 1e-12
+# The density floor lives in `world` now (one home: the supply table declares
+# it to forms as the `n_floor` ingredient, and this module has always used the
+# same number for the same purpose).
 
 # --- KS inversion (2.4) ---------------------------------------------------
 # The inversion divides by the orbital, so it is only evaluated where the

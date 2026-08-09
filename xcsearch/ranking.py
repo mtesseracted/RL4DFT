@@ -43,3 +43,62 @@ class MeanSquaredError(RankingPolicy):
                 "and the split tags on the systems it was given"
             )
         return float(np.mean(values))
+
+
+class ConditionSatisfaction(RankingPolicy):
+    """Scalarize the rung-0 violations: the constraint-projection objective (D32).
+
+    Machine-path first, and that is not a rationalization. Optimizing a form
+    family's coefficients against its exact-condition violations is the
+    *numerical* version of the by-construction constraint families 2c wants:
+    it projects the family onto the constraint set instead of deriving a
+    parametrization that lies inside it. Having it as a swappable policy is
+    what makes that experiment a one-line composition change; 3.5's delegate
+    button then merely selects it.
+
+    Weights are per-condition and default to 1. They exist because the
+    violations are in different units -- an energy density, an energy, a
+    dimensionless ratio -- and pretending otherwise would let whichever
+    condition happens to be largest own the objective. Setting them is a
+    statement about what a study cares about, and it belongs in the
+    composition root beside every other such statement.
+
+    A candidate with no rung-0 rows scores ``inf`` rather than 0: "no
+    violations recorded" and "no violations" are different facts, and the
+    second one is the one that would silently win.
+    """
+
+    def __init__(self, weights: dict[str, float] | None = None) -> None:
+        self.weights = dict(weights or {})
+
+    def score(self, records: list[EvaluationRecord]) -> float:
+        rows = [r for r in records if r.rung == 0]
+        if not rows:
+            raise ValueError(
+                "no rung-0 records to score: this policy ranks by exact-condition "
+                "violation, and a stack with no ConditionsEvaluator produces "
+                "none. Compose one, or rank by something the stack measures."
+            )
+        return float(sum(
+            self.weights.get(r.metric, 1.0) * abs(float(r.value)) for r in rows
+        ))
+
+
+class WeightedSum(RankingPolicy):
+    """``a * dataset error + b * condition violation`` -- the two objectives at once.
+
+    The composition every constrained fit actually wants, and the smallest
+    thing that makes "satisfy the conditions" and "fit the data" comparable
+    rather than alternatives. Both halves are existing policies, so this
+    scalarizes *their* outputs and never re-derives either.
+    """
+
+    def __init__(self, policies: list[tuple[RankingPolicy, float]]) -> None:
+        if not policies:
+            raise ValueError("WeightedSum needs at least one policy")
+        self.policies = list(policies)
+
+    def score(self, records: list[EvaluationRecord]) -> float:
+        return float(sum(
+            weight * policy.score(records) for policy, weight in self.policies
+        ))

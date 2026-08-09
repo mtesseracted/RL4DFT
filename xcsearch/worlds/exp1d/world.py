@@ -26,6 +26,13 @@ import scipy.sparse as sp
 A_INT: float = 1.071295
 KAPPA: float = 1.0 / 2.385345
 
+# The density floor: below this a density is vacuum and a ``1/n`` is noise
+# rather than a quantity. One home for it (``dataset`` imports it, the supply
+# table declares it, and a form's regularized denominator is ``n + n_floor``),
+# because two copies of a floor is the same sync hazard as two copies of an
+# interaction constant.
+N_FLOOR: float = 1e-12
+
 
 def v_int(u: np.ndarray | float) -> np.ndarray | float:
     """Exponential electron-electron interaction ``A*exp(-kappa*|u|)``."""
@@ -46,6 +53,178 @@ def e_hartree(n: np.ndarray, x: np.ndarray, w: np.ndarray) -> float:
     coupling = v_int(np.asarray(x)[:, None] - np.asarray(x)[None, :])
     wn = np.asarray(w) * np.asarray(n)
     return 0.5 * float(wn @ coupling @ wn)
+
+
+def apply_interaction_dense(f: np.ndarray, x: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """``int A exp(-kappa|x-x'|) f(x') dx'`` by the brute-force kernel matvec.
+
+    The **validation reference** for the O(N) tridiagonal application (Core A),
+    and deliberately not the production path: it materializes an (N, N) kernel,
+    which the design forbids anything to *demand*. It is here because a second,
+    obviously-correct implementation is what makes the fast one checkable --
+    and because it is the same arithmetic ``dataset.v_hartree`` uses, so the
+    identity against the stored array is exact rather than approximate.
+
+    Cross-algorithm agreement with the tridiagonal solve is a *discretization*
+    tolerance, not a bitwise one: they are two quadratures of one integral.
+    """
+    coupling = v_int(np.asarray(x)[:, None] - np.asarray(x)[None, :])
+    return np.asarray(coupling @ (np.asarray(w) * np.asarray(f)))
+
+
+# --------------------------------------------------------------------------
+# The supply table (Core A, D27-D29): what this world can hand a form, and at
+# what price. Plain data -- `forms/checker.py` reads it and this module has
+# never heard of `forms/`.
+# --------------------------------------------------------------------------
+# The cost ladder, in arbitrary units of "one pointwise pass over the grid".
+# The numbers are ordinal, not measured seconds: what a scheduler needs is
+# that an interaction application costs more than a gradient, and the A1
+# ladder principle is that a protocol which can afford more information gets
+# charged more.
+_COST_FREE = 0.0
+_COST_POINTWISE = 1.0
+_COST_SOLVE = 4.0
+
+
+def supply_table() -> dict:
+    """What this world supplies, in what kind, at what cost, and how.
+
+    Each row is plain data:
+
+    ``kind``
+        ``"constant"`` (n-independent: an array or a scalar), ``"operator"``
+        (n-dependent: a descriptor compiled to a differentiable callable
+        inside the trace), or ``"frozen"`` (a precomputed array that exists
+        and is *not* an admissible form ingredient -- D28).
+    ``cost``
+        the ladder position above.
+    ``min`` / ``max``
+        the declared value range, which is what makes the checker's domain
+        and singularity analysis static.
+    ``populate``
+        how the evaluator turns a ``SystemRecord`` into the value. A callable
+        here rather than in the evaluator because *this* is the module that
+        knows what a well is; the evaluator calls it and stays world-free.
+
+    Admissibility is a property of the (ingredient, world) pair (R1's central
+    sentence), which is why there is a table per world and no global list.
+    """
+    return {
+        # `n` and `w` are always present and are never populated through this
+        # table (the evaluator sets them directly), but they are declared here
+        # anyway -- because the *range* is what checker check 4 reads, and
+        # "the density is non-negative and reaches zero" is precisely the fact
+        # that makes a bare `1/n` a refusal in this world.
+        "n": {
+            "kind": "constant", "cost": _COST_FREE, "min": 0.0,
+            "doc": "the density. Non-negative, and it does reach zero: the "
+                   "vacuum is most of every grid here.",
+        },
+        "w": {
+            "kind": "constant", "cost": _COST_FREE, "min": 0.0,
+            "doc": "the quadrature weights",
+        },
+        "x": {
+            "kind": "constant", "cost": _COST_FREE,
+            "populate": lambda s: s.x,
+            "doc": "grid coordinates -- what any non-local form needs to form "
+                   "|x - x'|",
+        },
+        "n_floor": {
+            "kind": "constant", "cost": _COST_FREE,
+            "min": N_FLOOR, "max": N_FLOOR,
+            "populate": lambda s: N_FLOOR,
+            "doc": "this world's density floor, so a fragment can write a "
+                   "regularized `n + n_floor` denominator that checker check 4 "
+                   "can *prove* safe rather than have to exempt",
+        },
+        "v_ext": {
+            "kind": "constant", "cost": _COST_FREE, "max": 0.0,
+            "populate": lambda s: s.v_ext,
+            "doc": "the external potential on the grid. Legitimate, not "
+                   "cheating: the exact functional for a dissociating molecule "
+                   "is v_ext-aware.",
+        },
+        "well_separation": {
+            "kind": "constant", "cost": _COST_FREE, "min": 0.0,
+            "populate": lambda s: _separation(s.wells),
+            "doc": "nearest-neighbour well spacing; 0 for a single well",
+        },
+        "well_charge": {
+            "kind": "constant", "cost": _COST_FREE, "min": 0.0,
+            "populate": lambda s: float(sum(z for z, _ in s.wells)),
+            "doc": "total nuclear charge",
+        },
+        "grad": {
+            "kind": "operator", "cost": _COST_POINTWISE, "arity": 1,
+            "populate": lambda s: {"kind": "gradient", "x": s.x},
+            "doc": "d/dx on the record's own nodes",
+        },
+        "laplacian": {
+            "kind": "operator", "cost": _COST_POINTWISE, "arity": 1,
+            "populate": lambda s: _csr_descriptor(s.laplacian),
+            "doc": "the stored second-derivative operator, as a CSR matvec -- "
+                   "the same discrete operator the reference was built with",
+        },
+        "apply_interaction": {
+            "kind": "operator", "cost": _COST_SOLVE, "arity": 1,
+            "populate": lambda s: {
+                "kind": "exponential_interaction",
+                "A": A_INT, "kappa": KAPPA, "dx": _spacing(s.x),
+            },
+            "doc": "int A exp(-kappa|x-x'|) f(x') dx' as one tridiagonal solve "
+                   "with Robin boundary rows -- O(N), differentiable, and never "
+                   "a materialized matrix",
+        },
+        "v_hartree": {
+            "kind": "frozen", "cost": _COST_FREE,
+            "doc": "the frozen Hartree array. Present, and NOT an admissible "
+                   "form ingredient (D28): a precomputed array is a constant "
+                   "to autograd, so its hidden n-dependence would be missing "
+                   "from v_xc. A form wanting v_H[n] uses apply_interaction, "
+                   "which here is one differentiable tridiagonal solve.",
+        },
+    }
+
+
+def _separation(wells) -> float:
+    centers = sorted(x for _, x in wells)
+    if len(centers) < 2:
+        return 0.0
+    return float((centers[-1] - centers[0]) / (len(centers) - 1))
+
+
+def _spacing(x) -> float:
+    """The node spacing, refusing a nonuniform grid rather than averaging it.
+
+    The tridiagonal application is written on a uniform stencil. A refined
+    grid is a legitimate future world; silently handing it a mean spacing
+    would be a wrong answer that looks like a right one.
+    """
+    x = np.asarray(x, dtype=float)
+    spacings = np.diff(x)
+    if spacings.size == 0:
+        raise ValueError("a one-point grid has no spacing")
+    if not np.allclose(spacings, spacings[0], rtol=0.0, atol=1e-12):
+        raise ValueError(
+            "apply_interaction is written on a uniform stencil and this grid "
+            "is not uniform. A refined grid needs its own operator kind, not "
+            "an averaged spacing."
+        )
+    return float(spacings[0])
+
+
+def _csr_descriptor(operator) -> dict:
+    """A stored sparse operator as the plain data ``compile.py`` expects."""
+    csr = operator.tocsr() if hasattr(operator, "tocsr") else operator
+    counts = np.diff(csr.indptr)
+    return {
+        "kind": "csr",
+        "data": np.asarray(csr.data, dtype=float),
+        "indices": np.asarray(csr.indices, dtype=np.int64),
+        "rows": np.repeat(np.arange(csr.shape[0], dtype=np.int64), counts),
+    }
 
 
 class Grid:

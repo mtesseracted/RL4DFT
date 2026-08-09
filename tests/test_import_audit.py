@@ -75,8 +75,22 @@ ALLOWED: dict[str, set[str]] = {
     # one place so that the cache builder and the store cannot disagree.
     "store": {"ports", "records", "provenance", "sqlite3", "numpy"},
     "ranking": {"ports", "records", "evaluators", "numpy"},
+    # Core C's candidate-SCF service (3.5, D34). World-free: it takes the
+    # frozen potential data off a `SystemRecord`, the candidate through the
+    # port, and the *interaction* as an injected callable -- which is the one
+    # thing about a self-consistent solve that is a world's business.
+    # `queue`/`threading` are architectural, not plumbing: the live face is a
+    # worker behind a queue, and that is a decision about where the work runs.
+    "scf_service": {"ports", "records", "ks", "queue", "threading", "numpy"},
     "evaluators": {"ports", "records", "ks", "numerics", "numpy"},
-    "composed": {"ports", "records", "numpy"},
+    # `forms` from 3.2: this is the composition layer, so this is where the
+    # representation and the ports meet. `document` for identity and latex,
+    # `compile` for the numbers. Note which rows *do not* gain it -- `store`,
+    # `data`, `figures` and `app` all still see forms only as data.
+    # (`forms` is the package-qualified spelling of the same two modules --
+    # `from ..forms import document` -- and is granted alongside them rather
+    # than instead of them, so the row still says which two.)
+    "composed": {"ports", "records", "forms", "document", "compile", "numpy"},
     "optuna_tpe": {"ports", "records", "optuna", "numpy"},
     "cmaes": {"ports", "records", "cma", "numpy"},
     "human": {"ports", "records", "queue", "numpy"},
@@ -116,7 +130,12 @@ ALLOWED: dict[str, set[str]] = {
     # answer a stale page with a 409 rather than a traceback. Declared rather
     # than swept into the plumbing set, because "the dashboard may touch the
     # HTTP layer" is an architectural permission, not Python housekeeping.
-    "app": {"store", "records", "data", "figures", "dash", "flask"},
+    "app": {"store", "records", "data", "figures", "session", "dash", "flask"},
+    # The session (3.5, D33) is what the dashboard is *allowed* to do, as
+    # data. It imports nothing at all -- every capability on it is a callable
+    # the composition root closed over -- which is what keeps every forms and
+    # physics operation the editor needs out of the viz rows above.
+    "session": set(),
     # The composition root is the one module that may see everything -- that
     # is what makes it the only composition point.
     "run_stage2": None,

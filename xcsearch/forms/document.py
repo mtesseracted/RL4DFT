@@ -120,9 +120,24 @@ def _ing(name: str, arity: int, units: int | Fraction, latex: str) -> Ingredient
 INGREDIENTS: dict[str, IngredientKind] = {
     # Constants -- n-independent data, supplied as arrays (D28).
     "n": _ing("n", 0, -1, "n"),
+    # The world's density floor, as an *ingredient* rather than as a literal.
+    # A regularized denominator `n + n_floor` has to be dimensionally a
+    # density, and how small "small" is on a given grid is a property of that
+    # world, not of the schema. Declaring it this way is also what makes the
+    # regularization visible to checker check 4: the sum's declared range
+    # starts strictly above zero, so the division is provably safe rather
+    # than exempted.
+    "n_floor": _ing("n_floor", 0, -1, r"n_{\mathrm{floor}}"),
     "x": _ing("x", 0, 1, "x"),
     "v_ext": _ing("v_ext", 0, -2, r"v_{\mathrm{ext}}"),
     "well_separation": _ing("well_separation", 0, 1, "R"),
+    "well_charge": _ing("well_charge", 0, 0, "Z"),
+    # In the vocabulary so that a document *naming* it gets the D28 reason
+    # rather than "unknown ingredient", which would be the wrong sentence:
+    # the frozen Hartree array is a real thing this world has, and the point
+    # is that it is not an admissible *form ingredient*. A world declares it
+    # with kind "frozen" and the checker refuses it by that kind.
+    "v_hartree": _ing("v_hartree", 0, -2, r"v_{H}^{\mathrm{frozen}}"),
     # Operators -- n-dependent quantities, supplied as descriptors and applied
     # inside the autograd trace (D28). Their argument is a node.
     "grad": _ing("grad", 1, -1, r"\nabla"),
@@ -863,8 +878,24 @@ def latex(document: FormDocument, theta=None) -> dict[str, str]:
     for name in sorted(canonical.parts):
         rendered[name] = _latex_node(canonical.parts[name], canonical.variables,
                                      counter, values)
-    rendered["__all__"] = " + ".join(rendered[name] for name in sorted(rendered))
+    rendered["__all__"] = _join_terms([rendered[name] for name in sorted(rendered)])
     return rendered
+
+
+def _join_terms(pieces: list[str]) -> str:
+    """Join addends without printing ``+ -0.07``.
+
+    A coefficient carries its own sign when a theta is filled in, so the join
+    has to notice: the alternative is either a double sign or dropping the
+    sign from the number, and dropping it would make a negative coefficient
+    read as positive.
+    """
+    if not pieces:
+        return "0"
+    out = pieces[0]
+    for piece in pieces[1:]:
+        out += (" " if piece[:1] in "+-" else " + ") + piece
+    return out
 
 
 def _coefficient(counter: list[int], values) -> str:
@@ -887,7 +918,7 @@ def _latex_node(node: Node, variables: dict[str, Node], counter, values) -> str:
                               rf"{{{term.weight.denominator}}}\,{body}"
                               if term.weight.denominator != 1
                               else rf"{term.weight.numerator}\,{body}")
-        return " + ".join(pieces) if pieces else "0"
+        return _join_terms(pieces)
     if isinstance(node, Slot):
         return _coefficient(counter, values)
     if isinstance(node, Rational):

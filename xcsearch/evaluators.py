@@ -50,10 +50,17 @@ class FrozenDensityEvaluator(Evaluator):
     before recording), and which systems count is a property of the policy.
     """
 
-    def __init__(self, systems: list[SystemRecord]) -> None:
+    def __init__(self, systems: list[SystemRecord], supplies: dict | None = None) -> None:
         if not systems:
             raise ValueError("FrozenDensityEvaluator needs at least one system")
         self.systems = list(systems)
+        # The world's supply table (D29), injected as plain data at
+        # composition. Each row's `populate` turns a SystemRecord into the
+        # value or descriptor for one ingredient, so *this* module never
+        # learns what a well is and still populates one. Empty by default:
+        # an evaluator with no supplies serves forms that read only n and w,
+        # which is every Stage 2 form.
+        self.supplies = dict(supplies or {})
 
         with_potentials = [s.name for s in self.systems if _has_potentials(s)]
         without = [s.name for s in self.systems if not _has_potentials(s)]
@@ -82,12 +89,62 @@ class FrozenDensityEvaluator(Evaluator):
             "rung": 1,
             "metrics": metrics,
             "n_systems": len(self.systems),
+            # What this stack *can* supply is part of how it measured: the
+            # same evaluator over a world with no interaction operator is a
+            # different protocol, because a different set of forms is
+            # admissible under it (D27).
+            "supplies": sorted(self.supplies),
         }
+
+    def populate(self, system: SystemRecord, required: set[str]) -> XCInput:
+        """The candidate's ``XCInput``: exactly what it declared, no more (D27).
+
+        The D10 rule, made operational -- *populate only what you can vouch
+        for*. A field the candidate did not ask for stays ``None``, and a
+        field it did ask for that this world cannot supply is a refusal here
+        rather than a ``None`` that becomes a number somewhere downstream.
+
+        Composition should have caught that already: the contract check runs
+        at run start and refuses the pairing with the missing names (checker
+        check 1). This is the second line of the same defence, and the reason
+        it is worth having is that a *proposer* can invent a form mid-run.
+        """
+        missing = sorted(required - set(self.supplies))
+        if missing:
+            raise ValueError(
+                f"this candidate requires {missing}, which the evaluator's "
+                "world does not supply. Admissibility is a property of the "
+                "(ingredient, world) pair -- compose against a world whose "
+                "supply table offers them, or refuse the form at proposal "
+                "time with forms.checker.check."
+            )
+        extra = {}
+        for name in sorted(required):
+            row = self.supplies[name]
+            populate = row.get("populate")
+            if populate is None:
+                raise ValueError(
+                    f"the supply row for {name!r} declares kind "
+                    f"{row.get('kind')!r} and no way to populate it: it is "
+                    "declared so that a form naming it gets a reason, not so "
+                    "that it can be read."
+                )
+            extra[name] = populate(system)
+        # `key` is the system's identity, for the per-term evaluation cache
+        # only (D21). A candidate never reads it -- it is not an ingredient,
+        # it is how the compiled form knows that the term it evaluated last
+        # trial was evaluated on this same system.
+        return XCInput(
+            n=system.n_ref, w=system.w,
+            key=f"{system.name}:{system.content_hash}",
+            **extra,
+        )
 
     def evaluate(self, functional: Functional) -> list[EvaluationRecord]:
         records: list[EvaluationRecord] = []
+        required = set(functional.requires())
         for system in self.systems:
-            x = XCInput(n=system.n_ref, w=system.w)
+            x = self.populate(system, required)
 
             def record(metric: str, value: float) -> EvaluationRecord:
                 return EvaluationRecord(

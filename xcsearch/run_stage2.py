@@ -17,20 +17,27 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
+from fractions import Fraction
 
 import numpy as np
 
 from .driver import SearchDriver
 from .evaluators import ConditionsEvaluator, FrozenDensityEvaluator
-from .optimizers.composed import FixedFormOptimizer
+from .forms import document as doc_module
+from .forms.checker import refuse_unsupported
+from .forms.library import stage2_local_ansatz, stage2_slot_order
+from .optimizers.composed import DocumentForm, FixedFormOptimizer
 from .optimizers.optuna_tpe import OptunaTPE
 from .provenance import protocol_payload
 from .ranking import MeanSquaredError
 from .records import SystemRecord
+from .scf_service import CandidateSCF
 from .store import NearDuplicateIndex, SQLiteRecordStore
 from .worlds.exp1d.conditions import default_conditions
 from .worlds.exp1d.dataset import DATA_DIR, Exp1dDataset, protocol as world_protocol
-from .worlds.exp1d.functionals import LDA_THETA, LocalAnsatzForm
+from .worlds.exp1d.functionals import LDA_THETA, primitive_constants
+from .worlds.exp1d.world import apply_interaction_dense, supply_table
 
 
 def save_best_theta(
@@ -174,8 +181,37 @@ def run_capturing_failures(work, status: list, finished: str) -> None:
         status.append(finished)
 
 
+def rebuild_candidate(store, candidate_id: int):
+    """A stored candidate, rebuilt from its document and its theta (D25/D34).
+
+    Trustworthy now in a way it was not in Stage 2: the store holds the
+    *document*, so ``build(document, theta)`` reconstructs exactly the form
+    the theta was proposed under rather than whatever the current code calls
+    by that name. That is what retired one of the two arguments for
+    display-only; the other one -- these numbers are unprotocol'd -- stands
+    alone and is why they still are not stored.
+    """
+    from .forms import document as doc
+
+    row = store.form_for(candidate_id)
+    if row is None:
+        raise ValueError(
+            f"candidate {candidate_id} has no form document, so it cannot be "
+            "rebuilt. Candidates stored before 3.2 name a form rather than "
+            "being one."
+        )
+    theta = json.loads(
+        store.connection.execute(
+            "SELECT theta_json FROM candidates WHERE id = ?", (candidate_id,)
+        ).fetchone()["theta_json"] or "[]"
+    )
+    form = DocumentForm(doc.loads(row["json"]), primitives=primitive_constants())
+    return form.build(np.asarray(theta, dtype=float))
+
+
 def human_session(driver: SearchDriver, open_run, requests, poll: float,
-                  opened_at: list | None = None) -> None:
+                  opened_at: list | None = None,
+                  between_trials=None) -> None:
     """The search loop for a person: one trial per submission, for as long as.
 
     A fixed trial count is the wrong shape for a human. An optimizer is given
@@ -212,13 +248,115 @@ def human_session(driver: SearchDriver, open_run, requests, poll: float,
             if driver.n_trials > opened_at[0]:
                 driver.run_id = open_run()
                 opened_at[0] = driver.n_trials
+        if between_trials is not None:
+            # The delegate hand-off (D35), taken between trials rather than
+            # inside one: swapping the optimizer mid-step would break the
+            # strict ask/tell alternation D11 guarantees.
+            between_trials()
         try:
             driver.step()
         except TimeoutError:
             continue  # nobody has submitted yet; that is not a failure
 
 
-def serve_human_session(driver: SearchDriver, human, args, open_run) -> None:
+def coefficient_layout(form) -> list[dict]:
+    """The proposal boxes, as data the dashboard can group by (3.2).
+
+    ``[{"part", "bounds"}, ...]`` in the order the human optimizer's theta is
+    in. Assembled here, at the composition root, because it is the one place
+    that can see both the form and the dashboard -- the viz still imports no
+    ``forms/`` and the form still knows nothing about a panel.
+    """
+    return [
+        {"part": part, "bounds": [float(low), float(high)]}
+        for part, (low, high) in zip(form.slot_parts(), form.bounds())
+    ]
+
+
+def forms_capabilities(supplies: dict) -> dict:
+    """The three forms operations the editor needs, as plain callables (D35).
+
+    Documents transit the UI as JSON, so each of these takes and returns JSON
+    and nothing else. ``check`` is ``forms.checker.check`` itself -- wired,
+    not reimplemented: the machine proposer's refusal and the editor's check
+    button are one function, or the two diverge, which is the design goal's
+    rule applied to the smallest thing it can be applied to.
+    """
+    from .forms import document as doc
+    from .forms.checker import check
+    from .forms.library import editor_palette
+
+    entries = editor_palette()
+
+    def term(choice: str, power) -> dict:
+        entry = entries[choice]
+        numerator, denominator = int(power[0]), int(power[1])
+        if denominator <= 0:
+            raise ValueError("a power's denominator must be positive")
+        node, variables = entry["build"](Fraction(numerator, denominator))
+        return {
+            "schema": doc.SCHEMA,
+            "part": entry["part"],
+            "term": {"weight": [1, 1], "body": doc.node_json(node)},
+            "variables": {name: doc.node_json(node)
+                          for name, node in variables.items()},
+        }
+
+    def canonicalize(document: dict) -> dict:
+        parsed = doc.canonicalize(doc.from_json(document))
+        rendered = doc.latex(parsed)
+        return {
+            "hash": doc.form_hash(parsed),
+            "latex": rendered["__all__"],
+            "slots": [
+                {"part": part, "bounds": list(slot.bounds)}
+                for part, slot in zip(doc.slot_parts(parsed), doc.slots(parsed))
+            ],
+            "terms": [
+                f"{part}: {line}"
+                for part, lines in sorted(doc.term_latex(parsed).items())
+                for line in lines
+            ],
+        }
+
+    def check_document(document: dict) -> list[dict]:
+        findings = check(doc.from_json(document), supplies)
+        return [
+            {"code": f.code, "severity": f.severity, "what": f.what,
+             "why": f.why, "remedy": f.remedy, "where": f.where}
+            for f in findings
+        ]
+
+    return {"term": term, "canonicalize": canonicalize, "check": check_document,
+            "palette": {name: {"label": entry["label"], "part": entry["part"],
+                               "power": entry["power"]}
+                        for name, entry in entries.items()}}
+
+
+# The objectives the delegate button can hand to the optimizer (D32/D35).
+# Names, not policy objects, because the button sends a string over HTTP and
+# the composition root is the only place allowed to turn one into a policy.
+OBJECTIVES = {
+    "dataset_error": "fit the dataset (mean squared XC-energy error)",
+    "conditions": "satisfy the exact conditions (rung-0 violations)",
+    "both": "both, weighted equally",
+}
+
+
+def policy_for(objective: str):
+    """One objective name -> one ``RankingPolicy``. The whole mapping."""
+    from .ranking import ConditionSatisfaction, WeightedSum
+
+    if objective == "conditions":
+        return ConditionSatisfaction()
+    if objective == "both":
+        return WeightedSum([(MeanSquaredError(), 1.0), (ConditionSatisfaction(), 1.0)])
+    return MeanSquaredError()
+
+
+def serve_human_session(driver: SearchDriver, human, args, open_run,
+                        coefficients=None, session_extras=None,
+                        delegate=None, between_trials=None) -> None:
     """Run the loop in the background and serve the dashboard in front of it.
 
     The driver blocks on ``HumanOptimizer.ask()`` until the submit button puts
@@ -255,7 +393,8 @@ def serve_human_session(driver: SearchDriver, human, args, open_run) -> None:
     worker = threading.Thread(
         target=run_capturing_failures,
         args=(lambda: human_session(driver, open_run, requests,
-                                    _HUMAN_POLL_SECONDS, opened_at),
+                                    _HUMAN_POLL_SECONDS, opened_at,
+                                    between_trials),
               status, "the search worker stopped"),
         daemon=True,
     )
@@ -287,14 +426,29 @@ def serve_human_session(driver: SearchDriver, human, args, open_run) -> None:
         requests.set()
         return "a new run starts with your next submission"
 
-    # follow_run is a callable, not an id: the run changes under the dashboard
-    # when the button is used, and the panels should land on whichever one is
-    # being written now. It does not exist in the store when a session opens --
-    # the row appears with its first candidate (B1) -- so the dashboard watches
-    # for it and selects it the moment it does.
-    serve(create_app(args.store, human=human, status=worker_status,
-                     follow_run=lambda: driver.run_id, new_run=new_run),
-          host="127.0.0.1", port=args.port)
+    # One injected session (D33). `follow` is a callable, not an id: the run
+    # changes under the dashboard when a button is used, and the panels should
+    # land on whichever one is being written now. It does not exist in the
+    # store when a session opens -- the row appears with its first candidate
+    # (B1) -- so the dashboard watches for it and selects it the moment it does.
+    from .viz.session import Session
+
+    extras = dict(session_extras or {})
+    session = Session(
+        submit=human.submit,
+        submissions=lambda: {
+            "pending": human.pending_submissions,
+            "scores": [score for _, score in getattr(human, "history", ())],
+        },
+        status=worker_status,
+        follow=lambda: driver.run_id,
+        new_run=new_run,
+        propose=delegate,
+        coefficients=coefficients or [],
+        objectives=OBJECTIVES,
+        **extras,
+    )
+    serve(create_app(args.store, session), host="127.0.0.1", port=args.port)
 
 
 def main() -> None:
@@ -340,7 +494,24 @@ def main() -> None:
     systems = dataset.load()
     print(f"Loaded {len(systems)} systems.")
 
-    form = LocalAnsatzForm()
+    # The form is a *document* now (3.2): the Stage 2 ansatz, seeded from the
+    # library, with its powers as structure and its coefficients as slots.
+    # `theta_order` keeps the caller-facing theta in Stage 2's hand-written
+    # order, so a seeded sampler consumes its RNG exactly as it did before --
+    # see `DocumentForm`. Proposing a *different* form is now editing this
+    # line, which is the whole of what the representation bought.
+    form = DocumentForm(
+        stage2_local_ansatz(),
+        primitives=primitive_constants(),
+        theta_order=stage2_slot_order(),
+    )
+    # The capability contract (D27), checked *here*, before anything is spent:
+    # a form asking for an ingredient this world does not supply fails at
+    # startup with the missing name, never quietly at trial 1,900. This is
+    # checker check 1 -- the same function a machine proposer's output is
+    # refused by and the same one the editor's check button calls.
+    supplies = supply_table()
+    refuse_unsupported(form.document, supplies)
     # Swapping the coefficient optimizer is this one line: CMAES(form.bounds(),
     # seed=args.seed) for the D16 optimizer, HumanOptimizer(form.bounds()) for
     # a person. The form owns the search box either way.
@@ -360,7 +531,7 @@ def main() -> None:
     # is measured against the exact conditions before anything is spent on it.
     evaluators = [
         ConditionsEvaluator(default_conditions()),
-        FrozenDensityEvaluator(systems),
+        FrozenDensityEvaluator(systems, supplies=supplies),
     ]
     policy = MeanSquaredError()
 
@@ -385,6 +556,9 @@ def main() -> None:
                 "ranking_policy": type(policy).__name__,
                 "optimizer": "human" if args.human else "optuna_tpe",
                 "seed": args.seed,
+                # The form is part of *how* every number was measured, and it
+                # is now a thing with an identity, so the protocol names it.
+                "form": form.describe(),
             },
         )
     )
@@ -421,7 +595,92 @@ def main() -> None:
                 protocol_id=protocol_id, population_id=population_id,
             )
 
-        serve_human_session(driver, coefficients, args, open_run)
+        # The live face of the candidate-SCF service (D34). Display-only by
+        # construction: nothing here writes, and the only writer in the
+        # process is the search worker. `build` reconstructs the candidate
+        # from the *stored document*, which D25 made trustworthy -- the old
+        # second objection to a live rebuild ("today's form class may not be
+        # the form that produced that theta") died with the forms room, and
+        # the protocol leg stands alone and suffices.
+        scf = CandidateSCF(
+            build=lambda key: rebuild_candidate(store, key),
+            systems={s.name: s for s in systems},
+            hartree=lambda density: apply_interaction_dense(
+                density, systems[0].x, systems[0].w
+            ),
+            populate=lambda record, density: FrozenDensityEvaluator(
+                [record], supplies=supplies
+            ).populate(record, set()),
+        )
+
+        # The delegate path (D35): the human proposes the form, the machine
+        # fits the coefficients. Not a dashboard-side computation -- the
+        # request lands on a queue and the worker, which already owns every
+        # write, opens a *recorded* run under its own protocol row.
+        delegations: "queue.Queue" = queue.Queue()
+
+        def delegate(document: dict, objective: str) -> str:
+            delegations.put((document, objective or "dataset_error"))
+            return (
+                f"handed to the optimizer, objective '{objective}': a new run "
+                "opens with the next trial"
+            )
+
+        def take_delegation() -> None:
+            """Swap the driver onto a delegated (form, objective) pair.
+
+            Everything the driver needs changes together and in one place: a
+            new form, a fresh coefficient optimizer over *its* bounds, the
+            selected policy, a protocol row that names all three, and a new
+            run. Nothing about the loop itself moves, which is the point --
+            this is D11's two-level search with a person in the outer seat.
+            """
+            try:
+                document, objective = delegations.get_nowait()
+            except queue.Empty:
+                return
+            delegated = DocumentForm(
+                doc_module.from_json(document), primitives=primitive_constants()
+            )
+            refuse_unsupported(delegated.document, supplies)
+            delegated_policy = policy_for(objective)
+            delegated_protocol = store.register_protocol(
+                protocol_payload(
+                    world=world_protocol(), evaluators=evaluators,
+                    extra={
+                        "ranking_policy": type(delegated_policy).__name__,
+                        "optimizer": "optuna_tpe", "seed": args.seed,
+                        "objective": objective, "delegated_by": "human",
+                        "form": delegated.describe(),
+                    },
+                )
+            )
+            driver.optimizer = FixedFormOptimizer(
+                delegated, OptunaTPE(delegated.bounds(), seed=args.seed)
+            )
+            driver.policy = delegated_policy
+            driver.run_id = store.begin_run(
+                "delegated", notes=f"objective={objective}",
+                protocol_id=delegated_protocol, population_id=population_id,
+            )
+
+        capabilities = forms_capabilities(supplies)
+        serve_human_session(
+            driver, coefficients, args, open_run, coefficient_layout(form),
+            session_extras={
+                "solve": scf.request,
+                "collect": lambda key, system: (
+                    result.as_row() if (result := scf.collect(key, system))
+                    else None
+                ),
+                "check": capabilities["check"],
+                "canonicalize": capabilities["canonicalize"],
+                "term": capabilities["term"],
+                "palette": capabilities["palette"],
+            },
+            delegate=delegate,
+            between_trials=take_delegation,
+        )
         return
 
     print(f"Searching ({args.trials} trials, run {run_id} in {args.store})...")

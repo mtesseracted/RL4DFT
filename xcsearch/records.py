@@ -46,6 +46,40 @@ class XCInput:
     # v_ext-dependent functionals (A2 "v_ext dependence" >= 1): the external
     # potential sampled on the same grid.
     v_ext: np.ndarray | None = None
+    # --- the Stage 3 supply table (D27, D28) ------------------------------
+    # Two kinds, and the split is load-bearing.
+    #
+    # **Constants** are n-independent data, supplied as arrays or scalars:
+    # the grid coordinates (any non-local form must build |x - x'|), and the
+    # two scalars a 1D form can actually consume about the geometry. Richer
+    # well data (per-well charges and positions, variable length) is a future
+    # row, not an omission -- nothing yet reads it.
+    x: np.ndarray | None = None
+    # The world's density floor, so a form can write a regularized `n +
+    # n_floor` denominator whose safety the checker can *prove* rather than
+    # exempt. It is an ingredient and not a magic number in the schema
+    # because how small "small" is belongs to the grid that was built.
+    n_floor: float | None = None
+    well_separation: float | None = None
+    well_charge: float | None = None
+    # **Operators** are n-*dependent* quantities, and they arrive as
+    # descriptors -- ``{"kind": ..., **parameters}``, plain data -- never as
+    # arrays and never as callables. A precomputed array is a constant to
+    # autograd, so any n-dependence it hid would be silently missing from
+    # v_xc (D28); a callable would put a world's code inside the trace.
+    # ``forms/compile.py`` owns the jnp implementation of every kind and
+    # refuses an unknown one by name, which is what makes differentiability
+    # true by construction rather than by discipline.
+    grad: dict | None = None
+    laplacian: dict | None = None
+    apply_interaction: dict | None = None
+    # An opaque identity for the system this input describes -- the evaluator
+    # sets it to the system's name and content hash. Used only as a *cache*
+    # key (the per-term memo of D21's identity rule), never as data: a
+    # candidate that read it would be reading which system it is being
+    # measured on, which is exactly what an XCInput is shaped to prevent.
+    # ``None`` means "unnamed", and an unnamed input is simply not cached.
+    key: str | None = None
 
 
 @dataclass

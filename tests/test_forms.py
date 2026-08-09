@@ -61,6 +61,8 @@ WORLD_PRIMITIVES = {
 # What the exp1d world declares it can supply, as the checker consumes it.
 SUPPLIED = {
     "n": {"kind": "constant", "cost": 0.0, "min": 0.0},
+    "w": {"kind": "constant", "cost": 0.0, "min": 0.0},
+    "n_floor": {"kind": "constant", "cost": 0.0, "min": 1e-12, "max": 1e-12},
     "x": {"kind": "constant", "cost": 0.0},
     "v_ext": {"kind": "constant", "cost": 0.0},
     "well_separation": {"kind": "constant", "cost": 0.0, "min": 0.0},
@@ -132,6 +134,7 @@ SEEDED = {
     "stage2_local_ansatz": library.stage2_local_ansatz(),
     "lda": library.lda(),
     "gga_enhancement": library.gga_enhancement(),
+    "semi_local_probe": library.semi_local_probe(),
     "hartree_like": library.hartree_like(),
     "wells_abusing": library.wells_abusing(),
 }

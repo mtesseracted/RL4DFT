@@ -33,21 +33,59 @@ from xcsearch.records import SystemRecord
 from xcsearch.store import SQLiteRecordStore
 from xcsearch.viz import data, figures
 from xcsearch.viz import app as app_module
+from xcsearch.viz.session import CAPABILITIES, Session, store_only
 from xcsearch.viz.app import (
     arguments_expected,
     best_trial,
     build_layout,
     create_app,
+    formula_parts,
     scrubber_value,
-    split_formula,
     stale_page,
     step_size,
     stepped,
 )
+from xcsearch.forms import library
+from xcsearch.optimizers.composed import DocumentForm
 from xcsearch.worlds.exp1d.conditions import default_conditions
-from xcsearch.worlds.exp1d.functionals import LDA_THETA, LocalAnsatzForm
+from xcsearch.worlds.exp1d.functionals import LDA_THETA, primitive_constants
 
-FORM = LocalAnsatzForm()
+# The dashboard's form is a *document* now (3.2), so every candidate these
+# tests store carries a form row and the panel reads its parts from the store
+# rather than cutting a rendered string in half.
+FORM = DocumentForm(
+    library.stage2_local_ansatz(),
+    primitives=primitive_constants(),
+    theta_order=library.stage2_slot_order(),
+)
+
+
+def _coefficients(form=FORM):
+    """The proposal boxes as the composition root supplies them (3.5)."""
+    return [
+        {"part": part, "bounds": [float(low), float(high)]}
+        for part, (low, high) in zip(form.slot_parts(), form.bounds())
+    ]
+
+
+def _session(human=None, **kwargs) -> Session:
+    """A session over a human endpoint, as `serve_human_session` builds one.
+
+    The four old constructor arguments are one object now (D33), so the tests
+    construct that object rather than passing the four -- which is also how
+    they assert that the *only* difference between a viewer and a live
+    session is what this carries.
+    """
+    if human is not None:
+        kwargs.setdefault("submit", human.submit)
+        kwargs.setdefault("submissions", lambda: {
+            "pending": human.pending_submissions,
+            "scores": [score for _, score in human.history],
+        })
+        kwargs.setdefault("coefficients", _coefficients())
+    return Session(**kwargs)
+
+
 TRIALS = 8
 
 
@@ -124,7 +162,11 @@ def test_the_formula_panel_has_latex_and_theta(finished_run):
     path, run_id, _ = finished_run
     candidate_id = data.history(path, run_id)[0]["candidate_id"]
     record = data.candidate(path, candidate_id)
-    assert r"\epsilon_{xc}" in record["form_latex"]
+    # The whole-form latex is the sum of the parts, with coefficients filled
+    # in -- there is no left-hand side any more, because the panel labels each
+    # part with the name the document gave it (3.2).
+    assert r"\epsilon_x^{\mathrm{LDA}}" in record["form_latex"]
+    assert r"\epsilon_c^{\mathrm{LDA}}" in record["form_latex"]
     assert len(record["theta"]) == FORM.n_params
 
 
@@ -288,7 +330,7 @@ def test_the_per_system_metrics_are_the_stored_records(finished_run):
 
 def test_the_app_builds_and_its_callbacks_return_figures(finished_run):
     path, run_id, baseline_id = finished_run
-    app = create_app(path)
+    app = create_app(path, store_only())
     assert app.layout is not None
 
     callbacks = {
@@ -317,7 +359,7 @@ def test_every_callback_survives_a_real_dispatch(finished_run):
     stays green.
     """
     path, run_id, baseline_id = finished_run
-    app = create_app(path)
+    app = create_app(path, store_only())
     client = app.server.test_client()
 
     dependencies = json.loads(client.get("/_dash-dependencies").data)
@@ -334,6 +376,13 @@ def test_every_callback_survives_a_real_dispatch(finished_run):
     }
 
     for callback in dependencies:
+        if "MATCH" in callback["output"]:
+            # A MATCH output resolves against a *component instance*, so a
+            # generic dispatch cannot build a legal body for it -- dash
+            # refuses the request before the callback is reached. The step
+            # callback is driven directly in
+            # `test_a_step_moves_one_coefficient_through_the_endpoint`.
+            continue
         specs = [dict(spec, value=values.get((spec["id"], spec["property"])))
                  for spec in callback["inputs"]]
         state = [dict(spec, value=values.get((spec["id"], spec["property"])))
@@ -355,28 +404,45 @@ def test_every_callback_survives_a_real_dispatch(finished_run):
 # --------------------------------------------------------------------------
 
 
-def test_the_formula_splits_where_the_form_splits():
-    """Exchange carries every coefficient; correlation carries none.
+def test_the_formula_renders_the_parts_the_form_publishes(finished_run):
+    """3.2 acceptance 5: parts and bounds from the stored document.
 
-    Not a display accident: `eps_xc = eps_x_ansatz(n; theta) + eps_c_LDA(n)`,
-    so the whole of theta is exchange and correlation is fixed. That is the
-    reason the coefficient boxes belong in the exchange half of the panel.
+    The old test asserted that a rendered one-liner could be cut in half at
+    the right place. This one asserts the thing that replaced it -- the panel
+    reads the parts the form declared and the boxes it declared them over, so
+    a store-only viewer shows bounds it could not previously know.
     """
-    latex = FORM.build(np.array([1.15, -0.03, 0.4, 0.0, 0.2])).to_latex()
-    exchange, correlation = split_formula(latex)
+    path, _, candidate_id = finished_run
+    record = data.candidate(path, candidate_id)
+    form = data.form_for(path, candidate_id)
+    assert form is not None, "the candidate carries no form row"
+    assert set(form["latex"]) >= {"exchange", "correlation"}
 
-    assert r"\epsilon_x^{\mathrm{LDA}}" in exchange
-    assert "1.15" in exchange and "-0.03" in exchange
-    assert correlation == r"\epsilon_c^{\mathrm{LDA}}(n)"
-    # The halves are the whole: nothing dropped, no left-hand side repeated.
-    assert "=" not in exchange and "=" not in correlation
-    assert r"\epsilon_c" not in exchange
+    boxes = formula_parts(record, form)
+    rendered = json.dumps(_as_plain(boxes))
+    assert "exchange" in rendered and "correlation" in rendered
+    # Bounds, from the document, in a viewer with no human endpoint at all.
+    assert "[0, 2]" in rendered and "[-1, 1]" in rendered
+    assert r"\\epsilon_x^{\\mathrm{LDA}}" in rendered
 
 
-def test_a_formula_with_no_correlation_term_is_shown_whole():
-    """An unfamiliar form renders as itself rather than as nothing."""
-    assert split_formula(r"\epsilon_x(n) = c_0\,n") == (r"c_0\,n", "")
-    assert split_formula("") == ("", "")
+def test_a_candidate_with_no_document_is_shown_whole():
+    """An adapter that predates the representation renders as itself."""
+    boxes = formula_parts({"form_latex": r"\epsilon_x(n) = c_0\,n"}, None)
+    rendered = json.dumps(_as_plain(boxes))
+    assert "c_0" in rendered
+    assert json.dumps(_as_plain(formula_parts({}, None))) is not None
+
+
+def _as_plain(component):
+    """A dash component tree as nested plain data, for substring assertions."""
+    if isinstance(component, (list, tuple)):
+        return [_as_plain(item) for item in component]
+    if hasattr(component, "to_plotly_json"):
+        return _as_plain(component.to_plotly_json())
+    if isinstance(component, dict):
+        return {key: _as_plain(value) for key, value in component.items()}
+    return component
 
 
 def test_a_step_stays_in_the_box_and_off_float_dust():
@@ -395,10 +461,15 @@ def test_the_coefficients_are_typed_boxes_with_a_button_either_side(finished_run
     """Text, not sliders -- and the submit callback cannot tell the difference."""
     path, _, _ = finished_run
     human = HumanOptimizer(FORM.bounds())
-    layout = build_layout(path, human)
+    layout = build_layout(path, _session(human))
 
-    inputs = sorted(_components(layout, dash.dcc.Input),
-                    key=lambda box: box.id["index"])
+    # Pattern-matching ids only: the editor's power boxes are plain inputs
+    # with string ids and are not coefficients.
+    inputs = sorted(
+        [box for box in _components(layout, dash.dcc.Input)
+         if isinstance(box.id, dict)],
+        key=lambda box: box.id["index"],
+    )
     assert len(inputs) == FORM.n_params
     assert not _components(layout, dash.dcc.Slider) or True  # the scrubber stays
     assert all(box.type == "number" for box in inputs)
@@ -413,21 +484,46 @@ def test_the_coefficients_are_typed_boxes_with_a_button_either_side(finished_run
     assert stepping == {"theta-down", "theta-up"}
 
 
-def test_the_viewer_has_the_formula_and_no_way_to_propose(finished_run):
+def test_the_viewer_has_every_control_and_can_use_none_of_them(finished_run):
+    """One layout always (D33): the viewer's controls exist and are disabled.
+
+    The old assertion was that a store-only viewer *lacked* the submit button.
+    That is exactly the shape F1.9 came from -- the page differed by
+    configuration -- so what is asserted now is the opposite: the same
+    components, disabled, each with a stated reason.
+    """
     path, _, _ = finished_run
-    ids = _component_ids(build_layout(path))
-    assert {"formula-x", "formula-c"} <= ids
-    assert not _components(build_layout(path), dash.dcc.Input)
-    assert "submit" not in ids and "new-run" not in ids
+    layout = build_layout(path, store_only())
+    ids = _component_ids(layout)
+    assert {"formula-parts", "submit", "new-run", "solve",
+            "editor-add", "editor-check", "editor-optimize"} <= ids
+
+    disabled = {
+        node.id: node.disabled
+        for node in _walk(layout)
+        if isinstance(getattr(node, "id", None), str)
+        and getattr(node, "disabled", None) is not None
+    }
+    for name in ("submit", "new-run", "solve", "editor-add", "editor-check",
+                 "editor-optimize"):
+        assert disabled[name] is True, name
+
+    # ... and each disabled area says why, in the session's own words.
+    rendered = json.dumps(_as_plain(layout))
+    for capability in ("submit", "solve", "edit"):
+        assert store_only().why_not(capability) in rendered
 
 
 def test_the_panels_sit_two_across_in_two_rows(finished_run):
     """The 2x2 grid, and that it may stack rather than scroll sideways."""
     path, _, _ = finished_run
-    rows = [node for node in _walk(build_layout(path))
+    # The page's own rows, not every flex container in it: the editor lays
+    # its palette out with flex too, and "a row of panels" is the thing with
+    # the gap `_row` gives it.
+    rows = [node for node in _walk(build_layout(path, store_only()))
             if isinstance(getattr(node, "style", None), dict)
             and node.style.get("display") == "flex"
-            and node.style.get("flexWrap") == "wrap"]
+            and node.style.get("gap") == "14px"]
 
     assert len(rows) == 2, "two rows of two"
     for row in rows:
@@ -446,7 +542,7 @@ def test_a_submission_with_an_empty_box_is_refused_and_not_retried(finished_run)
     """
     path, _, _ = finished_run
     human = HumanOptimizer(FORM.bounds(), timeout=0.01)
-    app = create_app(path, human=human)
+    app = create_app(path, _session(human))
     client = app.server.test_client()
     output = next(key for key in app.callback_map if key.startswith("..submitted"))
     theta = [1.0, None, 0.0, None, 0.0]
@@ -486,7 +582,7 @@ def test_a_step_button_moves_its_own_coefficient_over_the_endpoint(finished_run)
     """
     path, _, _ = finished_run
     human = HumanOptimizer(FORM.bounds(), timeout=0.01)
-    app = create_app(path, human=human)
+    app = create_app(path, _session(human))
     client = app.server.test_client()
     output = '{"index":["MATCH"],"type":"theta"}.value'
     assert output in app.callback_map
@@ -556,7 +652,7 @@ def test_a_page_one_argument_short_is_diagnosed_not_a_traceback(finished_run):
     find the cause, and ``dcc.Interval`` reprints it every three seconds.
     """
     path, run_id, _ = finished_run
-    app = create_app(path)
+    app = create_app(path, store_only())
     client = app.server.test_client()
     dependencies = json.loads(client.get("/_dash-dependencies").data)
 
@@ -581,7 +677,7 @@ def test_a_page_one_argument_short_is_diagnosed_not_a_traceback(finished_run):
 def test_a_callback_this_server_never_had_is_refused_the_same_way(finished_run):
     """The other half of stale: a page asking for a callback since removed."""
     path, _, _ = finished_run
-    client = create_app(path).server.test_client()
+    client = create_app(path, store_only()).server.test_client()
     response = client.post("/_dash-update-component", json={
         "output": "..long-gone.children..", "outputs": [],
         "inputs": [], "state": [], "changedPropIds": [],
@@ -594,7 +690,7 @@ def test_the_check_counts_a_pattern_matching_group_once(finished_run):
     """Five theta sliders are one argument, which is what dash indexes."""
     path, _, _ = finished_run
     human = HumanOptimizer(FORM.bounds(), timeout=0.01)
-    app = create_app(path, human=human)
+    app = create_app(path, _session(human))
     submitted = next(key for key in app.callback_map if key.startswith("..submitted"))
 
     # submit.n_clicks, tick.n_intervals, the whole theta group, last-submission.
@@ -615,7 +711,7 @@ def test_the_layout_and_the_dependency_list_are_never_cached(finished_run):
     the person who loaded it, which is the confusing version of this bug.
     """
     path, _, _ = finished_run
-    client = create_app(path).server.test_client()
+    client = create_app(path, store_only()).server.test_client()
     for route in ("/", "/_dash-layout", "/_dash-dependencies"):
         assert client.get(route).headers.get("Cache-Control") == "no-store", route
 
@@ -639,12 +735,12 @@ def _outputs(key):
 
 def test_the_layout_has_every_panel(finished_run):
     path, _, _ = finished_run
-    layout = build_layout(path)
+    layout = build_layout(path, store_only())
     ids = _component_ids(layout)
-    assert {"run", "history", "scrubber", "formula-x", "formula-c", "baseline",
+    assert {"run", "history", "scrubber", "formula-parts", "baseline",
             "heatmap", "system", "density", "potential", "tick"} <= ids
-    # No human endpoint unless one was injected.
-    assert "submit" not in ids
+    # The submit button is *there* and disabled: one layout always (D33).
+    assert "submit" in ids
 
 
 # --------------------------------------------------------------------------
@@ -704,7 +800,7 @@ def test_a_human_session_wires_its_run_into_the_dashboard(finished_run):
     """The follow_run plumbing exists end to end, not just as a parameter."""
     path, _, _ = finished_run
     human = HumanOptimizer(FORM.bounds())
-    app = create_app(path, human=human, follow_run=4242)
+    app = create_app(path, _session(human, follow=lambda: 4242))
     assert app.layout is not None
     # The refresh callback is registered and owns the run dropdown.
     outputs = {output.component_id for key in app.callback_map
@@ -923,7 +1019,7 @@ def test_an_unknown_scale_is_refused_rather_than_silently_linear():
 
 def test_the_scale_toggle_is_in_the_layout(finished_run):
     path, _, _ = finished_run
-    assert "heatmap-scale" in _component_ids(build_layout(path))
+    assert "heatmap-scale" in _component_ids(build_layout(path, store_only()))
 
 
 # --------------------------------------------------------------------------
@@ -981,7 +1077,7 @@ def test_switching_runs_does_not_strand_the_slider_past_the_end():
 def test_every_panel_carries_an_explanation(finished_run):
     """B: each card explains itself, and the heatmap explains the figure."""
     path, _, _ = finished_run
-    hints = _hints(build_layout(path))
+    hints = _hints(build_layout(path, store_only()))
 
     assert set(hints) == {"hint-run", "hint-functional", "hint-regime", "hint-system"}
     assert all(len(text) > 80 for text in hints.values())
@@ -1006,17 +1102,17 @@ def test_the_submitted_line_stops_saying_waiting_once_it_is_not(finished_run):
     last = {"clicks": 1, "theta": [float(c) for c in theta], "index": 0}
 
     # Queued and not yet picked up.
-    assert "1 waiting" in app_module.submission_line(human, last)
+    assert "1 waiting" in app_module.submission_line(_session(human), last)
 
     # The worker has taken it but has not finished: the queue is empty and
     # the history has not grown, which is neither "waiting" nor "done".
     human.ask()
-    line = app_module.submission_line(human, last)
+    line = app_module.submission_line(_session(human), last)
     assert "waiting" not in line and "evaluating" in line
 
     # Told: the line reports the score the session was given (D20).
     human.tell(theta, 1.25e-3)
-    line = app_module.submission_line(human, last)
+    line = app_module.submission_line(_session(human), last)
     assert "waiting" not in line and "1.2500e-03" in line
     assert "1.0000" in line, "and still says what was submitted"
 
@@ -1029,7 +1125,7 @@ def test_the_submitted_line_tracks_the_submission_it_was_told_about():
         last = {"clicks": 1, "theta": [float(c) for c in theta],
                 "index": len(human.history)}
         human.tell(human.ask(), score)
-        assert f"{score:.4e}" in app_module.submission_line(human, last)
+        assert f"{score:.4e}" in app_module.submission_line(_session(human), last)
 
 
 def test_an_endpoint_with_no_history_still_gets_a_true_line():
@@ -1041,7 +1137,12 @@ def test_an_endpoint_with_no_history_still_gets_a_true_line():
         def submit(self, theta):
             return theta
 
-    line = app_module.submission_line(Minimal(), {"theta": [1.0], "index": 0})
+    endpoint = Minimal()
+    session = Session(
+        submit=endpoint.submit,
+        submissions=lambda: {"pending": endpoint.pending_submissions},
+    )
+    line = app_module.submission_line(session, {"theta": [1.0], "index": 0})
     assert "1 waiting" in line
 
 
@@ -1054,8 +1155,8 @@ def test_the_proposal_panel_is_explained_too(finished_run):
     path, _, _ = finished_run
     human = HumanOptimizer(FORM.bounds())
 
-    viewer = _hints(build_layout(path))["hint-functional"]
-    session = _hints(build_layout(path, human))["hint-functional"]
+    viewer = _hints(build_layout(path, store_only()))["hint-functional"]
+    session = _hints(build_layout(path, _session(human)))["hint-functional"]
 
     assert "exchange" in viewer and "correlation" in viewer
     assert viewer in session, "a session should not lose the formula legend"
@@ -1233,5 +1334,5 @@ def test_a_submission_of_the_wrong_length_is_refused():
 def test_the_proposal_panel_appears_only_with_a_human_endpoint(finished_run):
     path, _, _ = finished_run
     human = HumanOptimizer(FORM.bounds())
-    ids = _component_ids(build_layout(path, human))
+    ids = _component_ids(build_layout(path, _session(human)))
     assert "submit" in ids and "submitted" in ids

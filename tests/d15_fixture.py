@@ -102,6 +102,32 @@ def build_stack(systems: list[SystemRecord], seed: int = SEED) -> SearchDriver:
     )
 
 
+def build_document_stack(systems: list[SystemRecord], seed: int = SEED) -> SearchDriver:
+    """The same composition, driven by the form *document* (3.2).
+
+    The only difference from :func:`build_stack` is which ``FunctionalForm``
+    is injected -- which is the claim the migration makes and the reason this
+    lives beside the original rather than replacing it. ``theta_order`` keeps
+    the coefficient optimizer's bounds in Stage 2's hand-written order, so the
+    seeded sampler consumes its RNG exactly as before and the trial sequence
+    is comparable at all.
+    """
+    from xcsearch.forms import library
+    from xcsearch.optimizers.composed import DocumentForm
+    from xcsearch.worlds.exp1d.functionals import primitive_constants
+
+    form = DocumentForm(
+        library.stage2_local_ansatz(),
+        primitives=primitive_constants(),
+        theta_order=library.stage2_slot_order(),
+    )
+    return SearchDriver(
+        optimizer=FixedFormOptimizer(form, OptunaTPE(form.bounds(), seed=seed)),
+        evaluators=[FrozenDensityEvaluator(systems)],
+        policy=MeanSquaredError(),
+    )
+
+
 def run(path: str, seed: int = SEED, trials: int = TRIALS):
     """``(systems, best_theta, train_mse)`` for the pinned configuration."""
     systems = load_frozen(path)

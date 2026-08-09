@@ -105,6 +105,31 @@ def eps_c_lda(n: np.ndarray) -> np.ndarray:
     return -(_A * n) / (_KAPPA * denom)
 
 
+def primitive_constants() -> dict:
+    """This world's constants for the registered primitive leaves (D21/D25).
+
+    ``forms/`` owns the *shape* of ``lda_x`` and ``lda_c`` -- the arctan and
+    Pade closed forms, written in jnp so autograd can see through them -- and
+    this world owns their *constants*. Handed over as plain data at
+    composition, exactly like the protocol payload and the supply table: the
+    representation never imports a world and the world never imports the
+    representation.
+
+    The Pade row is ordered as the closed form reads it: ``alpha, beta, gamma,
+    delta, eta, sigma, nu`` (Baker et al. 2015, Table I, unpolarised).
+    """
+    return {
+        "lda_x": {"A": _A, "kappa": _KAPPA},
+        "lda_c": {
+            "A": _A,
+            "kappa": _KAPPA,
+            "pade": [
+                _C_ALPHA, _C_BETA, _C_GAMMA, _C_DELTA, _C_ETA, _C_SIGMA, _C_NU,
+            ],
+        },
+    }
+
+
 def eps_x_ansatz(n: np.ndarray, theta: np.ndarray) -> np.ndarray:
     """Exchange energy per particle for parameters ``theta`` (D6)."""
     theta = np.asarray(theta, dtype=float)

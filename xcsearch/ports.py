@@ -72,6 +72,57 @@ class Functional(ABC):
     def to_latex(self) -> str:
         """LaTeX for the formula panel (feature 4), coefficients filled in."""
 
+    def document(self) -> dict | None:
+        """The form document behind this candidate, as plain data (D25).
+
+        ``{"hash", "json", "latex", "parent_hash"}`` -- the canonical
+        serialization of the form, its content hash, the per-part latex
+        rendered at insertion time, and an optional lineage edge. The store
+        writes it into the append-only ``forms`` room and keeps a foreign key
+        on the candidate, which is what makes ``build(document, theta)``
+        trustworthy later: the document *is* the form, not a name pointing at
+        code.
+
+        Concrete, returning ``None``, for the same reason ``Evaluator.describe``
+        is concrete: an adapter that predates the representation (or is a
+        hand-written one-off) still stores, it just stores no form row. The
+        alternative -- an abstract method -- would break every existing
+        adapter to record a fact only some of them have.
+
+        Plain data on purpose. The store never imports ``forms/``: it receives
+        hash, json and latex the same way it receives a system's arrays and a
+        protocol's payload.
+        """
+        return None
+
+    def parts(self, x: XCInput) -> dict[str, float] | None:
+        """Per-part energies (``exchange``, ``correlation``, ...), or ``None``.
+
+        Concrete and optional, like ``document``. A form built from a document
+        has *named parts* (Core B), so "what is this candidate's exchange
+        energy" became a question the port can answer -- and a rung-0
+        condition about exchange alone stopped having to subtract a
+        correlation the world happened to know was fixed. An adapter with no
+        parts says so by returning ``None``, and a condition that needs them
+        either falls back or refuses namedly.
+
+        The keys are the document's part names; their sum is ``exc``.
+        """
+        del x
+        return None
+
+    def requires(self) -> set[str]:
+        """Ingredient names this candidate reads beyond ``n`` and ``w`` (D27).
+
+        The evaluator populates exactly these optional ``XCInput`` fields, and
+        composition matches them against what a world supplies. Derived, never
+        declared: a document-backed functional computes this from its own
+        canonical document, so a form's requirements cannot drift from the
+        form. The default is the empty set -- the honest answer for an adapter
+        reading only the density and the weights.
+        """
+        return set()
+
 
 class FunctionalForm(ABC):
     """The *family* a ``Functional`` belongs to: a form with free coefficients.

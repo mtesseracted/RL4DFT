@@ -15,7 +15,7 @@ import pytest
 import d15_fixture as fx
 
 from xcsearch.evaluators import ConditionsEvaluator, FrozenDensityEvaluator
-from xcsearch.ports import Condition
+from xcsearch.ports import Condition, Functional
 from xcsearch.ranking import MeanSquaredError
 from xcsearch.records import XCInput
 from xcsearch.worlds.exp1d.conditions import (
@@ -27,10 +27,19 @@ from xcsearch.worlds.exp1d.conditions import (
     probe_densities,
 )
 from xcsearch.worlds.exp1d.dataset import load_frozen
-from xcsearch.worlds.exp1d.functionals import LDA_THETA, LocalAnsatzForm
+from xcsearch.forms import library
+from xcsearch.optimizers.composed import DocumentForm
+from xcsearch.worlds.exp1d.functionals import LDA_THETA, primitive_constants
 from xcsearch.worlds.exp1d.world import e_hartree
 
-FORM = LocalAnsatzForm()
+# The conditions now evaluate *documents* (3.4/D31), so the form these
+# tests drive is the migrated one -- same family, same bounds, same theta
+# order, and it publishes the named parts a part-wise condition reads.
+FORM = DocumentForm(
+    library.stage2_local_ansatz(),
+    primitives=primitive_constants(),
+    theta_order=library.stage2_slot_order(),
+)
 
 
 def _lda():
@@ -41,10 +50,14 @@ def _lda():
 # Uniform-gas consistency
 # --------------------------------------------------------------------------
 def test_the_lda_member_satisfies_uniform_gas_consistency_exactly():
-    # (a) Exactly 0.0 -- not "small". The LDA member *is* this world's uniform
-    # gas, so anything else would mean the closed form and the ansatz had
-    # drifted apart.
-    assert UniformGasConsistency().violation(_lda()) == 0.0
+    # (a) The LDA member *is* this world's uniform gas, so anything but zero
+    # would mean the closed form and the ansatz had drifted apart. It is now
+    # zero to the last bit rather than *at* zero: the compiled document sums
+    # per term while `eps_x_lda`/`eps_c_lda` assemble one expression, so the
+    # difference is the 3.2 machine-precision gap and not a drift. The
+    # violation is an RMS energy density on an O(0.1) scale, so 1e-16 is that
+    # gap and nothing else.
+    assert UniformGasConsistency().violation(_lda()) < 1e-15
 
 
 @pytest.mark.parametrize(
@@ -84,8 +97,14 @@ def test_a_functional_that_exactly_cancels_the_hartree_term_scores_zero():
     x, w, n = one_electron_probe()
     condition = OneElectronSelfInteraction(x, w, n)
 
-    class ExactlySelfInteractionFree:
-        """E_xc[n] = -E_H[n] on this probe, by construction."""
+    class ExactlySelfInteractionFree(Functional):
+        """E_xc[n] = -E_H[n] on this probe, by construction.
+
+        Subclasses the port rather than duck-typing it: `requires()` and
+        `parts()` are concrete on the ABC, and an adapter that says what it
+        implements gets them for free (which is the argument ports.py makes
+        for ABCs over typing.Protocol).
+        """
 
         def exc(self, xc_input: XCInput) -> float:
             return -e_hartree(xc_input.n, x, xc_input.w)
@@ -162,7 +181,12 @@ def test_the_evaluator_emits_one_rung_zero_record_per_condition():
         assert np.isfinite(record.value)
 
     names = [r.metric for r in records]
-    assert names == ["uniform_gas", "one_electron_si", "exchange_non_positivity"]
+    # 3.4 added two: correlation non-positivity (readable now that a document
+    # publishes its parts) and size consistency (the v_ext guard).
+    assert names == [
+        "uniform_gas", "one_electron_si", "exchange_non_positivity",
+        "correlation_non_positivity", "size_consistency",
+    ]
 
 
 def test_two_conditions_with_the_same_name_are_refused():
@@ -196,8 +220,17 @@ def test_adding_rung_zero_to_the_stack_moves_no_stage_one_number(tmp_path):
     pinned = fx.load_pinned()
 
     driver = fx.build_stack(systems)
-    # The same stack the fixture pins, with rung 0 prepended.
-    driver.evaluators = [ConditionsEvaluator(default_conditions())] + driver.evaluators
+    # The same stack the fixture pins, with rung 0 prepended. The conditions
+    # are the *document* ones now, so they need a candidate that publishes
+    # parts -- which the closed-form stack's does not. Everything except the
+    # part-wise conditions applies to either, so the stack takes that subset:
+    # what this test is about is that adding rung 0 moves no rung-1 number,
+    # and which rung-0 rows there are is 3.4's business, asserted there.
+    portable = [
+        c for c in default_conditions()
+        if c.name not in ("correlation_non_positivity",)
+    ]
+    driver.evaluators = [ConditionsEvaluator(portable)] + driver.evaluators
     result = driver.run(fx.TRIALS)
 
     assert [float(c) for c in result.best_functional.fingerprint()[1]] == pinned[
@@ -243,6 +276,8 @@ def test_the_conditions_evaluator_and_the_frozen_one_compose(tmp_path):
     ):
         records += evaluator.evaluate(_lda())
 
-    assert [r.rung for r in records[: len(default_conditions())]] == [0, 0, 0]
+    assert [r.rung for r in records[: len(default_conditions())]] == [0] * len(
+        default_conditions()
+    )
     assert {r.rung for r in records[len(default_conditions()) :]} == {1}
     assert len(records) == len(default_conditions()) + len(systems)

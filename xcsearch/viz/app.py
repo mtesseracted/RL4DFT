@@ -107,15 +107,18 @@ _RUN_HINT = (
 )
 
 _FUNCTIONAL_HINT = (
-    "The selected trial's functional, split the way the form itself is: an "
-    "exchange term carrying every searched coefficient, and a correlation "
-    "term carrying none.\n\n"
-    "Exchange is LDA exchange scaled by c0, plus the density raised to 1/2, "
-    "1, 3/2 and 2 with coefficients c1..c4. Correlation is LDA correlation, "
-    "fixed -- the search does not touch it, which is why that box has nothing "
-    "to set. LDA itself is theta = [1, 0, 0, 0, 0], which is why c0 near 1 "
-    "with small tail terms reads as a correction to it rather than a "
-    "replacement for it.\n\n"
+    "The selected trial's functional, in the parts the form itself declares. "
+    "Each box is one named part of the stored form document, with the "
+    "coefficients that belong to it and the box each one was searched "
+    "inside.\n\n"
+    "For the seeded form that is exchange -- LDA exchange scaled by one "
+    "coefficient, plus the density raised to a menu of rational powers -- and "
+    "a correlation part with no free coefficient at all. Which parts exist, "
+    "and which coefficients sit under each, is read from the document rather "
+    "than assumed here, so a form with three parts renders as one. LDA itself "
+    "is the member with the LDA scale at 1 and every power coefficient at 0, "
+    "which is why a scale near 1 with small tail terms reads as a correction "
+    "to it rather than a replacement for it.\n\n"
     "theta is the coefficient vector as proposed. score is the value stored "
     "for that proposal at the time it was made, not a re-derivation of it here."
 )
@@ -247,34 +250,74 @@ def check_human_endpoint(human) -> None:
         )
 
 
-# The marker the exchange and correlation halves of a stored formula are
-# split on. The form writes `<exchange terms> + \epsilon_c^{...}(n)` and the
-# panel shows the two separately, which is a *rendering* convention and not a
-# claim about physics -- viz still reads a string out of a record and knows
-# nothing about what produced it (D13). If the day comes that forms differ in
-# how they separate, the honest fix is for the form to publish its parts
-# rather than for this to grow cases; until then one marker and a fallback
-# that shows the formula whole are enough.
-_CORRELATION_TERM = r"\epsilon_c"
+# F1.11's string surgery lived here: a stored one-line formula was cut at the
+# last `\epsilon_c` to guess where exchange ended and correlation began. It is
+# *deleted* rather than bypassed, because the guess is no longer needed --
+# 3.2's forms room stores the latex the representation rendered **per part**,
+# so the panel reads the parts a form publishes instead of reverse-engineering
+# them from a rendered string. The honest fix the old comment asked for, taken.
 
 
-def split_formula(latex: str) -> tuple[str, str]:
-    """A stored formula as (exchange, correlation), right-hand sides only.
+def formula_parts(record: dict, form: dict | None) -> list:
+    """The functional panel's body: one labelled box per part of the form.
 
-    The left-hand side is dropped because the two boxes are already labelled;
-    printing ``\\epsilon_{xc}(n) =`` above each half would say the wrong thing
-    twice. A formula with no correlation term comes back whole in the first
-    slot and empty in the second, so an unfamiliar form renders as itself
-    rather than as nothing.
+    ``form`` is what ``data.form_for`` returned -- per-part latex and the slot
+    boxes, both straight out of the stored document. When it is ``None`` (a
+    candidate from an adapter with no document) the whole-form latex the
+    candidate row has always carried is shown under one unnamed box, so an
+    older store renders as itself rather than as nothing.
+
+    The coefficient list is why a **store-only viewer** can now show bounds:
+    they are in the document, the document is in the store, and no candidate
+    has to be rebuilt to read them. That was the obstacle R2 recorded, gone as
+    a side effect of a machine-path need.
     """
-    if not latex:
-        return "", ""
-    _, equals, right = latex.partition("=")
-    body = (right if equals else latex).strip()
-    cut = body.rfind(_CORRELATION_TERM)
-    if cut < 0:
-        return body, ""
-    return body[:cut].rstrip().rstrip("+").rstrip(), body[cut:].strip()
+    theta = list(record.get("theta") or [])
+    if form is None:
+        whole = (record.get("form_latex") or "").strip()
+        return [_subbox("form", dcc.Markdown(f"$${whole}$$" if whole else "",
+                                             mathjax=True))]
+
+    slots = form.get("slots") or []
+    boxes = []
+    for index, part in enumerate(sorted(form.get("latex", {}))):
+        if part == "__all__":
+            continue
+        rendered = form["latex"][part]
+        rows = [
+            _coefficient_line(position, entry, theta)
+            for position, entry in enumerate(slots)
+            if entry["part"] == part
+        ]
+        boxes.append(_subbox(
+            part,
+            dcc.Markdown(f"$${rendered}$$" if rendered else "", mathjax=True),
+            *([html.Div(rows, style={"marginTop": "4px"})] if rows else
+              [html.Div("fixed -- this part proposes no coefficients",
+                        style={"fontSize": "11px", "color": "#9aa1a9",
+                               "marginTop": "2px"})]),
+        ))
+        del index
+    return boxes
+
+
+def _coefficient_line(position: int, entry: dict, theta: list) -> html.Div:
+    """``c_k = value  [low, high]`` -- read-only, from the stored document."""
+    low, high = entry["bounds"]
+    value = theta[position] if position < len(theta) else None
+    shown = "--" if value is None else f"{float(value):+.4f}"
+    return html.Div(
+        [
+            html.Span(f"c{position}", style={"width": "26px", "display": "inline-block"}),
+            html.Span(shown, style={"width": "78px", "display": "inline-block"}),
+            html.Span(f"[{_g(low)}, {_g(high)}]", style={"color": "#9aa1a9"}),
+        ],
+        style={"fontFamily": "monospace", "fontSize": "11.5px", "color": "#4a525c"},
+    )
+
+
+def _g(value) -> str:
+    return "?" if value is None else f"{float(value):g}"
 
 
 def step_size(low: float, high: float) -> float:
@@ -307,8 +350,14 @@ _STEP_BUTTON = {
 }
 
 
-def coefficient_rows(bounds) -> list:
+def coefficient_rows(bounds, parts=None, disabled: bool = False) -> list:
     """A typed box per coefficient, with a step button on either side.
+
+    ``parts`` names the part each coefficient belongs to, from the form
+    document (``DocumentForm.slot_parts``), and the boxes are grouped under
+    those names. Grouping is the *form's* statement about itself now, not the
+    panel's assumption that every searched parameter is an exchange parameter
+    -- which was true of exactly one form.
 
     Text rather than a slider because these are numbers a person has a value
     in mind for -- reproducing a published theta, or nudging one digit of the
@@ -319,85 +368,229 @@ def coefficient_rows(bounds) -> list:
     The id shape is unchanged from the sliders, so the submit callback that
     collects them does not know these are different components.
     """
-    return [
+    bounds = list(bounds)
+    parts = list(parts) if parts is not None else [None] * len(bounds)
+    rows: list = []
+    previous = object()
+    for index, ((low, high), part) in enumerate(zip(bounds, parts)):
+        if part != previous:
+            previous = part
+            if part is not None:
+                rows.append(html.Div(
+                    part,
+                    style={"fontSize": "11px", "color": "#7a828c",
+                           "margin": "6px 0 2px", "textTransform": "lowercase"},
+                ))
+        rows.append(_coefficient_input(index, low, high, disabled))
+    return rows
+
+
+def _coefficient_input(index: int, low: float, high: float,
+                       disabled: bool = False) -> html.Div:
+    return (
         html.Div(
             [
                 html.Label(f"c{index}", style={"width": "24px", "fontFamily": "monospace",
                                                "fontSize": "12px", "color": "#4a525c"}),
                 html.Button("−", id={"type": "theta-down", "index": index},
-                            n_clicks=0, style=_STEP_BUTTON),
+                            n_clicks=0, disabled=disabled, style=_STEP_BUTTON),
                 dcc.Input(
                     id={"type": "theta", "index": index}, type="number",
-                    value=1.0 if index == 0 else 0.0,
+                    value=1.0 if index == 0 else 0.0, disabled=disabled,
                     min=low, max=high, step=step_size(low, high),
                     style={"width": "82px", "margin": "0 4px", "padding": "3px 6px",
                            "border": "1px solid #d4d9e0", "borderRadius": "4px",
                            "fontFamily": "monospace", "fontSize": "12px"},
                 ),
                 html.Button("+", id={"type": "theta-up", "index": index},
-                            n_clicks=0, style=_STEP_BUTTON),
+                            n_clicks=0, disabled=disabled, style=_STEP_BUTTON),
                 html.Span(f"[{low:g}, {high:g}]",
                           style={"marginLeft": "8px", "fontSize": "11px",
                                  "color": "#9aa1a9", "fontFamily": "monospace"}),
             ],
             style={"display": "flex", "alignItems": "center", "marginBottom": "4px"},
         )
-        for index, (low, high) in enumerate(bounds)
-    ]
+    )
 
 
-def functional_card(human=None, new_run=None) -> html.Div:
-    """The functional panel: the formula in parts, and a way to propose one.
+# Live numbers are marked, every time they render (D34). Not decoration: the
+# amended D13 says a number on screen is either in a record, reachable from
+# one, or *explicitly marked as a live diagnostic that is not*, and this is
+# what "explicitly" is made of.
+_LIVE_STYLE = {"fontFamily": "monospace", "fontSize": "12px", "color": "#8a5a00",
+               "background": "#fff8e6", "padding": "2px 6px", "borderRadius": "4px"}
 
-    Both modes show the same two boxes. The difference is that in a human
-    session the exchange box also carries the coefficients, which is where
-    they belong: every searched parameter of this form is an exchange
-    parameter, and correlation is fixed LDA with nothing to set. Putting the
-    inputs beside the term they are the coefficients *of* is the whole reason
-    the panel is split.
+
+def _with_term(document, term) -> dict:
+    """Append a term to a document's part, as plain JSON.
+
+    The editor's whole document manipulation, and deliberately the whole of
+    it: everything that needs to know what a form *means* -- what a term is,
+    what the document canonicalizes to -- is a session-injected callable.
+    This just puts JSON in a list.
     """
-    exchange = [dcc.Markdown(id="formula-x", mathjax=True)]
-    if human is not None:
-        check_human_endpoint(human)
-        exchange += [
-            html.Div(style={"borderTop": "1px solid #eceef1", "margin": "8px 0 7px"}),
-            *coefficient_rows(human.bounds),
-        ]
+    part = term.get("part", "exchange")
+    document = dict(document or {"schema": term["schema"], "variables": {},
+                                 "parts": {}})
+    document["variables"] = dict(document.get("variables") or {})
+    document["variables"].update(term.get("variables") or {})
+    parts = dict(document.get("parts") or {})
+    existing = parts.get(part) or {"kind": "sum", "terms": []}
+    parts[part] = {"kind": "sum", "terms": list(existing["terms"]) + [term["term"]]}
+    document["parts"] = parts
+    return document
 
-    children = [
-        _subbox("exchange", *exchange),
-        _subbox(
-            "correlation",
-            dcc.Markdown(id="formula-c", mathjax=True),
-            html.Div("fixed -- the search proposes no correlation coefficients",
-                     style={"fontSize": "11px", "color": "#9aa1a9", "marginTop": "2px"}),
-        ),
-        html.Div(id="theta"),
+
+def _disabled_note(session, capability: str) -> html.Div:
+    """Why an area cannot act. Rendered in place of nothing (D33)."""
+    return html.Div(
+        session.why_not(capability),
+        style={"fontSize": "11px", "color": "#9aa1a9", "margin": "4px 0"},
+    )
+
+
+def propose_box(session) -> html.Div:
+    """The manual-coefficient path: boxes, a submit button, a new-run button.
+
+    Always rendered, whatever the session can do. Without ``submit`` the
+    inputs are disabled and the reason is stated -- which is the whole of the
+    session collapse: one layout, and capability is *data* the areas read
+    rather than a branch the layout takes.
+    """
+    can_submit = session.can("submit")
+    parts = [entry.get("part") for entry in session.coefficients]
+    if can_submit and not session.coefficients:
+        raise ValueError(
+            "this session can submit but declares no coefficient boxes: the "
+            "submit button would post an empty theta. The composition root "
+            "builds both from the run's form -- see "
+            "`run_stage2.coefficient_layout`."
+        )
+    bounds = [tuple(entry["bounds"]) for entry in session.coefficients]
+    children = [html.Div("propose", style={"fontSize": "11px", "color": "#7a828c",
+                                           "marginBottom": "2px"})]
+    if not can_submit:
+        children.append(_disabled_note(session, "submit"))
+    children += coefficient_rows(bounds, parts, disabled=not can_submit)
+    children += [
+        html.Button("submit", id="submit", n_clicks=0, disabled=not can_submit,
+                    style={"marginTop": "8px"}),
+        # What was last submitted, so the line under the button can be
+        # recomputed on the tick instead of frozen at the click.
+        dcc.Store(id="last-submission"),
+        html.Div(id="submitted", style={"fontSize": "13px", "marginTop": "6px"}),
+        html.Hr(style={"border": "none", "borderTop": "1px solid #eceef1",
+                       "margin": "12px 0 10px"}),
+        html.Button("start a new run", id="new-run", n_clicks=0,
+                    disabled=not session.can("new_run")),
+        html.Div(id="new-run-status",
+                 style={"fontSize": "13px", "marginTop": "6px", "color": "#4a525c"}),
     ]
+    return _subbox("propose", *children)
 
-    if human is not None:
-        children += [
-            html.Button("submit", id="submit", n_clicks=0,
-                        style={"marginTop": "8px"}),
-            # What was last submitted, so the line under the button can be
-            # recomputed on the tick instead of frozen at the click.
-            dcc.Store(id="last-submission"),
-            html.Div(id="submitted", style={"fontSize": "13px", "marginTop": "6px"}),
-            # A session runs one trial per submission for as long as you keep
-            # submitting, so "start a new run" is the only run-shaped control
-            # it needs: there is no length to declare up front.
-            *([
-                html.Hr(style={"border": "none", "borderTop": "1px solid #eceef1",
-                               "margin": "12px 0 10px"}),
-                html.Button("start a new run", id="new-run", n_clicks=0),
-                html.Div(id="new-run-status",
-                         style={"fontSize": "13px", "marginTop": "6px",
-                                "color": "#4a525c"}),
-            ] if new_run is not None else []),
-        ]
 
-    hint = _FUNCTIONAL_HINT if human is None else f"{_FUNCTIONAL_HINT}\n\n{_PROPOSAL_HINT}"
-    return _card("functional", *children, hint=hint)
+def editor_box(session) -> html.Div:
+    """The structural editor: a palette and a list, never a formula parser (D35).
+
+    The human *is* the form proposer here -- powers are structure (D22), so
+    the exponent is something a person sets and the coefficient optimizer
+    never sees. Freeform latex input is deliberately out of scope: the
+    Dash-era editor manipulates documents structurally and the
+    representation's own latex renders the preview, so what you see is what
+    the canonical document says rather than what you typed.
+
+    Two submission paths, both in this box:
+
+    * **manual** -- coefficients through the unchanged ``HumanOptimizer`` port,
+      in the box above;
+    * **the delegate path** -- an optimize button that composes (current
+      document x selected objective x protocol) into a *driver-side run*. The
+      human proposes the form; the machine fits the coefficients. That is
+      D11's two-level search with a person in the outer seat, and because the
+      run is a proper recorded run under a protocol row, it is consistent with
+      the amended D13 by construction rather than by care.
+    """
+    can_edit = session.can("edit")
+    palette = [{"label": entry.get("label", name), "value": name}
+               for name, entry in sorted(session.palette.items())]
+    objectives = [{"label": entry.get("label", name), "value": name}
+                  for name, entry in sorted(
+                      (session.objectives or {}).items()
+                      if isinstance(session.objectives, dict)
+                      else ((o, {"label": o}) for o in (session.objectives or []))
+                  )]
+    children = [
+        dcc.Store(id="editor-document"),
+        html.Div("build a form", style={"fontSize": "11px", "color": "#7a828c",
+                                        "marginBottom": "4px"}),
+    ]
+    if not can_edit:
+        children.append(_disabled_note(session, "edit"))
+    children += [
+        html.Div(
+            [
+                dcc.Dropdown(id="editor-palette", options=palette,
+                             value=palette[0]["value"] if palette else None,
+                             disabled=not can_edit, clearable=False,
+                             style={"flex": "1 1 160px", "fontSize": "12px"}),
+                dcc.Input(id="editor-power-num", type="number", value=1, step=1,
+                          disabled=not can_edit,
+                          style={"width": "54px", "marginLeft": "6px"}),
+                html.Span("/", style={"margin": "0 3px", "color": "#9aa1a9"}),
+                dcc.Input(id="editor-power-den", type="number", value=2, step=1,
+                          min=1, disabled=not can_edit, style={"width": "54px"}),
+                html.Button("add", id="editor-add", n_clicks=0,
+                            disabled=not can_edit, style={"marginLeft": "6px"}),
+                html.Button("clear", id="editor-clear", n_clicks=0,
+                            disabled=not can_edit, style={"marginLeft": "4px"}),
+            ],
+            style={"display": "flex", "alignItems": "center", "flexWrap": "wrap"},
+        ),
+        html.Div(id="editor-terms",
+                 style={"fontSize": "11.5px", "fontFamily": "monospace",
+                        "color": "#4a525c", "margin": "6px 0"}),
+        dcc.Markdown(id="editor-preview", mathjax=True),
+        html.Div(
+            [
+                html.Button("check", id="editor-check", n_clicks=0,
+                            disabled=not session.can("check")),
+                dcc.Dropdown(id="editor-objective", options=objectives,
+                             value=objectives[0]["value"] if objectives else None,
+                             disabled=not session.can("propose"), clearable=False,
+                             style={"flex": "1 1 180px", "marginLeft": "6px",
+                                    "fontSize": "12px"}),
+                html.Button("optimize", id="editor-optimize", n_clicks=0,
+                            disabled=not session.can("propose"),
+                            style={"marginLeft": "6px"}),
+            ],
+            style={"display": "flex", "alignItems": "center", "marginTop": "6px",
+                   "flexWrap": "wrap"},
+        ),
+        html.Div(id="editor-findings",
+                 style={"fontSize": "11.5px", "color": "#4a525c",
+                        "whiteSpace": "pre-wrap", "marginTop": "6px"}),
+    ]
+    return _subbox("structural editor", *children)
+
+
+def functional_card(session) -> html.Div:
+    """The functional panel: the form in its own parts, and two ways to propose.
+
+    The boxes are no longer "exchange" and "correlation" by assumption. They
+    are whatever parts the selected candidate's *document* declares, filled in
+    by the callback, so a two-part form and a five-part form render alike and
+    neither is a special case here.
+    """
+    return _card(
+        "functional",
+        # One container, filled per selection. Which parts a form has is a
+        # property of the form, so it cannot be a property of the layout.
+        html.Div(id="formula-parts"),
+        html.Div(id="theta"),
+        propose_box(session),
+        editor_box(session),
+        hint=f"{_FUNCTIONAL_HINT}\n\n{_PROPOSAL_HINT}",
+    )
 
 
 _RELOAD_ADVICE = (
@@ -550,8 +743,10 @@ def system_options(store_path: str) -> list[dict]:
     ]
 
 
-def build_layout(store_path: str, human=None, new_run=None) -> html.Div:
-    """The initial page. Every dropdown here is refreshed by ``_choices``.
+def build_layout(store_path: str, session=None) -> html.Div:
+    """The initial page, and there is only one of it (D33).
+
+    Every dropdown here is refreshed by ``_choices``.
 
     What this builds is a *starting* set of options, not the set: a store
     gains runs, candidates and system versions while the page is open -- a
@@ -559,6 +754,9 @@ def build_layout(store_path: str, human=None, new_run=None) -> html.Div:
     (B1) -- and ``app.layout`` is one object served to every visitor, so
     nothing built here is refreshed by reloading the browser either.
     """
+    from .session import Session
+
+    session = session or Session()
     runs = run_options(store_path)
     baselines = baseline_options(store_path)
     systems = system_options(store_path)
@@ -605,7 +803,7 @@ def build_layout(store_path: str, human=None, new_run=None) -> html.Div:
                                                 "marginTop": "2px"}),
                 hint=_RUN_HINT,
             ),
-            functional_card(human, new_run),
+            functional_card(session),
         ),
         _row(
             _card(
@@ -651,6 +849,23 @@ def build_layout(store_path: str, human=None, new_run=None) -> html.Div:
                 ),
                 html.Div(id="system-metrics",
                          style={"fontSize": "13px", "margin": "6px 0"}),
+                # The live face of the candidate-SCF service (D34). Per-system
+                # click, never a whole-population sweep: that was measured at
+                # ~363x the per-trial cost with endemic non-convergence on
+                # stretched geometries, so it is a possible future feature and
+                # not this one.
+                html.Div(
+                    [
+                        html.Button("solve self-consistently", id="solve",
+                                    n_clicks=0,
+                                    disabled=not session.can("solve")),
+                        *([] if session.can("solve")
+                          else [_disabled_note(session, "solve")]),
+                        html.Div(id="live-solve",
+                                 style={"marginTop": "6px"}),
+                    ],
+                    style={"margin": "2px 0 8px"},
+                ),
                 dcc.Graph(id="density", config={"displayModeBar": False}),
                 dcc.Graph(id="potential", config={"displayModeBar": False}),
                 hint=_SYSTEM_HINT,
@@ -709,7 +924,7 @@ def scrubber_value(rows: list[dict], current, previous, run_id) -> int:
     return min(current, last)
 
 
-def submission_line(human, last: dict) -> str:
+def submission_line(session, last: dict) -> str:
     """What became of the last thing submitted, as of now.
 
     Three states, and the reason to distinguish them is that a person who has
@@ -718,17 +933,17 @@ def submission_line(human, last: dict) -> str:
     -- it is the number the session was told (D20), read back from the
     endpoint's own history rather than recomputed here.
 
-    ``history`` is not part of the human contract, which is deliberately the
-    three things the panel *needs* (``bounds``, ``submit``,
-    ``pending_submissions``). An endpoint that keeps one gets a better line;
-    one that does not still gets a true one.
+    The session reports both through one reading, ``submissions()``. An
+    endpoint that keeps a history gets the better line; one that does not
+    still gets a true one, which is why this reads a dict with absent keys
+    rather than reaching into an optimizer.
     """
     theta = ", ".join(f"{c:.4f}" for c in last["theta"])
-    history = getattr(human, "history", None)
-    if history is not None and len(history) > last["index"]:
-        _, score = history[last["index"]]
-        return f"submitted [{theta}] - evaluated, score {score:.4e}"
-    pending = human.pending_submissions
+    state = session.submissions() if session.submissions is not None else {}
+    scores = state.get("scores") or []
+    if len(scores) > last["index"]:
+        return f"submitted [{theta}] - evaluated, score {scores[last['index']]:.4e}"
+    pending = state.get("pending") or 0
     if pending:
         return f"submitted [{theta}] - {pending} waiting"
     return f"submitted [{theta}] - evaluating"
@@ -795,30 +1010,28 @@ def scope_label(scope: dict) -> str:
     return line
 
 
-def create_app(store_path: str, human=None, status=None, follow_run=None,
-               new_run=None) -> Dash:
+def create_app(store_path: str, session=None) -> Dash:
     """Build the app. Every callback re-reads the store, so panels live-tail.
 
-    ``status`` is an optional zero-argument callable returning a line to show
-    above the panels -- ``serve_human_session`` passes one that reports a dead
-    search worker (B10). A callable rather than a queue or an object: the
-    dashboard polls it, and everything it knows about the search stays "a
-    string someone else computed".
+    **One parameter besides the store, and one layout always (D33).** What the
+    page can *do* is the injected ``session``: capabilities are data it
+    carries, every callback below is registered unconditionally, and one
+    without its capability returns a sentence saying so. That retires F1.9 --
+    the served page's callback arity no longer moves with configuration, so a
+    browser holding an older page cannot post a request this server cannot
+    parse.
 
-    ``new_run`` is the same idea in the other direction: a zero-argument
-    callable that asks the session to start a new run and returns a line
-    saying what was asked. Its button appears only when one is given. The
-    dashboard does not open the run itself and could not -- its connections
-    are read-only on purpose -- so this signals the thread that owns the
-    writes, exactly as ``submit`` signals the thread that owns the loop.
-
-    ``follow_run`` says which run the panels should land on; it may be an id
-    or a callable returning one, since a session's current run changes when
-    that button is used.
+    Entry points differ only in the session. A live run enables everything; a
+    dataset cache with no run enables solves while submission refuses with a
+    reason; a store alone disables the physics-dependent areas and says why.
+    There are no view modes, deliberately.
     """
+    from .session import Session
+
+    session = session or Session()
     app = Dash(__name__)
     app.title = "xcsearch"
-    app.layout = build_layout(store_path, human, new_run)
+    app.layout = build_layout(store_path, session)
 
     @app.callback(
         Output("scrubber", "max"),
@@ -867,8 +1080,7 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
         )
 
     @app.callback(
-        Output("formula-x", "children"),
-        Output("formula-c", "children"),
+        Output("formula-parts", "children"),
         Output("theta", "children"),
         Output("heatmap", "figure"),
         Output("conditions", "figure"),
@@ -881,14 +1093,17 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
     )
     def _candidate(selected, baseline_id, scale, _tick):
         if not selected or baseline_id is None:
-            return ("*no candidate selected*", "", "", figures.heatmap([]),
+            return (dcc.Markdown("*no candidate selected*"), "",
+                    figures.heatmap([]),
                     figures.condition_bars([]), "", "")
         candidate_id = selected["candidate_id"]
 
         record = data.candidate(store_path, candidate_id) or {}
         exact = baseline_id == data.EXACT
         baseline = {} if exact else (data.candidate(store_path, baseline_id) or {})
-        exchange, correlation = split_formula(record.get("form_latex", ""))
+        # The parts the form publishes, and the slot boxes it declares --
+        # both straight out of the stored document (D25). No surgery.
+        form = data.form_for(store_path, candidate_id)
         theta = ", ".join(f"{c:.4f}" for c in record.get("theta", []))
         candidate_label = f"candidate {candidate_id}"
         baseline_label = ("exact reference" if exact else
@@ -898,8 +1113,7 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
         per_system, conditions = data.split_conditions(
             data.heatmap(store_path, candidate_id, baseline_id))
         return (
-            f"$${exchange}$$" if exchange else "",
-            f"$${correlation}$$" if correlation else "",
+            formula_parts(record, form),
             html.Div(
                 [
                     html.Span(f"candidate {candidate_id}", style={"fontWeight": 600}),
@@ -987,7 +1201,8 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
         object built once and served to every visitor.
         """
         options = run_options(store_path)
-        following = follow_run() if callable(follow_run) else follow_run
+        follow = session.follow
+        following = follow() if callable(follow) else follow
         return (
             options,
             run_choice(options, current_run, offered, following),
@@ -1001,92 +1216,218 @@ def create_app(store_path: str, human=None, status=None, follow_run=None,
     )
     def _worker_status(_tick):
         """The watchdog line (B10). Silent unless there is something to say."""
-        return status() if status is not None else ""
+        return session.status() if session.can("status") else ""
 
-    if human is not None:
-        match, context = dash_match(), dash_context()
+    match, context = dash_match(), dash_context()
 
-        @app.callback(
-            Output({"type": "theta", "index": match}, "value"),
-            Input({"type": "theta-down", "index": match}, "n_clicks"),
-            Input({"type": "theta-up", "index": match}, "n_clicks"),
-            State({"type": "theta", "index": match}, "value"),
-            prevent_initial_call=True,
-        )
-        def _step(_down, _up, value):
-            """Move one coefficient by one step, in the direction clicked.
+    @app.callback(
+        Output({"type": "theta", "index": match}, "value"),
+        Input({"type": "theta-down", "index": match}, "n_clicks"),
+        Input({"type": "theta-up", "index": match}, "n_clicks"),
+        State({"type": "theta", "index": match}, "value"),
+        prevent_initial_call=True,
+    )
+    def _step(_down, _up, value):
+        """Move one coefficient by one step, in the direction clicked.
 
-            The one place here that asks dash which input fired, and the one
-            place it is the honest answer: the two buttons differ in nothing
-            but direction, and unlike the submit line there is no previously
-            published state to read the difference out of. The bounds come
-            from the endpoint rather than from the component's own min/max,
-            so the box a value is clipped into is the form's and not whatever
-            the browser sent back.
-            """
-            fired = context.triggered_id
-            if fired is None:
-                return no_update
-            low, high = human.bounds[fired["index"]]
-            return stepped(value, -1 if fired["type"] == "theta-down" else 1,
-                           low, high)
+        The one place here that asks dash which input fired, and the one place
+        it is the honest answer: the two buttons differ in nothing but
+        direction, and unlike the submit line there is no previously published
+        state to read the difference out of. The bounds come from the
+        session's declared coefficient boxes rather than from the component's
+        own min/max, so the box a value is clipped into is the form's and not
+        whatever the browser sent back.
+        """
+        fired = context.triggered_id
+        if fired is None:
+            return no_update
+        boxes = session.coefficients
+        if fired["index"] >= len(boxes):
+            return no_update
+        low, high = boxes[fired["index"]]["bounds"]
+        return stepped(value, -1 if fired["type"] == "theta-down" else 1, low, high)
 
-        @app.callback(
-            Output("submitted", "children"),
-            Output("last-submission", "data"),
-            Input("submit", "n_clicks"),
-            Input("tick", "n_intervals"),
-            State({"type": "theta", "index": dash_all()}, "value"),
-            State("last-submission", "data"),
-            prevent_initial_call=True,
-        )
-        def _submit(n_clicks, _tick, theta, last):
-            """Queue a proposal on a click, and keep its line true after.
+    @app.callback(
+        Output("submitted", "children"),
+        Output("last-submission", "data"),
+        Input("submit", "n_clicks"),
+        Input("tick", "n_intervals"),
+        State({"type": "theta", "index": dash_all()}, "value"),
+        State("last-submission", "data"),
+        prevent_initial_call=True,
+    )
+    def _submit(n_clicks, _tick, theta, last):
+        """Queue a proposal on a click, and keep its line true after.
 
-            The line used to be written once, at the click, and never again --
-            so it reported the queue depth at the only instant it is certainly
-            one, and went on saying "1 waiting" long after the trial had been
-            evaluated and stored. It is a claim about a live thing, so it has
-            to be recomputed like every other live thing here: the tick is an
-            input, and which of the two inputs fired is read the way this file
-            reads it everywhere else, by comparing against what was last
-            published rather than by asking dash.
-            """
-            submitting = not last or n_clicks != last.get("clicks")
-            if submitting:
-                if not n_clicks:
-                    return no_update, no_update
-                empty = [f"c{i}" for i, c in enumerate(theta) if c is None]
-                if empty:
-                    # The click is still recorded, with no theta on it. Not
-                    # doing so would leave this looking like an unsubmitted
-                    # click on every tick after, and it would resubmit.
-                    return (f"nothing submitted: {', '.join(empty)} empty",
-                            {"clicks": n_clicks})
-                accepted = human.submit(theta)
-                last = {"clicks": n_clicks,
-                        "theta": [float(c) for c in accepted],
-                        # Where this proposal's result will land, so its
-                        # outcome can be recognised rather than guessed at.
-                        "index": len(getattr(human, "history", ()))}
-            elif not last.get("theta"):
+        The line is recomputed on the tick rather than written once at the
+        click: it is a claim about a live thing (is the trial queued, being
+        evaluated, or done?), and a claim about a live thing that is written
+        once goes stale by construction.
+
+        Registered whatever the session can do. Without ``submit`` it says so
+        and returns -- refusing by name, on a normal path, is what replaced
+        "the callback does not exist" (F1.9).
+        """
+        if not session.can("submit"):
+            return session.refuse("submit"), no_update
+        submitting = not last or n_clicks != last.get("clicks")
+        if submitting:
+            if not n_clicks:
                 return no_update, no_update
-            return submission_line(human, last), last
+            empty = [f"c{i}" for i, c in enumerate(theta) if c is None]
+            if empty:
+                # The click is still recorded, with no theta on it. Not doing
+                # so would leave this looking like an unsubmitted click on
+                # every tick after, and it would resubmit.
+                return (f"nothing submitted: {', '.join(empty)} empty",
+                        {"clicks": n_clicks})
+            accepted = session.submit(theta)
+            last = {"clicks": n_clicks,
+                    "theta": [float(c) for c in accepted],
+                    # Where this proposal's result will land, so its outcome
+                    # can be recognised rather than guessed at.
+                    "index": len(getattr(session.submit, "history", ()))}
+        elif not last.get("theta"):
+            return no_update, no_update
+        return submission_line(session, last), last
 
-        if new_run is not None:
-            @app.callback(
-                Output("new-run-status", "children"),
-                Input("new-run", "n_clicks"),
-                prevent_initial_call=True,
-            )
-            def _new_run(n_clicks):
-                """Ask the session for a new run and report what it said.
+    @app.callback(
+        Output("new-run-status", "children"),
+        Input("new-run", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _new_run(n_clicks):
+        """Ask the session for a new run and report what it said.
 
-                The reply is the session's, not this callback's: whether a
-                request is worth honouring depends on how many candidates the
-                current run has, which is the worker's business to know.
-                """
-                return new_run() if n_clicks else no_update
+        The reply is the session's, not this callback's: whether a request is
+        worth honouring depends on how many candidates the current run has,
+        which is the worker's business to know.
+        """
+        if not n_clicks:
+            return no_update
+        if not session.can("new_run"):
+            return session.refuse("new_run")
+        return session.new_run()
+
+    # -- the structural editor (D35) -------------------------------------
+    @app.callback(
+        Output("editor-document", "data"),
+        Output("editor-terms", "children"),
+        Output("editor-preview", "children"),
+        Input("editor-add", "n_clicks"),
+        Input("editor-clear", "n_clicks"),
+        State("editor-palette", "value"),
+        State("editor-power-num", "value"),
+        State("editor-power-den", "value"),
+        State("editor-document", "data"),
+        prevent_initial_call=True,
+    )
+    def _edit(add_clicks, clear_clicks, choice, numerator, denominator, document):
+        """Add or clear a term. The document transits as plain JSON.
+
+        Both operations that need to know what a form *is* -- building a term
+        from the palette, and saying what the document canonicalized to -- are
+        session-injected callables. This callback moves JSON around and reads
+        strings back, which is why `tests/test_import_audit.py` is unchanged.
+        """
+        if not session.can("edit"):
+            return no_update, session.refuse("edit"), no_update
+        fired = context.triggered_id
+        if fired == "editor-clear":
+            return None, "no terms yet", ""
+        if not add_clicks or choice is None:
+            return no_update, no_update, no_update
+        try:
+            term = session.term(choice, (int(numerator or 1), int(denominator or 1)))
+            document = _with_term(document, term)
+            summary = session.canonicalize(document)
+        except Exception as failure:  # noqa: BLE001 - shown, never a traceback
+            return no_update, f"{type(failure).__name__}: {failure}", no_update
+        lines = [f"{i}. {t}" for i, t in enumerate(summary.get("terms", []))]
+        return (
+            document,
+            html.Div([html.Div(line) for line in lines] or "no terms yet"),
+            f"$${summary.get('latex', '')}$$" if summary.get("latex") else "",
+        )
+
+    @app.callback(
+        Output("editor-findings", "children"),
+        Input("editor-check", "n_clicks"),
+        Input("editor-optimize", "n_clicks"),
+        State("editor-document", "data"),
+        State("editor-objective", "value"),
+        prevent_initial_call=True,
+    )
+    def _check_or_optimize(check_clicks, optimize_clicks, document, objective):
+        """The check button and the delegate path, side by side.
+
+        The check button calls the session's ``check`` -- which is
+        ``forms.checker.check``, wired, not reimplemented: one function for
+        the machine proposer and for the person, or the two diverge.
+
+        The optimize button composes (document x objective x protocol) into a
+        driver-side run through the session's ``propose``. That is the
+        recorded face: a proper run under a D18 protocol row, indistinguishable
+        in the store from a script-composed one.
+        """
+        fired = context.triggered_id
+        if fired == "editor-optimize":
+            if not optimize_clicks:
+                return no_update
+            if not session.can("propose"):
+                return session.refuse("propose")
+            if not document:
+                return "nothing to optimize: the editor has no terms yet"
+            return session.propose(document, objective)
+        if not check_clicks:
+            return no_update
+        if not session.can("check"):
+            return session.refuse("check")
+        if not document:
+            return "nothing to check: the editor has no terms yet"
+        findings = session.check(document)
+        if not findings:
+            return "no findings -- this form composes against this world"
+        return "\n".join(
+            f"{f.get('severity', '?')}: {f.get('what', '')}\n    why: "
+            f"{f.get('why', '')}\n    remedy: {f.get('remedy', '')}"
+            for f in findings
+        )
+
+    # -- the live face of the SCF service (D34) ---------------------------
+    @app.callback(
+        Output("live-solve", "children"),
+        Input("solve", "n_clicks"),
+        Input("tick", "n_intervals"),
+        State("system", "value"),
+        State("selected", "data"),
+        prevent_initial_call=True,
+    )
+    def _solve(n_clicks, _tick, system, selected):
+        """Per-system click: queue a solve, collect it on the tick, mark it live.
+
+        Nothing here is ever stored. The rule (D34) is that any number on
+        screen is either in a record, reachable from one, or *explicitly
+        marked as a live diagnostic that is not* -- and this is the third
+        kind, so it says so every time it renders. Non-convergence renders as
+        data, because on these geometries it is signal: near-degenerate
+        stretched chains genuinely do not settle.
+        """
+        if not session.can("solve"):
+            return session.refuse("solve") if n_clicks else ""
+        if not selected or system is None:
+            return ""
+        candidate = selected["candidate_id"]
+        if context.triggered_id == "solve" and n_clicks:
+            session.solve(candidate, system)
+        result = session.collect(candidate, system) if session.collect else None
+        if result is None:
+            return html.Span("live: queued...", style=_LIVE_STYLE)
+        return html.Span(
+            "live (not stored): "
+            + "   ".join(f"{k} = {v}" for k, v in sorted(result.items())),
+            style=_LIVE_STYLE,
+        )
 
     # Registered last, so it sees the whole callback map when it checks one.
     refuse_stale_pages(app)

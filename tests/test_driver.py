@@ -183,7 +183,24 @@ def test_frozen_density_evaluator_refuses_an_empty_system_list():
 
 
 def test_the_evaluator_never_sees_the_reference_answers_through_the_input():
-    # XCInput carries n and w only: a candidate cannot read e_xc_exact even if
-    # it wanted to. This is why SystemRecord is not the argument (D10).
+    # XCInput carries the density, the weights and declared ingredients: a
+    # candidate cannot read e_xc_exact even if it wanted to. This is why
+    # SystemRecord is not the argument (D10).
+    #
+    # `key` is the one field here that is not an ingredient. It is the
+    # system's identity, used by the per-term evaluation cache (D21) and by
+    # nothing else -- no functional reads it, and the assertion below is what
+    # keeps this list a decision rather than a drift.
     fields = XCInput(np.zeros(3), np.zeros(3)).__dict__
-    assert set(fields) == {"n", "w", "orbitals", "v_ext"}
+    assert set(fields) == {
+        # The Stage 1 contract.
+        "n", "w",
+        # Declared ingredients (D27/D29): constants, then the operator
+        # descriptors D28 requires n-dependent quantities to arrive as.
+        "orbitals", "v_ext", "x", "n_floor", "well_separation", "well_charge",
+        "grad", "laplacian", "apply_interaction",
+        # Not an ingredient: the system's identity, for the per-term cache.
+        "key",
+    }
+    reference_answers = {"e_exact", "e_xc_exact", "n_ref", "vxc_ref"}
+    assert not set(fields) & reference_answers

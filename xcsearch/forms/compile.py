@@ -84,6 +84,50 @@ ALWAYS_PRESENT = ("n", "w")
 # ---------------------------------------------------------------------------
 # The closed-form primitive leaves -- the residual name-points-at-code surface
 # ---------------------------------------------------------------------------
+def _safe_root(value):
+    """``sqrt(value)`` whose *gradient* survives ``value = 0``.
+
+    ``d/dx sqrt(x)`` is infinite at zero, and autograd is honest about that:
+    the infinity then meets a zero elsewhere in the expression and the product
+    is a NaN, which propagates into ``v_xc`` and out into a score. The
+    quantities this is used on are all multiplied by something that vanishes
+    at least as fast, so the true limit is zero -- and the closed forms in
+    ``functionals.py`` have always guarded the same division for the same
+    reason.
+
+    The **double where** is the idiom JAX requires: a single ``where`` still
+    evaluates both branches during differentiation, so the argument itself has
+    to be made safe before the square root is taken, not just the result
+    selected afterwards.
+
+    Where this bites, concretely: an SCF iteration clips a Pulay extrapolate
+    at zero, so some grid point is *exactly* 0.0 rather than 1e-30, and the
+    correlation Pade's ``sqrt(y)`` term hands back a NaN potential on the
+    first step. It is not a rare case -- it is what happens the moment a
+    candidate is solved self-consistently.
+    """
+    positive = value > 0.0
+    return jnp.where(positive, jnp.sqrt(jnp.where(positive, value, 1.0)), 0.0)
+
+
+def _safe_power(base, exponent: float):
+    """``base ** exponent``, guarded where the *derivative* diverges at zero.
+
+    Only for ``0 < exponent < 1``: there the value is fine (``0^p = 0``) and
+    the gradient is not (``p x^{p-1} -> inf``). Integer and larger exponents
+    are left exactly alone, so nothing pays for a guard it does not need.
+    A negative exponent is a division, and checker check 4 refuses those
+    against quantities that reach zero -- so the answer there is a refusal,
+    not a regularization.
+    """
+    if exponent >= 1.0 or float(exponent).is_integer():
+        return jnp.power(base, exponent)
+    positive = base > 0.0
+    return jnp.where(
+        positive, jnp.power(jnp.where(positive, base, 1.0), exponent), 0.0
+    )
+
+
 def _lda_x_body(n, params):
     """``n * eps_x^LDA(n)`` for the exponential interaction, as jnp.
 
@@ -109,7 +153,7 @@ def _lda_c_body(n, params):
     a, kappa = params["A"], params["kappa"]
     coefficients = params["pade"]
     y = jnp.pi * n / kappa
-    root = jnp.sqrt(jnp.clip(y, 0.0, None))
+    root = _safe_root(y)
     a0, a1, a2, a3, a4, a5, nu = coefficients
     a6 = nu * (jnp.pi * kappa * kappa / a)
     denominator = (
@@ -141,11 +185,13 @@ def _op_csr(f, params):
     a CSR triple and this keeps it that way, which is the same rule the
     interaction is held to.
     """
-    data, indices, rows, size = (
-        params["data"], params["indices"], params["rows"], params["size"]
-    )
+    data, indices, rows = params["data"], params["indices"], params["rows"]
     contributions = data * f[indices]
-    return jax.ops.segment_sum(contributions, rows, num_segments=size)
+    # The row count comes from the operand's shape, not from the descriptor:
+    # `num_segments` has to be static, and everything in a descriptor is
+    # traced. The operator is square and applied on the grid, so this is the
+    # same number by construction.
+    return jax.ops.segment_sum(contributions, rows, num_segments=f.shape[0])
 
 
 def _op_exponential_interaction(f, params):
@@ -245,10 +291,37 @@ def _thomas(lower, diagonal, upper, rhs):
     return reversed_solution[::-1].reshape(size)
 
 
+def _op_zero(f, params):
+    """The operator that annihilates its argument.
+
+    Not a stub: it is the *exact* value of a derivative operator on a probe
+    the caller knows to be constant, and using it is how a rung-0 condition
+    evaluates a semi-local form in the uniform limit without leaking the
+    box's boundary rows into the answer (D31). Differentiable, and its
+    contribution to v_xc is correctly zero.
+    """
+    del params
+    return jnp.zeros_like(f)
+
+
+def _op_scale(f, params):
+    """``c * f`` -- an operator in a limit where it becomes multiplication.
+
+    The uniform limit of the interaction application is exactly this: for
+    constant ``f``, ``int A exp(-kappa|x-x'|) f dx' = (2A/kappa) f``, the
+    infinite-gas value. A finite probe segment through the real operator
+    would leak edge effects into what is supposed to be a statement about the
+    homogeneous gas.
+    """
+    return params["value"] * f
+
+
 OPERATOR_KINDS = {
     "gradient": _op_gradient,
     "csr": _op_csr,
     "exponential_interaction": _op_exponential_interaction,
+    "zero": _op_zero,
+    "scale": _op_scale,
 }
 
 
@@ -528,7 +601,7 @@ class _Evaluator:
             return self.ingredient(node)
         if isinstance(node, Power):
             base = self.node(node.base)
-            return jnp.power(base, float(Fraction(node.exponent)))
+            return _safe_power(base, float(Fraction(node.exponent)))
         if isinstance(node, Product):
             out = self.node(node.factors[0])
             for factor in node.factors[1:]:
@@ -602,6 +675,31 @@ def compile_form(document: FormDocument) -> CompiledForm:
     if digest not in _COMPILED:
         _COMPILED[digest] = CompiledForm(document)
     return _COMPILED[digest]
+
+
+def apply_operator(descriptor: dict, f) -> np.ndarray:
+    """Apply one operator descriptor to an array, numpy in and numpy out.
+
+    Not part of the evaluation path -- forms reach operators through the
+    trace. It exists so that the *identities* an operator has to satisfy can
+    be asserted directly (Core A's acceptance identities), and so a world can
+    be checked against its own supply table without building a form to do it.
+    """
+    kind = descriptor.get("kind")
+    implementation = OPERATOR_KINDS.get(kind)
+    if implementation is None:
+        raise SchemaRefusal(
+            f"unknown operator kind {kind!r}: this build implements "
+            f"{sorted(OPERATOR_KINDS)}"
+        )
+    params = {
+        key: jnp.asarray(value)
+        for key, value in descriptor.items()
+        if key != "kind"
+    }
+    return np.asarray(
+        implementation(jnp.asarray(f, dtype=float), params), dtype=float
+    )
 
 
 def x64_enabled() -> bool:

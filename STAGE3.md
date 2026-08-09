@@ -610,11 +610,17 @@ dependency here — the stage's first new runtime dependency.
   no power terms) *does* come out bitwise identical, which isolates the cause
   to the power terms' summation rather than to the primitive leaves.
   **Consequence for 3.2's D15 gate**: the trial *sequence* and the best theta
-  are bitwise, because TPE's decisions depend on the ordering of scores and
-  no last-bit difference flips one; the *score* agrees to 1 ulp rather than
-  exactly. That is recorded here as a measured property, not adopted as a
-  loosened tolerance: the original closed-form D15 fixture stays untouched
-  and stays bitwise, and it is still the anchor.
+  are bitwise — TPE's decisions turn on the ordering of scores and no
+  last-bit difference flips one — while the *scores* agree to **2.1e-14
+  relative at worst, 6.6e-16 median** over the fixture's 60 trials. The
+  spread is cancellation, not sloppiness: the score is the mean of
+  `(E_xc − E_xc_ref)²`, and subtracting a nearly equal reference cancels
+  about two decades, so a 5e-16 wobble in an O(0.5) energy becomes ~5e-14 in
+  an O(1e-2) error and ~1e-13 in its square. The acceptance suite therefore
+  gates *two* things — the energies at the last bit and the scores at the
+  amplified image of it — so a real regression cannot hide inside the
+  looser number. The original closed-form D15 fixture stays untouched and
+  stays bitwise, and it is still the anchor.
 
 ### 3.2 — Migration: the flat-θ modules move to the representation
 
@@ -817,6 +823,36 @@ declaration objects live with the ports).
 7. *Costs surface*: checker cost estimates change when a document
    adds an operator-tier reference, per the declared table.
 
+**Implementation notes (measured at build time)**:
+
+- *A supply row the spec did not name: `n_floor`.* Writing `t_vw` and `s_1d`
+  as fragments collided with two checks at once, and the collision was
+  correct both times. Check 4 refuses a division by a quantity the world
+  declares can reach zero, and the density *does* — the vacuum is most of
+  every grid here. Check 3 then refuses `n + 1e-12` because a rational
+  literal is dimensionless and a term added to a density must be a density.
+  Both are fixed by the same move: **the floor is an ingredient**, declared
+  by the world with units `length⁻¹` and a strictly positive range, so
+  `n + n_floor` is dimensionally sound and provably non-zero. It also
+  single-homes a constant that was already duplicated (`dataset._N_FLOOR` is
+  now `world.N_FLOOR`). The alternative — exempting the library fragments
+  from check 4 — is how a checker stops meaning anything.
+- *The production path is also the accurate one.* Against the analytic
+  Gaussian-times-exponential convolution, the tridiagonal solve with Robin
+  rows is **~3× more accurate than the brute-force matvec** at every
+  spacing (both O(dx²)); the dense quadrature pays for the kernel's cusp at
+  `x = x′`, which the ODE form never samples. Cross-algorithm agreement is
+  1.9e-4 relative at dx = 0.1 and quarters on every halving — asserted as an
+  *order*, not as a tolerance, since a fixed number could not tell a
+  quadrature difference from a bug. Against the dataset's stored
+  `v_hartree`, the dense matvec agrees **bitwise** (same algorithm, same
+  arithmetic), which is the identity Core A scoped as machine precision.
+- *The two `t_vw` spellings, measured.* `T_vW = 0.147929` on the probe; the
+  gradient and Laplacian spellings differ by 2.3e-4 at dx = 0.2 and 3.4e-6
+  at dx = 0.025 — a clean factor of four per halving. They are second-order
+  apart and never interchangeable, which is exactly why D37 makes the
+  kinetic strategy a recorded choice rather than an implementation detail.
+
 ### 3.4 — Exact-conditions expansion
 
 The conditions component (feature 2, landed in 2.3 with three
@@ -926,6 +962,38 @@ policies in core. No new imports for `viz/` or `store.py`.
    run under a protocol offering rung 0, per-protocol row-set
    identity preserved.
 
+**Implementation notes (measured at build time)**:
+
+- *The 2.3 exchange condition's scar closes.* Stage 2's exchange
+  non-positivity subtracted the correlation it knew was fixed — sound while
+  D6 held, and silently unsound the day it stopped. Core B's named parts made
+  the honest version available: `Functional.parts(x)` is a new concrete,
+  optional port method, a document-backed form implements it from the
+  per-term decomposition for free, and the condition *asks* instead of
+  guessing. Exchange keeps the world-specific subtraction as a fallback for
+  adapters with no parts; correlation refuses namedly rather than inventing a
+  split — which is what let `correlation_non_positivity` ship at all.
+- *Size consistency needed one grid, not three.* Evaluating each fragment in
+  its own smaller box made the comparison a difference of two
+  discretizations as well as of two physical situations: ~1e-9 relative, two
+  orders above the `e^{−κd}` tail the condition exists to resolve. Sharing
+  one grid and simply removing the other density makes a **local form come
+  out bitwise zero** and puts the non-local form's residual at 3.2e-11,
+  under the derived bound `N_A N_B A e^{−κd} = 5.1e-11`. The tolerance is a
+  number computed from the kernel, not chosen to pass.
+- *The guard guards, measured.* The wells-abusing form scores 1.12 on size
+  consistency at coefficient 0.05 and exactly 0 at 0, while its equilibrium
+  rung-1 metrics stay in the same league as the honest form's — which is the
+  whole argument for having the condition.
+- *A caching bug worth recording, because the shape of it recurs.* Probe
+  inputs are candidate-independent and are cached (a sparse Laplacian per
+  trial is not something rung 0 can afford), but the first cache key was the
+  probe's *role* — `"uniform:0"` — not the *instance's*. Two
+  `UniformGasReduction`s configured with different segment lengths then
+  shared arrays, and the existing "the violation does not depend on the
+  probe segment length" test caught it immediately. Keys are now
+  per-instance namespaces.
+
 ### 3.5 — Session collapse, live diagnostics, structural editor
 
 The R2 cut plus the editor, in the order R2's scoping prescribed:
@@ -1010,6 +1078,40 @@ of `plots.py` privates (no allowlist change), overlay curves on
 6. *Manual parity preserved*: the Stage 2
    records-indistinguishability test for `HumanOptimizer` passes
    unchanged.
+
+**Implementation notes (measured at build time)**:
+
+- *The session gained two capabilities the spec did not list, and one of
+  them is load-bearing.* `edit` (canonicalize + build-a-term) is what keeps
+  the editor's forms knowledge on the composition root's side of the port,
+  so `tests/test_import_audit.py` stays unchanged — asserted directly, by a
+  test that parses the four `viz/` modules and refuses any import of
+  `forms/`, a world, or the SCF service. `submissions` is the smaller one:
+  the panel used to reach into a `HumanOptimizer` for `history` and
+  `pending_submissions`, which a session made awkward and a reading makes
+  clean.
+- *A real NaN, found by the live face and fixed in the compiler.* An SCF
+  iteration clips a Pulay extrapolate at zero, so some grid point becomes
+  *exactly* `0.0` rather than `1e-30` — and `d/dy √y` is infinite there.
+  Autograd is honest about that, the infinity meets a zero elsewhere in the
+  Padé, and `v_xc` comes back NaN on the **first** step of every solve. Two
+  guards, both the JAX double-`where` idiom: `_safe_root` in the correlation
+  leaf, and `_safe_power` for any `0 < p < 1` in the schema (which is what
+  `s_1d`'s `(∇n²)^{1/2}` needs wherever the gradient vanishes). The closed
+  forms in `functionals.py` had always guarded the same division; the
+  compiled path had not, and nothing before a self-consistent solve had
+  asked it to.
+- *One layout, asserted over ten sessions.* Page arity is compared across
+  no-capability, each-capability-alone and all-capabilities sessions, and it
+  is identical — F1.9 retired structurally. One consequence worth naming:
+  the MATCH-pattern step callback is now registered in a store-only viewer
+  too, which the generic HTTP dispatch test cannot build a legal body for
+  (a MATCH output resolves against a component instance), so that test skips
+  wildcards and the step callback is driven directly instead.
+- *Live means live, measured as a hash.* A session of self-consistent solves
+  over the store leaves the file byte-identical. The rebuild it solves is
+  trustworthy now: `build(document, θ)` from the stored document, which is
+  what D25 bought, so the amended D13 rests on the protocol leg alone.
 
 ### 3.6 — N > 2 references, spin resolution, higher rungs
 

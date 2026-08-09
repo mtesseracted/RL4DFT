@@ -63,7 +63,11 @@ def test_the_composition_root_constructs_the_whole_stack(graph):
     calls = _targets(graph, "run_stage2.main", {"direct"})
     assert {
         "dataset.Exp1dDataset",
-        "functionals.LocalAnsatzForm",
+        # The form is a document now (3.2): the composition root seeds it from
+        # the library and wraps it in the adapter, and `LocalAnsatzForm` is no
+        # longer part of the assembled stack.
+        "library.stage2_local_ansatz",
+        "composed.DocumentForm",
         "optuna_tpe.OptunaTPE",
         "composed.FixedFormOptimizer",
         "evaluators.FrozenDensityEvaluator",

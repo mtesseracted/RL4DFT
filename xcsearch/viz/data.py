@@ -24,6 +24,7 @@ import numpy as np
 
 from ..store import (
     COMPARABLE_SYSTEMS_SQL,
+    FORM_FOR_SQL,
     HEATMAP_SQL,
     LDA_LABEL,
     POPULATION_SIZE_SQL,
@@ -126,6 +127,67 @@ def candidate(path: str, candidate_id: int) -> dict | None:
     row = dict(rows[0])
     row["theta"] = json.loads(row["theta_json"]) if row["theta_json"] else []
     return row
+
+
+def form_for(path: str, candidate_id: int) -> dict | None:
+    """The form document a candidate was proposed under, or ``None`` (D25).
+
+    ``{"hash", "latex": {part: latex}, "slots": [{"part", "bounds"}, ...]}``.
+    The latex was rendered by the representation at insertion time and the
+    slots are read straight out of the stored canonical json, so the viz keeps
+    reading strings and numbers from the store and imports no ``forms/`` code
+    -- the D13 posture, unchanged, now with structure behind it.
+
+    Parsing the json here is not "computing physics": it is reading a
+    document's declared slot boxes, which is why a store-only viewer can now
+    render coefficient bounds at all. Every number it yields was written by
+    the writer; none is derived.
+
+    ``None`` when the candidate has no form row -- an adapter that predates
+    the representation, or a hand-written one-off. The panel then falls back
+    to the whole-form latex the candidate row has always carried.
+    """
+    rows = _rows(path, FORM_FOR_SQL, (candidate_id,))
+    if not rows:
+        return None
+    row = rows[0]
+    document = json.loads(row["json"])
+    return {
+        "hash": row["hash"],
+        "parent_hash": row["parent_hash"],
+        "latex": json.loads(row["latex_json"] or "{}"),
+        "slots": _slots_of(document),
+    }
+
+
+def _slots_of(document: dict) -> list[dict]:
+    """Every coefficient slot of a stored document, in canonical order.
+
+    Mirrors the representation's own traversal -- parts in sorted name order,
+    then depth-first through the canonical child order -- because the stored
+    theta is in exactly that order and a viewer that walked it differently
+    would label the right numbers with the wrong boxes.
+    """
+    found: list[dict] = []
+    for part in sorted(document.get("parts", {})):
+        _walk_slots(document["parts"][part], part, found)
+    return found
+
+
+def _walk_slots(node, part: str, found: list[dict]) -> None:
+    if not isinstance(node, dict):
+        return
+    if node.get("kind") == "slot":
+        low, high = node.get("bounds", [None, None])
+        found.append({"part": part, "bounds": [low, high]})
+        return
+    for key in ("args", "factors"):
+        for child in node.get(key, ()):
+            _walk_slots(child, part, found)
+    if "base" in node:
+        _walk_slots(node["base"], part, found)
+    for term in node.get("terms", ()):
+        _walk_slots(term.get("body"), part, found)
 
 
 def baseline_choices(path: str) -> list[dict]:
