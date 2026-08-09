@@ -33,6 +33,7 @@ from xcsearch.ranking import MeanSquaredError
 from xcsearch.run_stage2 import human_session, run_capturing_failures
 from xcsearch.store import LDA_LABEL, NearDuplicateIndex, SQLiteRecordStore
 from xcsearch.viz import data
+from xcsearch.viz.session import Session
 from xcsearch.worlds.exp1d.dataset import load_frozen
 from xcsearch.worlds.exp1d.functionals import LDA_THETA, LocalAnsatzForm
 
@@ -219,9 +220,18 @@ def _store_with_a_run(tmp_path, systems):
     return path, run_id
 
 
-def test_an_incomplete_human_endpoint_fails_at_create_app(tmp_path, systems):
+def test_an_incomplete_human_endpoint_fails_at_the_contract_check(tmp_path, systems):
+    """B4's check, at the seam the session collapse moved it to (3.5, D33).
+
+    The dashboard no longer takes a human *endpoint* -- it takes a session
+    carrying a `submit` callable and the coefficient boxes as data -- so the
+    duck-typing check belongs to whoever builds that session, which is the
+    composition root. What it checks is unchanged, and so is why: an endpoint
+    missing a method fails when the page is built rather than when the first
+    person clicks submit.
+    """
     pytest.importorskip("dash", reason="the [viz] extra is not installed")
-    from xcsearch.viz.app import create_app
+    from xcsearch.viz.app import check_human_endpoint, create_app
 
     path, _ = _store_with_a_run(tmp_path, systems)
 
@@ -246,12 +256,24 @@ def test_an_incomplete_human_endpoint_fails_at_create_app(tmp_path, systems):
         (NotCallable(), "not callable"),
     ):
         with pytest.raises(TypeError, match=expected):
-            create_app(path, human=endpoint)
+            check_human_endpoint(endpoint)
 
-    # The real one still builds.
+    # The real one passes, and the page it feeds still builds.
     from xcsearch.optimizers.human import HumanOptimizer
 
-    assert create_app(path, human=HumanOptimizer(FORM.bounds())) is not None
+    human = HumanOptimizer(FORM.bounds())
+    check_human_endpoint(human)
+    session = Session(
+        submit=human.submit,
+        coefficients=[{"part": "exchange", "bounds": list(b)}
+                      for b in FORM.bounds()],
+    )
+    assert create_app(path, session) is not None
+
+    # And a session that can submit but declares no boxes is refused at
+    # layout: the button would post an empty theta.
+    with pytest.raises(ValueError, match="no coefficient boxes"):
+        create_app(path, Session(submit=human.submit))
 
 
 # --------------------------------------------------------------------------
@@ -287,7 +309,7 @@ def test_only_one_callback_resolves_the_scrubber(tmp_path, systems):
     from xcsearch.viz.app import create_app
 
     path, _ = _store_with_a_run(tmp_path, systems)
-    app = create_app(path)
+    app = create_app(path, Session())
 
     readers, publishers = [], []
     for key, spec in app.callback_map.items():
@@ -312,7 +334,7 @@ def test_the_dependent_panels_read_the_resolved_id(tmp_path, systems):
     from xcsearch.viz.app import create_app
 
     path, _ = _store_with_a_run(tmp_path, systems)
-    app = create_app(path)
+    app = create_app(path, Session())
 
     for panel in ("heatmap.figure", "density.figure"):
         key = next(k for k in app.callback_map if panel in k)
@@ -391,14 +413,14 @@ def test_the_dashboard_renders_the_worker_status(tmp_path, systems):
 
     path, _ = _store_with_a_run(tmp_path, systems)
     cell = ["the search worker died: RuntimeError: boom"]
-    app = create_app(path, status=lambda: cell[-1])
+    app = create_app(path, Session(status=lambda: cell[-1]))
 
     key = next(k for k in app.callback_map if "worker-status" in k)
     inputs = {(i["id"], i["property"]) for i in app.callback_map[key]["inputs"]}
     assert ("tick", "n_intervals") in inputs, "the watchdog line never refreshes"
 
     # And with no status callable there is simply no line.
-    plain = create_app(path)
+    plain = create_app(path, Session())
     assert any("worker-status" in k for k in plain.callback_map)
     assert "worker-status" in _ids(plain.layout)
 

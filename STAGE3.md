@@ -1020,14 +1020,33 @@ policies in core. No new imports for `viz/` or `store.py`.
   stop working. The **correlation refit is not adopted**; it mints a new
   immutable world version and deliberately breaks the D15 bitwise gate, so
   it stays a decision for a later stage rather than a fix slipped in here.
+- *Rung 0 stopped being free, and the number is recorded rather than
+  hidden.* Stage 2's three conditions over closed-form numpy cost ~1 ms.
+  Seven conditions over ~24 probe evaluations through the **same compiled
+  path real scoring uses** (D31) cost **136 ms** per candidate with a fresh
+  θ, 31 ms when the per-term cache hits — dominated by JAX dispatch on very
+  small probe arrays, not by arithmetic. That is the price of the decision,
+  and the decision still looks right: what it bought is that a violation is
+  a statement about the candidate rather than about a second copy of it, and
+  a second numpy evaluation path would have cost exactly the drift D31
+  exists to prevent. The *ordering* claim survives too — rung 1 over the
+  63-system cache is ~0.6 s, so rung 0 is under a fifth of it and still
+  needs no system. The acceptance test's threshold moved to 0.25 s, sits
+  just above the measurement rather than at a comfortable multiple, and says
+  in its docstring what would make the ordering worth re-examining.
 - *A caching bug worth recording, because the shape of it recurs.* Probe
   inputs are candidate-independent and are cached (a sparse Laplacian per
   trial is not something rung 0 can afford), but the first cache key was the
   probe's *role* — `"uniform:0"` — not the *instance's*. Two
   `UniformGasReduction`s configured with different segment lengths then
   shared arrays, and the existing "the violation does not depend on the
-  probe segment length" test caught it immediately. Keys are now
-  per-instance namespaces.
+  probe segment length" test caught it immediately. The first repair was a
+  per-instance namespace; the *right* repair, which replaced it, is to key
+  on the probe's **content** — same principle as everywhere else in this
+  stage. It fixes the bug and buys something the namespace could not: two
+  different conditions over the same probe now share the compiled form's
+  per-term cache, so exchange and correlation non-positivity over the same
+  three densities pay for one evaluation between them.
 
 ### 3.5 — Session collapse, live diagnostics, structural editor
 

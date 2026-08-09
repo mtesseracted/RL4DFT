@@ -260,6 +260,18 @@ def human_session(driver: SearchDriver, open_run, requests, poll: float,
             continue  # nobody has submitted yet; that is not a failure
 
 
+def coefficient_optimizer(bounds, seed: int):
+    """The coefficient optimizer, constructed in exactly one place.
+
+    Two callers need one -- the opening composition, and the delegate path,
+    which gives a hand-proposed form its own fresh optimizer over *its*
+    bounds. Extracted rather than written twice so that "swapping the
+    coefficient optimizer is one line" stays true: ``CMAES(bounds,
+    seed=seed)`` here, and both paths follow.
+    """
+    return OptunaTPE(bounds, seed=seed)
+
+
 def coefficient_layout(form) -> list[dict]:
     """The proposal boxes, as data the dashboard can group by (3.2).
 
@@ -516,7 +528,7 @@ def main() -> None:
     # Swapping the coefficient optimizer is this one line: CMAES(form.bounds(),
     # seed=args.seed) for the D16 optimizer, HumanOptimizer(form.bounds()) for
     # a person. The form owns the search box either way.
-    coefficients = OptunaTPE(form.bounds(), seed=args.seed)
+    coefficients = coefficient_optimizer(form.bounds(), args.seed)
     if args.human:
         # Imported here, not at module scope: the human endpoint is only
         # useful with the dashboard, and dash is an optional extra.
@@ -671,7 +683,7 @@ def main() -> None:
                 )
             )
             driver.optimizer = FixedFormOptimizer(
-                delegated, OptunaTPE(delegated.bounds(), seed=args.seed)
+                delegated, coefficient_optimizer(delegated.bounds(), args.seed)
             )
             driver.policy = delegated_policy
             driver.run_id = store.begin_run(

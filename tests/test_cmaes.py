@@ -229,8 +229,21 @@ def test_the_composition_root_names_the_optimizer_exactly_once():
     assert len(calls) == 1, f"{len(calls)} places construct the optimizer"
 
     line = lines[calls[0].lineno - 1]
-    assert "form.bounds()" in line, line
-    # The swap is textual, and what it produces is a valid construction of the
-    # same shape -- the form still owns the box either way.
+    # The construction moved into `coefficient_optimizer(bounds, seed)` in 3.5,
+    # because two callers need one: the opening composition, and the delegate
+    # path, which gives a hand-proposed form a fresh optimizer over *its*
+    # bounds. Extracting it is what *keeps* this property -- written twice, the
+    # swap would be two edits and this test would have had to allow both.
+    assert "bounds" in line, line
+    # The swap is still textual, and what it produces is a valid construction
+    # of the same shape -- the caller owns the box either way.
     swapped = line.replace("OptunaTPE(", "CMAES(")
-    assert "CMAES(form.bounds(), seed=args.seed)" in swapped
+    assert "CMAES(bounds, seed=seed)" in swapped
+
+    # ... and both callers go through it, so neither can drift.
+    helpers = [
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "coefficient_optimizer"
+    ]
+    assert len(helpers) == 2, "the delegate path and the opening composition"

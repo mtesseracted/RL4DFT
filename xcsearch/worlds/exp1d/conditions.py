@@ -63,6 +63,8 @@ law.
 
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 
 from ...ports import Condition, Functional
@@ -161,27 +163,35 @@ def _probe_record(x, w, n, wells, required=()) -> SystemRecord:
 # Probes are composition-time data and their populated ingredients are
 # candidate-*independent*: the same descriptors, on the same arrays, for every
 # trial. Building them per trial would put a sparse-matrix construction inside
-# the hot loop, which is the one thing rung 0 was supposed not to cost. Keyed
-# by (probe name, what the candidate asked for), so two candidates with
-# different requirement sets get different -- correct -- inputs.
+# the hot loop, which is the one thing rung 0 was supposed not to cost.
+#
+# **The key is the probe's content**, not the instance that owns it. Two
+# instances of one condition configured differently -- a uniform probe of
+# length 1 and one of length 7 -- must not share, and an instance-based key
+# once served the second the first's arrays. But two *different* conditions
+# over the *same* probe should share, and share all the way down: the key
+# becomes the compiled form's per-term cache key, so exchange and correlation
+# non-positivity over the same three densities pay for one evaluation between
+# them rather than two. Content addressing gets both, for the same reason it
+# gets them everywhere else in this stage.
 _PROBE_CACHE: dict[tuple, XCInput] = {}
 _SUPPLIES = supply_table()
 
-# Every condition instance gets its own probe namespace. Two instances of one
-# condition class configured differently -- a uniform probe of length 1 and
-# one of length 7 -- have *different* probes, and keying the cache on the
-# class name alone would serve the second the first's arrays. (It did, once.)
-_PROBE_NAMESPACES = iter(range(1, 1 << 30))
 
-
-def _namespace(owner) -> str:
-    return f"{type(owner).__name__}#{next(_PROBE_NAMESPACES)}"
+def _content_key(prefix: str, x, w, n, wells, overrides) -> str:
+    digest = hashlib.sha256(prefix.encode())
+    for array in (x, w, n):
+        digest.update(np.ascontiguousarray(array, dtype=float).tobytes())
+    digest.update(repr(tuple(wells)).encode())
+    digest.update(repr(sorted((overrides or {}).items())).encode())
+    return f"{prefix}:{digest.hexdigest()[:16]}"
 
 
 def probe_input(x, w, n, wells, required, overrides=None, key=None) -> XCInput:
     """An ``XCInput`` for a probe, populated per the candidate's declarations."""
     cache_key = None
     if key is not None:
+        key = _content_key(key, x, w, n, wells, overrides)
         cache_key = (key, tuple(sorted(required)))
         cached = _PROBE_CACHE.get(cache_key)
         if cached is not None:
@@ -283,7 +293,6 @@ class UniformGasReduction(Condition):
         self.densities = tuple(float(n) for n in densities)
         self.length = float(length)
         self.n_points = int(n_points)
-        self._probes = _namespace(self)
         self._x = np.linspace(0.0, self.length, self.n_points, endpoint=False)
         self._w = np.full(self.n_points, self.length / self.n_points)
 
@@ -294,7 +303,7 @@ class UniformGasReduction(Condition):
             n = np.full(self.n_points, n0)
             x = probe_input(self._x, self._w, n, ((1.0, 0.0),), required,
                             overrides=uniform_overrides(),
-                            key=f"{self._probes}:{index}")
+                            key=f"{self.name}:{index}")
             energy = functional.exc(x)
             exact = self.length * n0 * float(eps_x_lda(n0) + eps_c_lda(n0))
             errors.append((energy - exact) / self.length)
@@ -327,13 +336,12 @@ class OneElectronSelfInteraction(Condition):
                 f"the probe density integrates to {charge}, not 1 electron -- "
                 "this condition is only exact for a one-electron density"
             )
-        self._probes = _namespace(self)
         # Candidate-independent, so it is computed once, at composition time.
         self.e_hartree = e_hartree(self.n, self.x, self.w)
 
     def violation(self, functional: Functional) -> float:
         x = probe_input(self.x, self.w, self.n, ((1.0, 0.0),),
-                        set(functional.requires()), key=self._probes)
+                        set(functional.requires()), key=self.name)
         return abs(functional.exc(x) + self.e_hartree)
 
 
@@ -354,7 +362,6 @@ class PartNonPositivity(Condition):
 
     def __init__(self, part: str, probes) -> None:
         self.part = str(part)
-        self._probes = _namespace(self)
         self.probes = tuple(
             (np.asarray(n, float), np.asarray(w, float)) for n, w in probes
         )
@@ -369,7 +376,7 @@ class PartNonPositivity(Condition):
         for index, (n, w) in enumerate(self.probes):
             grid_x = np.arange(n.size, dtype=float) * float(w[0])
             x = probe_input(grid_x, w, n, ((1.0, 0.0),), required,
-                            key=f"{self._probes}:{index}")
+                            key=f"{self.name}:{index}")
             parts = _part_energies(functional, x)
             if parts is not None:
                 if self.part not in parts:
@@ -423,7 +430,6 @@ class SizeConsistency(Condition):
     def __init__(self, separation: float = FRAGMENT_SEPARATION,
                  width: float = 1.2, half_box: float = 14.0,
                  dx: float = 0.1) -> None:
-        self._probes = _namespace(self)
         self.separation = float(separation)
         self.width = float(width)
         self.dx = float(dx)
@@ -475,12 +481,12 @@ class SizeConsistency(Condition):
         # a dissociated fragment *is*, and it is what a geometry-reading term
         # has no way to fake.
         left = energy(self._fragment(0.0), ((1.0, 0.0),),
-                      f"{self._probes}:left")
+                      f"{self.name}:left")
         right = energy(self._fragment(self.separation),
-                       ((1.0, self.separation),), f"{self._probes}:right")
+                       ((1.0, self.separation),), f"{self.name}:right")
         together = energy(self._pair(),
                           ((1.0, 0.0), (1.0, self.separation)),
-                          f"{self._probes}:pair")
+                          f"{self.name}:pair")
         scale = max(abs(together), 1e-12)
         return float(abs(together - (left + right)) / scale)
 
@@ -503,7 +509,6 @@ class LiebOxfordHighDensity(Condition):
     name = "lieb_oxford_high_density"
 
     def __init__(self, probes=None) -> None:
-        self._probes = _namespace(self)
         probes = probe_densities() if probes is None else probes
         self.probes = tuple(
             (np.asarray(n, float), np.asarray(w, float)) for n, w in probes
@@ -515,7 +520,7 @@ class LiebOxfordHighDensity(Condition):
         for index, (n, w) in enumerate(self.probes):
             grid_x = np.arange(n.size, dtype=float) * float(w[0])
             x = probe_input(grid_x, w, n, ((1.0, 0.0),), required,
-                            key=f"{self._probes}:{index}")
+                            key=f"{self.name}:{index}")
             electrons = float(np.sum(w * n))
             bound = -0.5 * A_INT * electrons
             # Per particle, so probes of different N are comparable.
@@ -564,7 +569,6 @@ class LiebOxfordLowDensity(Condition):
     DENSITY_FLOOR: float = 0.05
 
     def __init__(self, probes=None, tolerance: float | None = None) -> None:
-        self._probes = _namespace(self)
         self.tolerance = self.TOLERANCE if tolerance is None else float(tolerance)
         probes = probe_densities() if probes is None else probes
         self.probes = tuple(
@@ -577,7 +581,7 @@ class LiebOxfordLowDensity(Condition):
         for index, (n, w) in enumerate(self.probes):
             grid_x = np.arange(n.size, dtype=float) * float(w[0])
             x = probe_input(grid_x, w, n, ((1.0, 0.0),), required,
-                            key=f"{self._probes}:{index}")
+                            key=f"{self.name}:{index}")
             electrons = float(np.sum(w * n))
             bound = -(A_INT / KAPPA) * float(np.sum(w * n * n))
             excess = (bound - functional.exc(x)) / electrons - self.tolerance
