@@ -260,6 +260,50 @@ def human_session(driver: SearchDriver, open_run, requests, poll: float,
             continue  # nobody has submitted yet; that is not a failure
 
 
+def run_delegated(driver: SearchDriver, optimizer, policy, run_id: int,
+                  trials: int, restore_run, progress: dict | None = None,
+                  label: str = "") -> None:
+    """Lend the driver to a machine optimizer for ``trials`` trials, then give
+    it back.
+
+    An *episode*, and the two words that matter are "exactly" and "back".
+
+    * **Exactly.** The first delegate path swapped ``driver.optimizer`` and
+      returned to the session loop. That loop was written as ``while True:
+      driver.step()`` because a ``HumanOptimizer.ask`` blocks on a person; a
+      TPE ``ask`` does not, so the same loop span at ~450 ms/trial until the
+      process was killed. The bound belongs to whoever asked for the run.
+    * **Back.** Everything borrowed is restored in a ``finally``. A
+      delegation that raises must not cost the person their session -- the
+      old path left the human's optimizer permanently detached, so every
+      later submission queued up unread behind an optimizer nobody called.
+
+    ``restore_run`` returns the run id the human continues under. A *new*
+    run, not the one they were on: that one now sits behind a delegated run
+    in the store, and continuing it would interleave two searches under one
+    id.
+    """
+    borrowed = (driver.optimizer, driver.policy, driver.run_id)
+    driver.optimizer, driver.policy, driver.run_id = optimizer, policy, run_id
+    if progress is not None:
+        progress.update(run=run_id, optimizer=label, done=0, trials=int(trials),
+                        state="running")
+    try:
+        for done in range(1, int(trials) + 1):
+            driver.step()
+            if progress is not None:
+                progress["done"] = done
+        if progress is not None:
+            progress["state"] = "finished"
+    except BaseException as failure:  # noqa: BLE001 - reported, then re-raised
+        if progress is not None:
+            progress["state"] = f"failed: {type(failure).__name__}: {failure}"
+        raise
+    finally:
+        driver.optimizer, driver.policy, _ = borrowed
+        driver.run_id = restore_run()
+
+
 def resolve_paths(data: str, store: str | None, out: str | None) -> tuple[str, str]:
     """Where the store and the best-theta payload go, given ``--data``.
 
@@ -281,15 +325,67 @@ def resolve_paths(data: str, store: str | None, out: str | None) -> tuple[str, s
     )
 
 
-def coefficient_optimizer(bounds, seed: int):
+# The coefficient optimizers a delegated run can be given (D16), as names and
+# prose. Names, not classes, because the dropdown sends a string over HTTP and
+# this module is the only place allowed to turn one into an optimizer.
+#
+# `cma` is an optional extra, so availability is *probed*, not assumed: an
+# uninstalled optimizer is offered disabled with the install line, which is
+# the same "state the reason" rule the session applies to every other absent
+# capability. Guessing wrong in either direction is worse -- hiding it makes
+# the extra undiscoverable, and offering it makes the button raise ImportError
+# inside the worker thread.
+COEFFICIENT_OPTIMIZERS = {
+    "optuna_tpe": "TPE (Optuna) -- the default",
+    "cmaes": "CMA-ES -- better on a smooth continuous box (D16)",
+}
+
+DEFAULT_OPTIMIZER = "optuna_tpe"
+
+
+def optimizer_catalogue() -> dict:
+    """The optimizers, each with its label and whether it can actually run."""
+    catalogue = {}
+    for name, label in COEFFICIENT_OPTIMIZERS.items():
+        available, why = _optimizer_available(name)
+        catalogue[name] = {
+            "label": label if available else f"{label}  [{why}]",
+            "available": available,
+        }
+    return catalogue
+
+
+def _optimizer_available(name: str) -> tuple[bool, str]:
+    if name != "cmaes":
+        return True, ""
+    try:
+        import cma  # noqa: F401
+    except ImportError:
+        return False, "not installed: pip install 'xcsearch[cmaes]'"
+    return True, ""
+
+
+def coefficient_optimizer(bounds, seed: int, kind: str = DEFAULT_OPTIMIZER):
     """The coefficient optimizer, constructed in exactly one place.
 
-    Two callers need one -- the opening composition, and the delegate path,
-    which gives a hand-proposed form its own fresh optimizer over *its*
-    bounds. Extracted rather than written twice so that "swapping the
-    coefficient optimizer is one line" stays true: ``CMAES(bounds,
-    seed=seed)`` here, and both paths follow.
+    Three callers need one -- the opening composition, the delegate path
+    (which gives a hand-proposed form its own fresh optimizer over *its*
+    bounds), and the dashboard's optimizer dropdown. Extracted rather than
+    written three times so that "swapping the coefficient optimizer is one
+    line" stays true.
+
+    ``cma`` is imported here rather than at module scope: it is an optional
+    extra, and a checkout without it must still run every TPE path.
     """
+    if kind == "cmaes":
+        from .optimizers.cmaes import CMAES
+
+        return CMAES(bounds, seed=seed)
+    if kind not in COEFFICIENT_OPTIMIZERS:
+        raise ValueError(
+            f"unknown coefficient optimizer {kind!r}: the set is "
+            f"{sorted(COEFFICIENT_OPTIMIZERS)}"
+        )
     return OptunaTPE(bounds, seed=seed)
 
 
@@ -376,6 +472,12 @@ OBJECTIVES = {
     "both": "both, weighted equally",
 }
 
+# How many trials a delegated run gets when the box is left alone. Small on
+# purpose: a delegation is something a person watches finish, and at the
+# measured ~450 ms/trial this is under a minute. The number is the person's
+# to set -- this is only what the box starts at.
+DEFAULT_DELEGATED_TRIALS = 100
+
 
 def policy_for(objective: str):
     """One objective name -> one ``RankingPolicy``. The whole mapping."""
@@ -390,7 +492,8 @@ def policy_for(objective: str):
 
 def serve_human_session(driver: SearchDriver, human, args, open_run,
                         coefficients=None, session_extras=None,
-                        delegate=None, between_trials=None) -> None:
+                        delegate=None, between_trials=None,
+                        opened_at=None) -> None:
     """Run the loop in the background and serve the dashboard in front of it.
 
     The driver blocks on ``HumanOptimizer.ask()`` until the submit button puts
@@ -423,7 +526,10 @@ def serve_human_session(driver: SearchDriver, human, args, open_run,
     # reader wants the latest, not the next.
     status: list[str] = []
     requests = threading.Event()
-    opened_at = [driver.n_trials]
+    # One cell, shared with whatever composed `between_trials`: a delegated
+    # episode opens a run of its own on the way out, and the new-run button's
+    # "is this run untouched?" test has to see that or it burns a run id.
+    opened_at = [driver.n_trials] if opened_at is None else opened_at
     worker = threading.Thread(
         target=run_capturing_failures,
         args=(lambda: human_session(driver, open_run, requests,
@@ -682,25 +788,51 @@ def main() -> None:
         # request lands on a queue and the worker, which already owns every
         # write, opens a *recorded* run under its own protocol row.
         delegations: "queue.Queue" = queue.Queue()
+        # Shared with `serve_human_session` so a delegated episode's closing
+        # run is visible to the new-run button. See `take_delegation`.
+        opened_at = [driver.n_trials]
+        # What the delegated run is doing, for the dashboard to poll. One
+        # dict, written by the worker and read by the tick -- the same
+        # one-cell-two-threads shape as `status` and `opened_at`.
+        progress: dict = {}
 
-        def delegate(document: dict, objective: str) -> str:
-            delegations.put((document, objective or "dataset_error"))
+        def delegate(document: dict, objective: str, optimizer: str = None,
+                     trials: int = None) -> str:
+            optimizer = optimizer or DEFAULT_OPTIMIZER
+            trials = int(trials or DEFAULT_DELEGATED_TRIALS)
+            if trials < 1:
+                return "a delegated run needs at least one trial"
+            available, why = _optimizer_available(optimizer)
+            if not available:
+                return f"cannot use {optimizer}: {why}"
+            delegations.put((document, objective or "dataset_error", optimizer,
+                             trials))
             return (
-                f"handed to the optimizer, objective '{objective}': a new run "
-                "opens with the next trial"
+                f"handed to {optimizer} for {trials} trials, objective "
+                f"'{objective}': the run opens with the next trial, and you "
+                "get the sliders back when it finishes"
             )
 
         def take_delegation() -> None:
-            """Swap the driver onto a delegated (form, objective) pair.
+            """Run one bounded delegated episode, then give the human back.
 
-            Everything the driver needs changes together and in one place: a
-            new form, a fresh coefficient optimizer over *its* bounds, the
-            selected policy, a protocol row that names all three, and a new
-            run. Nothing about the loop itself moves, which is the point --
-            this is D11's two-level search with a person in the outer seat.
+            An *episode*, not a switch. The first version replaced
+            ``driver.optimizer`` and returned to the loop, which had two
+            consequences nobody chose: the run was unbounded (a
+            ``HumanOptimizer.ask`` blocks and a TPE ``ask`` does not, so the
+            same ``while True`` that waited politely for a person span at
+            ~450 ms/trial forever), and it was one-way -- the human's
+            optimizer was never restored, so every later submission queued
+            up unread.
+
+            Both fall out of making this a call that finishes. The driver is
+            lent to the machine for exactly ``trials`` trials under its own
+            protocol row and run, and everything borrowed is handed back in a
+            ``finally``: a failed delegation must not cost the person their
+            session.
             """
             try:
-                document, objective = delegations.get_nowait()
+                document, objective, kind, trials = delegations.get_nowait()
             except queue.Empty:
                 return
             delegated = DocumentForm(
@@ -713,26 +845,48 @@ def main() -> None:
                     world=world_protocol(), evaluators=evaluators,
                     extra={
                         "ranking_policy": type(delegated_policy).__name__,
-                        "optimizer": "optuna_tpe", "seed": args.seed,
+                        "optimizer": kind, "seed": args.seed,
                         "objective": objective, "delegated_by": "human",
+                        "trials": trials,
                         "form": delegated.describe(),
                     },
                 )
             )
-            driver.optimizer = FixedFormOptimizer(
-                delegated, coefficient_optimizer(delegated.bounds(), args.seed)
+            def restore() -> int:
+                run_id = open_run()
+                opened_at[0] = driver.n_trials
+                return run_id
+
+            run_delegated(
+                driver,
+                optimizer=FixedFormOptimizer(
+                    delegated,
+                    coefficient_optimizer(delegated.bounds(), args.seed, kind),
+                ),
+                policy=delegated_policy,
+                run_id=store.begin_run(
+                    "delegated",
+                    notes=f"objective={objective},optimizer={kind}",
+                    protocol_id=delegated_protocol,
+                    population_id=population_id,
+                    prescription=prescription.to_json(),
+                ),
+                trials=trials, restore_run=restore, progress=progress,
+                label=kind,
             )
-            driver.policy = delegated_policy
-            driver.run_id = store.begin_run(
-                "delegated", notes=f"objective={objective}",
-                protocol_id=delegated_protocol, population_id=population_id,
-                prescription=prescription.to_json(),
-            )
+
+        def delegation_status() -> dict:
+            """What the delegated run is doing. A reading, not an action."""
+            return dict(progress)
 
         capabilities = forms_capabilities(supplies)
         serve_human_session(
             driver, coefficients, args, open_run, coefficient_layout(form),
+            opened_at=opened_at,
             session_extras={
+                "optimizers": optimizer_catalogue(),
+                "default_trials": DEFAULT_DELEGATED_TRIALS,
+                "delegation": delegation_status,
                 "solve": scf.request,
                 "collect": lambda key, system: (
                     result.as_row() if (result := scf.collect(key, system))

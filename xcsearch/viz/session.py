@@ -94,8 +94,16 @@ class Session:
     collect: object = None
     # A form document (as plain JSON) -> a list of finding dicts.
     check: object = None
-    # (document json, objective name) -> a sentence about the run it opened.
+    # (document json, objective, optimizer, trials) -> a sentence about the
+    # run it opened. A *bounded* run: the trial count is the caller's, and
+    # the person gets the sliders back when it finishes.
     propose: object = None
+    # What the delegated run is doing: a zero-argument callable returning
+    # ``{"run", "optimizer", "done", "trials", "state"}``, or ``{}`` when no
+    # delegation has run. A reading, like `submissions` -- the panel polls it
+    # rather than being pushed to, and a session without one simply shows no
+    # progress line.
+    delegation: object = None
     # The structural editor's two forms operations (D35). Documents transit
     # the UI as plain JSON and every operation on them is a callable someone
     # else closed over, which is what keeps `tests/test_import_audit.py`
@@ -109,6 +117,14 @@ class Session:
     coefficients: list = field(default_factory=list)
     objectives: list = field(default_factory=list)
     palette: dict = field(default_factory=dict)
+    # The coefficient optimizers a delegated run may be given, as
+    # ``{name: {"label", "available"}}``. Data rather than a capability: the
+    # *ability* to delegate is `propose`, and which optimizers exist is a
+    # property of the composition root's environment (``cma`` is an optional
+    # extra), so an unavailable one is offered with its reason in the label.
+    optimizers: dict = field(default_factory=dict)
+    # What the trials box starts at. The person's to change.
+    default_trials: int = 100
 
     def can(self, capability: str) -> bool:
         if capability not in CAPABILITIES:

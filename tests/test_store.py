@@ -540,3 +540,41 @@ def test_the_store_default_follows_the_dataset_cache():
     # file, and the store is the judge of whether a given file will take them.
     store, out = resolve_paths("data/exp2d", "/tmp/mine.sqlite", "/tmp/best.json")
     assert (store, out) == ("/tmp/mine.sqlite", "/tmp/best.json")
+
+
+def test_a_schema_refusal_ends_in_a_command_that_works(tmp_path):
+    """"Move the file aside" is a remedy only if it names the file and the
+    sidecars. A `mv` of the main file alone leaves a -wal SQLite would try to
+    recover into the new store sharing its name."""
+    import re
+    import subprocess
+
+    path = str(tmp_path / "records.sqlite")
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE systems (id INTEGER PRIMARY KEY, name TEXT,
+                              content_hash TEXT);
+        CREATE TABLE candidates (id INTEGER PRIMARY KEY, run_id INTEGER,
+                                 theta_json TEXT);
+        """
+    )
+    connection.commit()
+    connection.close()
+    for sidecar in ("-wal", "-shm"):
+        open(path + sidecar, "w").close()
+
+    with pytest.raises(ValueError) as raised:
+        SQLiteRecordStore(path)
+    command = re.search(r"^\s*(for f in .+)$", str(raised.value), re.M)
+    assert command, str(raised.value)
+
+    subprocess.run(command.group(1), shell=True, check=True, cwd=str(tmp_path))
+    # Nothing named `records.sqlite*` is left but the moved-aside set...
+    left = sorted(p.name for p in tmp_path.iterdir())
+    assert left == ["records.sqlite.pre-5", "records.sqlite.pre-5-shm",
+                    "records.sqlite.pre-5-wal"]
+    # ...and the path the refusal was about now opens as a fresh store.
+    store = SQLiteRecordStore(path)
+    assert store.world() is None
+    store.close()

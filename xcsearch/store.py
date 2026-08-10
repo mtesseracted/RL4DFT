@@ -491,8 +491,26 @@ class SQLiteRecordStore(RecordStore):
             self._refuse(_PRE_PROTOCOL_ROWS_MESSAGE)
 
     def _refuse(self, message: str) -> None:
-        """Raise a schema refusal against *this* file, by name."""
-        raise ValueError(f"{message}\n\n  the store in question is: {self.path}")
+        """Raise a schema refusal against *this* file, with the way out.
+
+        Every one of these says "move the file aside", which is a remedy only
+        if you know which file and what "aside" means. So the exception ends
+        in the command: the path, a suffixed destination, and -- the part that
+        is easy to get wrong -- the WAL sidecars, which SQLite would otherwise
+        try to recover *into the new empty store* sharing their name.
+
+        The old file is never touched here. Refusing to read something is not
+        a licence to move it, and a stale store is often the only copy of a
+        run somebody paid hours for.
+        """
+        aside = f"{self.path}.pre-{SCHEMA_VERSION}"
+        raise ValueError(
+            f"{message}\n"
+            f"\n  the store in question is: {self.path}"
+            f"\n\n  to keep it and start fresh:"
+            f"\n    for f in {self.path}*; do mv \"$f\" \"{aside}${{f#{self.path}}}\"; done"
+            f"\n  (the glob matters: the -wal and -shm sidecars must move with it)"
+        )
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:

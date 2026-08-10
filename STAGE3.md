@@ -1173,6 +1173,27 @@ of `plots.py` privates (no allowlist change), overlay curves on
   over the store leaves the file byte-identical. The rebuild it solves is
   trustworthy now: `build(document, θ)` from the stored document, which is
   what D25 bought, so the amended D13 rests on the protocol leg alone.
+- *The delegate path is an episode, and D35 did not say how long it lasts.*
+  Written as specified — swap `driver.optimizer`, return to the session loop
+  — it inherited two properties nobody chose. The loop is `while True:
+  driver.step()` because a `HumanOptimizer.ask` blocks on a person; a TPE
+  `ask` does not, so it span at a measured **447 ms/trial (≈8,000/hour)**
+  until the process was killed. And it was one-way: the human's optimizer
+  was never restored, so every later submission queued behind an optimizer
+  nobody called. Both are the same omission — a delegation with no end has
+  no place to hand anything back. It is now `run_delegated(...)`: the driver
+  is lent for exactly `trials` trials under its own protocol row, and
+  everything borrowed returns in a `finally`, so a delegation that *raises*
+  also cannot cost the person their session. The trial count and the
+  coefficient optimizer (TPE or CMA-ES, D16) are the person's, from the
+  editor. `cma` is an optional extra, so availability is probed and an
+  absent one is offered *with its install line* rather than hidden — and is
+  never what the dropdown starts on.
+- *A delegated run's first trial pays a compile.* A new document means new
+  term hashes, so the JIT cache misses: ~20 s for a two-term form, against
+  <2 s for the five trials after it. Small delegations are mostly compile,
+  which is worth knowing when choosing the count and is the same one-time
+  cost `ensure_baseline` pays at startup.
 
 ### 3.6 — N > 2 references, spin resolution, higher rungs
 
