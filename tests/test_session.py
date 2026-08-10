@@ -791,3 +791,170 @@ def test_the_progress_line_says_running_finished_or_why_not():
     assert "sliders are yours again" in delegation_line(done)
     bad = dict(running, state="failed: RuntimeError: boom")
     assert "RuntimeError" in delegation_line(bad)
+
+
+# --------------------------------------------------------------------------
+# The working form: the editor and the coefficient boxes are one workflow
+# --------------------------------------------------------------------------
+def _walk_ids(component):
+    """Every id in the tree, in *document* order.
+
+    Recursive rather than a stack: a LIFO walk reverses siblings, which is
+    invisible in a set-membership assertion and fatal in an ordering one.
+    """
+    out = []
+    node_id = getattr(component, "id", None)
+    if node_id is not None:
+        out.append(node_id)
+    children = getattr(component, "children", None)
+    for child in (children if isinstance(children, (list, tuple))
+                  else [] if children is None else [children]):
+        out.extend(_walk_ids(child))
+    return out
+
+
+def _theta_indices(payload):
+    """The coefficient boxes in a *serialized* callback result.
+
+    `invoke` returns what dash's dispatcher would send -- plain dicts, not
+    components -- so this reads `props`/`children` rather than attributes.
+    """
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            props = node.get("props") or {}
+            node_id = props.get("id")
+            if isinstance(node_id, dict) and node_id.get("type") == "theta":
+                found.append(node_id["index"])
+            walk(props.get("children"))
+            for value in node.values():
+                if isinstance(value, (list, dict)) and value is not props:
+                    walk(value)
+        elif isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child)
+
+    walk(payload)
+    return sorted(set(found))
+
+
+def _editor_session(capabilities, **extra):
+    return Session(
+        submit=lambda theta, document=None: theta,
+        coefficients=coefficients(),
+        objectives=OBJECTIVES,
+        palette=capabilities["palette"],
+        canonicalize=capabilities["canonicalize"],
+        term=capabilities["term"],
+        check=capabilities["check"],
+        **extra,
+    )
+
+
+def test_the_functional_panel_is_ordered_build_read_set_run(store_with_run,
+                                                            capabilities):
+    """Top to bottom is the order the work happens in."""
+    path = store_with_run[0]
+    layout = build_layout(path, _editor_session(capabilities))
+    ids = [i for i in _walk_ids(layout) if isinstance(i, str)]
+    order = [ids.index(name) for name in
+             ("editor-palette", "formula-parts", "coefficient-boxes", "new-run")]
+    assert order == sorted(order), "the functional card is out of order"
+
+
+def test_adding_a_term_moves_the_latex_and_the_coefficient_boxes(store_with_run,
+                                                                 capabilities):
+    """The pane the whole change is for: build a form, get its boxes.
+
+    The old panel's boxes were the *run's* form's, laid out once at startup.
+    With an editor able to build another form that is not a stale display, it
+    is the wrong coefficients under the right formula.
+    """
+    from xcsearch.viz.app import _with_term
+
+    path = store_with_run[0]
+    app = create_app(path, _editor_session(capabilities))
+
+    # A one-term form: one slot, so one box -- against the seeded form's five.
+    document = _with_term(None, capabilities["term"]("lda_x", (1, 1)))
+    latex, boxes, working = invoke(
+        app, "..formula-parts.children...coefficient-boxes.children..."
+             "working-form.data..", document, None)
+    assert _theta_indices(boxes) == [0]
+    assert working["source"] == "editor" and working["document"] == document
+    assert len(working["slots"]) == 1
+    assert "epsilon_x" in json.dumps(_plain(latex))
+
+    # Two more terms, two more boxes -- the panes move together.
+    for power in ((1, 2), (3, 2)):
+        document = _with_term(document, capabilities["term"]("n_power", power))
+    _, boxes, working = invoke(
+        app, "..formula-parts.children...coefficient-boxes.children..."
+             "working-form.data..", document, None)
+    assert _theta_indices(boxes) == [0, 1, 2]
+    assert len(working["slots"]) == 3
+
+
+def test_clearing_the_editor_hands_the_panel_back_to_the_selection(store_with_run,
+                                                                   capabilities):
+    """`clear` is a way back to the candidate view, not a dead end."""
+    path, run_id = store_with_run
+    app = create_app(path, _editor_session(capabilities))
+    candidate = json.loads(json.dumps(
+        {"candidate_id": 1, "run_id": run_id, "score": 0.0}))
+
+    _, boxes, working = invoke(
+        app, "..formula-parts.children...coefficient-boxes.children..."
+             "working-form.data..", None, candidate)
+    assert working["source"] == "candidate"
+    # The seeded ansatz's five slots, read from the *stored* document.
+    assert _theta_indices(boxes) == [0, 1, 2, 3, 4]
+
+
+def test_a_store_only_viewer_reads_exactly_as_it_did(store_with_run):
+    """No editor and no submit: the panel falls back and stays disabled."""
+    path = store_with_run[0]
+    app = create_app(path, store_only())
+    latex, boxes, working = invoke(
+        app, "..formula-parts.children...coefficient-boxes.children..."
+             "working-form.data..", None, None)
+    assert working["source"] == "session" and working["slots"] == []
+    assert "no candidate selected" in json.dumps(_plain(latex))
+
+
+def test_a_submitted_theta_carries_the_form_it_is_a_theta_of(store_with_run,
+                                                             capabilities):
+    """A coefficient without its form is a number applied to the wrong thing."""
+    from xcsearch.viz.app import _with_term
+
+    path = store_with_run[0]
+    seen = {}
+
+    def submit(theta, document=None):
+        seen["theta"], seen["document"] = list(theta), document
+        return list(theta)
+
+    session = _editor_session(capabilities)
+    session.submit = submit
+    app = create_app(path, session)
+    document = _with_term(None, capabilities["term"]("lda_x", (1, 1)))
+
+    invoke(app, "..submitted.children...last-submission.data..",
+           1, 0, [0.7], None, {"document": document, "slots": [{"part": "exchange",
+                                                                "bounds": [0.0, 2.0]}]})
+    assert seen["theta"] == [0.7]
+    assert seen["document"] == document
+
+
+def test_the_step_buttons_clip_against_the_working_form(store_with_run,
+                                                        capabilities):
+    """Not the session's opening bounds: with the editor able to build another
+    form, those are a different form's box."""
+    from xcsearch.viz.app import stepped
+
+    # The unit under the callback, asserted directly -- the MATCH callback
+    # itself is driven in tests/test_viz.py.
+    assert stepped(0.0, -1, -3.0, 3.0) == -0.03
+    assert stepped(-3.0, -1, -3.0, 3.0) == -3.0
+    assert stepped(0.0, +1, 0.0, 0.5) == 0.0025

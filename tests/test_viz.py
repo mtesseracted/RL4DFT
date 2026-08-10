@@ -68,6 +68,17 @@ def _coefficients(form=FORM):
     ]
 
 
+def _slots(form=FORM):
+    """The working form, in the shape the page publishes it (3.8).
+
+    The coefficient boxes follow the structural editor now, so a submission
+    carries the form it is a theta of, and the step buttons clip against that
+    form's bounds rather than the session's opening ones.
+    """
+    return [{"part": part, "bounds": [float(low), float(high)]}
+            for part, (low, high) in zip(form.slot_parts(), form.bounds())]
+
+
 def _session(human=None, **kwargs) -> Session:
     """A session over a human endpoint, as `serve_human_session` builds one.
 
@@ -554,7 +565,11 @@ def test_a_submission_with_an_empty_box_is_refused_and_not_retried(finished_run)
                        {"id": "tick", "property": "n_intervals", "value": tick}],
             "state": [[{"id": {"type": "theta", "index": i}, "property": "value",
                         "value": value} for i, value in enumerate(theta)],
-                      {"id": "last-submission", "property": "data", "value": last}],
+                      {"id": "last-submission", "property": "data", "value": last},
+                      # The working form travels with the theta now: a
+                      # coefficient means nothing without the form it is of.
+                      {"id": "working-form", "property": "data",
+                       "value": {"document": None, "slots": _slots()}}],
             "changedPropIds": ["submit.n_clicks" if last is None else "tick.n_intervals"],
         })
         assert response.status_code == 200
@@ -596,7 +611,9 @@ def test_a_step_button_moves_its_own_coefficient_over_the_endpoint(finished_run)
                         "property": "n_clicks", "value": 1 if name == direction else 0}
                        for name in ("down", "up")],
             "state": [{"id": {"index": index, "type": "theta"},
-                       "property": "value", "value": value}],
+                       "property": "value", "value": value},
+                      {"id": "working-form", "property": "data",
+                       "value": {"document": None, "slots": _slots()}}],
             "changedPropIds": [
                 json.dumps({"index": index, "type": pressed},
                            separators=(",", ":")) + ".n_clicks"],
@@ -693,11 +710,13 @@ def test_the_check_counts_a_pattern_matching_group_once(finished_run):
     app = create_app(path, _session(human))
     submitted = next(key for key in app.callback_map if key.startswith("..submitted"))
 
-    # submit.n_clicks, tick.n_intervals, the whole theta group, last-submission.
-    assert arguments_expected(app, submitted) == 4
+    # submit.n_clicks, tick.n_intervals, the whole theta group,
+    # last-submission, working-form.
+    assert arguments_expected(app, submitted) == 5
     assert stale_page(app, {"output": submitted,
                             "inputs": [1, 2],
-                            "state": [[0.0] * len(FORM.bounds()), None]}) is None
+                            "state": [[0.0] * len(FORM.bounds()), None,
+                                      None]}) is None
     assert stale_page(app, {"output": submitted,
                             "inputs": [1],
                             "state": [[0.0] * len(FORM.bounds())]}) is not None

@@ -1189,6 +1189,23 @@ of `plots.py` privates (no allowlist change), overlay curves on
   editor. `cma` is an optional extra, so availability is probed and an
   absent one is offered *with its install line* rather than hidden — and is
   never what the dropdown starts on.
+- *The editor and the coefficient boxes were two workflows, and D35 called
+  them one.* D35 lists the editor's "two submission paths" as though they
+  compose; built as specified they did not. The coefficient boxes were the
+  *run's* form's, laid out once at startup from `coefficient_layout(form)`,
+  so the only route from a hand-built form to a measurement was the optimize
+  button — you could propose any form you liked as long as a machine set its
+  numbers. The panel is now ordered build → read → set → run, and the middle
+  two are one callback's output over a **working form**: the editor's
+  document if it has terms, else the selected candidate, else the session's
+  opening form. One callback for both because they are two views of one
+  fact, and two would race — the boxes could be a form ahead of the latex
+  above them, which is exactly the state in which someone submits the wrong
+  theta. A submission carries its document, and the worker **adopts** a form
+  it is not already on: new protocol row, new run, `HumanOptimizer.bounds`
+  rebound in place so the session's closures stay live. `clear` is the way
+  back to the candidate view, which keeps a store-only viewer reading exactly
+  as it did.
 - *A delegated run's first trial pays a compile.* A new document means new
   term hashes, so the JIT cache misses: ~20 s for a two-term form, against
   <2 s for the five trials after it. Small delegations are mostly compile,
