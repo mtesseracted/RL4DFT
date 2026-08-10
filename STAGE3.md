@@ -1206,6 +1206,17 @@ of `plots.py` privates (no allowlist change), overlay curves on
   rebound in place so the session's closures stay live. `clear` is the way
   back to the candidate view, which keeps a store-only viewer reading exactly
   as it did.
+- *"live: queued..." was three states wearing one label.* `collect`
+  returning `None` means *never asked*, *still running* and *failed*, and the
+  panel guessed "queued" for all three. So it announced a solve nobody had
+  requested on every tick of any selection, and clicking the button changed
+  the text to exactly what it already said -- which reads as a dead button.
+  A failed solve read the same way forever, which wasted the catching: the
+  service already keeps the exception (B10's rule), it was just never shown.
+  `CandidateSCF.state` names the four, the session carries it and the failure
+  text as readings beside `collect`, and a session without them says nothing
+  rather than resurrecting the guess. Measured live: `''` before the click,
+  `live: solving...` on it, the row four ticks later.
 - *A delegated run's first trial pays a compile.* A new document means new
   term hashes, so the JIT cache misses: ~20 s for a two-term form, against
   <2 s for the five trials after it. Small delegations are mostly compile,

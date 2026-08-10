@@ -460,6 +460,10 @@ def _coefficient_input(index: int, low: float, high: float,
 _LIVE_STYLE = {"fontFamily": "monospace", "fontSize": "12px", "color": "#8a5a00",
                "background": "#fff8e6", "padding": "2px 6px", "borderRadius": "4px"}
 
+# A failed live solve. Still marked live -- it is the same kind of number,
+# and "the diagnostic did not produce one" is a diagnostic.
+_FAILED_STYLE = dict(_LIVE_STYLE, color="#b3261e", background="#fdecea")
+
 
 def _with_term(document, term) -> dict:
     """Append a term to a document's part, as plain JSON.
@@ -712,6 +716,41 @@ def _first_available(options: list[dict]) -> str | None:
         if not option.get("disabled"):
             return option["value"]
     return options[0]["value"] if options else None
+
+
+def solve_line(session, candidate, system):
+    """What the live-solve line says about one (candidate, system).
+
+    Four states, and the old line collapsed three of them into "queued...":
+    nothing has been asked for, one is running, one finished, one *failed*.
+    Rendering "queued" for the first meant the panel announced work it had
+    never been asked to do -- on every tick, for any selection -- and
+    rendering it for the last meant a solve that raised looked identical to
+    one still going, permanently.
+
+    Failures are shown, not logged: the exception is already caught and kept
+    by the service (B10's rule -- a worker that dies quietly is the failure
+    mode), and keeping it out of the panel wasted the catching.
+    """
+    state = (session.solve_state(candidate, system)
+             if session.solve_state is not None else None)
+    result = session.collect(candidate, system) if session.collect else None
+    if state == "failed" or (state is None and result is None):
+        detail = (session.solve_failure(candidate, system)
+                  if session.solve_failure is not None else None)
+        if state != "failed":
+            return ""      # no reading available: say nothing, never guess
+        return html.Span(f"live: solve failed -- {detail or 'no detail recorded'}",
+                         style=_FAILED_STYLE)
+    if state == "idle":
+        return ""
+    if result is None:
+        return html.Span("live: solving...", style=_LIVE_STYLE)
+    return html.Span(
+        "live (not stored): "
+        + "   ".join(f"{k} = {v}" for k, v in sorted(result.items())),
+        style=_LIVE_STYLE,
+    )
 
 
 def delegation_line(state: dict | None) -> str:
@@ -1677,14 +1716,7 @@ def create_app(store_path: str, session=None) -> Dash:
         candidate = selected["candidate_id"]
         if context.triggered_id == "solve" and n_clicks:
             session.solve(candidate, system)
-        result = session.collect(candidate, system) if session.collect else None
-        if result is None:
-            return html.Span("live: queued...", style=_LIVE_STYLE)
-        return html.Span(
-            "live (not stored): "
-            + "   ".join(f"{k} = {v}" for k, v in sorted(result.items())),
-            style=_LIVE_STYLE,
-        )
+        return solve_line(session, candidate, system)
 
     # Registered last, so it sees the whole callback map when it checks one.
     refuse_stale_pages(app)
