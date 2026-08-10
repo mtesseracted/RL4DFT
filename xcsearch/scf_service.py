@@ -317,6 +317,26 @@ class CandidateSCF:
         with self._lock:
             return self.results.get((candidate_key, system))
 
+    def state(self, candidate_key, system: str) -> str:
+        """``idle`` | ``queued`` | ``done`` | ``failed``, without asking for one.
+
+        ``collect`` returning ``None`` is three different situations -- never
+        asked, still running, and *failed* -- and a caller that cannot tell
+        them apart has to guess. The dashboard guessed "queued", so a panel
+        with a candidate and a system selected claimed a solve was in flight
+        before anything had been clicked, and a solve that raised claimed the
+        same thing forever.
+        """
+        key = (candidate_key, system)
+        with self._lock:
+            if key in self.results:
+                return "done"
+            if key in self.errors:
+                return "failed"
+            if key in self._pending:
+                return "queued"
+        return "idle"
+
     def failure(self, candidate_key, system: str):
         with self._lock:
             return self.errors.get((candidate_key, system))

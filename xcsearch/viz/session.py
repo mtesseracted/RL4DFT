@@ -92,6 +92,13 @@ class Session:
     # the tick through `collect`.
     solve: object = None
     collect: object = None
+    # (candidate key, system name) -> "idle" | "queued" | "done" | "failed",
+    # and the failure's text. Readings, like `submissions`: `collect`
+    # returning None means three different things and the panel was left to
+    # guess which, so it announced a queued solve that had never been asked
+    # for and hid the ones that raised.
+    solve_state: object = None
+    solve_failure: object = None
     # A form document (as plain JSON) -> a list of finding dicts.
     check: object = None
     # (document json, objective, optimizer, trials) -> a sentence about the

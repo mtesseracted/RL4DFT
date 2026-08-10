@@ -989,6 +989,8 @@ def main() -> None:
                     result.as_row() if (result := scf.collect(key, system))
                     else None
                 ),
+                "solve_state": scf.state,
+                "solve_failure": scf.failure,
                 "check": capabilities["check"],
                 "canonicalize": capabilities["canonicalize"],
                 "term": capabilities["term"],

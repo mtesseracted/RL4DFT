@@ -958,3 +958,78 @@ def test_the_step_buttons_clip_against_the_working_form(store_with_run,
     assert stepped(0.0, -1, -3.0, 3.0) == -0.03
     assert stepped(-3.0, -1, -3.0, 3.0) == -3.0
     assert stepped(0.0, +1, 0.0, 0.5) == 0.0025
+
+
+# --------------------------------------------------------------------------
+# The live-solve line: four states, not one
+# --------------------------------------------------------------------------
+def _solve_session(state, result=None, error=None):
+    return Session(
+        solve=lambda candidate, system: state,
+        collect=lambda candidate, system: result,
+        solve_state=lambda candidate, system: state,
+        solve_failure=lambda candidate, system: error,
+    )
+
+
+def test_an_unrequested_solve_says_nothing_at_all():
+    """The reported bug: 'live: queued...' under the button at all times.
+
+    `collect` returning None means three different things -- never asked,
+    running, failed -- and the line guessed "queued" for all three. So a
+    panel with a candidate and a system selected announced a solve nobody had
+    asked for, on every tick, and clicking the button changed the text to
+    exactly what it already said.
+    """
+    from xcsearch.viz.app import solve_line
+
+    assert solve_line(_solve_session("idle"), 1, "atom_Z1") == ""
+
+
+def test_a_running_solve_says_solving_and_a_finished_one_shows_its_row():
+    from xcsearch.viz.app import solve_line
+
+    running = solve_line(_solve_session("queued"), 1, "atom_Z1")
+    assert "solving" in json.dumps(_plain(running))
+
+    row = {"system": "atom_Z1", "e_total": -0.77, "converged": True}
+    done = json.dumps(_plain(solve_line(_solve_session("done", result=row),
+                                        1, "atom_Z1")))
+    # Still marked live, still says it is not stored (D34).
+    assert "not stored" in done and "e_total" in done
+
+
+def test_a_failed_solve_says_so_instead_of_queueing_forever():
+    """The service already catches and keeps the exception (B10); keeping it
+    out of the panel wasted the catching."""
+    from xcsearch.viz.app import solve_line
+
+    line = json.dumps(_plain(solve_line(
+        _solve_session("failed", error="ValueError: candidate 7 has no form document"),
+        7, "atom_Z1")))
+    assert "solve failed" in line and "no form document" in line
+
+
+def test_a_session_without_the_reading_says_nothing_rather_than_guessing():
+    """An older session shape must not resurrect the permanent 'queued'."""
+    from xcsearch.viz.app import solve_line
+
+    thin = Session(solve=lambda c, s: "queued", collect=lambda c, s: None)
+    assert solve_line(thin, 1, "atom_Z1") == ""
+    row = {"system": "atom_Z1", "e_total": -0.77}
+    thin.collect = lambda c, s: row
+    assert "e_total" in json.dumps(_plain(solve_line(thin, 1, "atom_Z1")))
+
+
+def test_the_service_distinguishes_idle_queued_done_and_failed(systems):
+    """The reading itself, over the real service."""
+    scf = CandidateSCF(build=lambda key: None, systems={s.name: s for s in systems},
+                       hartree=lambda density: density)
+    name = systems[0].name
+    assert scf.state(1, name) == "idle"
+    scf.results[(1, name)] = "a result"
+    assert scf.state(1, name) == "done"
+    scf.errors[(2, name)] = "boom"
+    assert scf.state(2, name) == "failed"
+    scf._pending.add((3, name))
+    assert scf.state(3, name) == "queued"
