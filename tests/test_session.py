@@ -813,6 +813,16 @@ def _walk_ids(component):
     return out
 
 
+def working_form_key(app) -> str:
+    """The working-form callback's key, found rather than spelled out.
+
+    Its key is the list of its outputs, so every output added to it renames
+    it -- and a test that hardcodes the name fails for a reason that has
+    nothing to do with what it is testing.
+    """
+    return next(k for k in app.callback_map if "working-form.data" in k)
+
+
 def _theta_indices(payload):
     """The coefficient boxes in a *serialized* callback result.
 
@@ -878,10 +888,12 @@ def test_adding_a_term_moves_the_latex_and_the_coefficient_boxes(store_with_run,
 
     # A one-term form: one slot, so one box -- against the seeded form's five.
     document = _with_term(None, capabilities["term"]("lda_x", (1, 1)))
-    latex, boxes, working = invoke(
-        app, "..formula-parts.children...coefficient-boxes.children..."
-             "working-form.data..", document, None)
+    latex, boxes, working, identity = invoke(
+        app, working_form_key(app), document, None)
     assert _theta_indices(boxes) == [0]
+    # The identity line follows the panel: it is the editor's form on screen,
+    # so it must not still be naming the selected candidate.
+    assert "editing" in json.dumps(_plain(identity))
     assert working["source"] == "editor" and working["document"] == document
     assert len(working["slots"]) == 1
     assert "epsilon_x" in json.dumps(_plain(latex))
@@ -889,9 +901,7 @@ def test_adding_a_term_moves_the_latex_and_the_coefficient_boxes(store_with_run,
     # Two more terms, two more boxes -- the panes move together.
     for power in ((1, 2), (3, 2)):
         document = _with_term(document, capabilities["term"]("n_power", power))
-    _, boxes, working = invoke(
-        app, "..formula-parts.children...coefficient-boxes.children..."
-             "working-form.data..", document, None)
+    _, boxes, working, _ = invoke(app, working_form_key(app), document, None)
     assert _theta_indices(boxes) == [0, 1, 2]
     assert len(working["slots"]) == 3
 
@@ -902,12 +912,13 @@ def test_clearing_the_editor_hands_the_panel_back_to_the_selection(store_with_ru
     path, run_id = store_with_run
     app = create_app(path, _editor_session(capabilities))
     candidate = json.loads(json.dumps(
-        {"candidate_id": 1, "run_id": run_id, "score": 0.0}))
+        {"candidate_id": 1, "run_id": run_id, "trial": 2, "score": 0.0}))
 
-    _, boxes, working = invoke(
-        app, "..formula-parts.children...coefficient-boxes.children..."
-             "working-form.data..", None, candidate)
+    _, boxes, working, identity = invoke(
+        app, working_form_key(app), None, candidate)
     assert working["source"] == "candidate"
+    # And it leads with the trial, which is the number the scrubber is on.
+    assert "trial 2" in json.dumps(_plain(identity))
     # The seeded ansatz's five slots, read from the *stored* document.
     assert _theta_indices(boxes) == [0, 1, 2, 3, 4]
 
@@ -916,10 +927,10 @@ def test_a_store_only_viewer_reads_exactly_as_it_did(store_with_run):
     """No editor and no submit: the panel falls back and stays disabled."""
     path = store_with_run[0]
     app = create_app(path, store_only())
-    latex, boxes, working = invoke(
-        app, "..formula-parts.children...coefficient-boxes.children..."
-             "working-form.data..", None, None)
+    latex, boxes, working, identity = invoke(
+        app, working_form_key(app), None, None)
     assert working["source"] == "session" and working["slots"] == []
+    assert identity == ""
     assert "no candidate selected" in json.dumps(_plain(latex))
 
 
@@ -1033,3 +1044,105 @@ def test_the_service_distinguishes_idle_queued_done_and_failed(systems):
     assert scf.state(2, name) == "failed"
     scf._pending.add((3, name))
     assert scf.state(3, name) == "queued"
+
+
+# --------------------------------------------------------------------------
+# Feedback: what is running, what just happened, whose numbers are on screen
+# --------------------------------------------------------------------------
+def test_the_identity_line_names_the_editor_when_the_editor_is_on_screen():
+    """It used to always name the selected candidate -- including while the
+    latex above it and the boxes below it were the editor's form, which made
+    a correct candidate id read as a wrong one."""
+    from xcsearch.viz.app import identity_line
+
+    editing = json.dumps(_plain(identity_line(
+        editing=True, form_hash="abc123def456789", n_slots=3)))
+    assert "editing" in editing and "3 coefficients" in editing
+    assert "not yet proposed" in editing
+    assert "abc123def456" in editing and "789" not in editing
+
+
+def test_the_identity_line_leads_with_the_trial_not_the_store_key():
+    """The scrubber is on a trial; the candidate id is a five-digit store key
+    that means nothing on its own."""
+    from xcsearch.viz.app import identity_line
+
+    line = json.dumps(_plain(identity_line(
+        editing=False, candidate_id=41207, trial=7, score=1.5e-3,
+        theta=[1.0, -0.25])))
+    assert line.index("trial 7") < line.index("41207")
+    assert "1.0000, -0.2500" in line and "1.5000e-03" in line
+
+
+def test_the_check_button_reports_a_pass_visibly_and_counts_its_clicks():
+    """A clean check rendered one grey sentence, and clicking again rendered
+    the identical grey sentence -- so the button read as doing nothing."""
+    from xcsearch.viz.app import findings_report
+
+    first = json.dumps(_plain(findings_report([], 1)))
+    assert "PASS" in first and "check #1" in first
+    assert "check #2" in json.dumps(_plain(findings_report([], 2)))
+
+    # The checker's vocabulary is refusal/warning/note -- the headline used to
+    # test for "error", which is not one of them, so a *refusal* (the form
+    # cannot be composed at all) read exactly like a costing note.
+    findings = [{"severity": "refusal", "what": "n_grad is not supplied",
+                 "why": "this world has no such ingredient",
+                 "remedy": "use grad(n)"},
+                {"severity": "note", "what": "declared cost 0",
+                 "why": "no extra ingredients", "remedy": "none needed"}]
+    report = json.dumps(_plain(findings_report(findings, 3)))
+    assert "2 findings" in report and "REFUSED" in report
+    assert "n_grad is not supplied" in report and "use grad(n)" in report
+
+    notes_only = json.dumps(_plain(findings_report(
+        [{"severity": "note", "what": "declared cost 0", "why": "", "remedy": ""}], 4)))
+    assert "PASS with notes" in notes_only and "REFUSED" not in notes_only
+
+    warned = json.dumps(_plain(findings_report(
+        [{"severity": "note", "what": "a", "why": "", "remedy": ""},
+         {"severity": "warning", "what": "b", "why": "", "remedy": ""}], 5)))
+    assert "PASS with warnings" in warned
+
+
+def test_the_run_pane_says_what_is_running():
+    """The delegate reply is written once, at the click, four panes away."""
+    from xcsearch.viz.app import run_activity, spinner
+
+    running = Session(delegation=lambda: {
+        "run": 4, "optimizer": "cmaes", "done": 12, "trials": 100,
+        "state": "running"})
+    line = json.dumps(_plain(run_activity(running, 3)))
+    assert "trial 12/100" in line and "run 4" in line and spinner(3) in line
+
+    finished = Session(delegation=lambda: {
+        "run": 4, "optimizer": "cmaes", "done": 100, "trials": 100,
+        "state": "finished"})
+    assert "yours again" in json.dumps(_plain(run_activity(finished, 3)))
+
+    failed = Session(delegation=lambda: {
+        "run": 4, "optimizer": "cmaes", "done": 3, "trials": 100,
+        "state": "failed: RuntimeError: boom"})
+    assert "RuntimeError" in json.dumps(_plain(run_activity(failed, 3)))
+
+
+def test_the_run_pane_falls_back_to_the_human_queue_then_to_silence():
+    from xcsearch.viz.app import run_activity
+
+    waiting = Session(submissions=lambda: {"pending": 0, "scores": []})
+    assert "idle" in json.dumps(_plain(run_activity(waiting, 1)))
+
+    busy = Session(submissions=lambda: {"pending": 2, "scores": []})
+    assert "evaluating 2 submitted candidates" in json.dumps(
+        _plain(run_activity(busy, 1)))
+
+    # A store-only viewer has neither reading and says nothing at all.
+    assert run_activity(store_only(), 1) == ""
+
+
+def test_the_spinner_advances_with_the_tick():
+    """A frozen spinner should mean 'stopped', so it must actually move."""
+    from xcsearch.viz.app import spinner
+
+    frames = {spinner(t) for t in range(8)}
+    assert len(frames) == 4 and spinner(0) == spinner(4)

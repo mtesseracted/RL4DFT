@@ -1217,6 +1217,24 @@ of `plots.py` privates (no allowlist change), overlay curves on
   text as readings beside `collect`, and a session without them says nothing
   rather than resurrecting the guess. Measured live: `''` before the click,
   `live: solving...` on it, the row four ticks later.
+- *Three feedback defects, all the same shape: a pane that had stopped
+  describing what was on screen.* (a) The identity line under the formula was
+  written by the candidate callback, so it named the selected candidate while
+  the latex above it and the boxes below it were the *editor's* form -- a
+  correct store key reading as a wrong one. It moves to `_working_form` with
+  the two panes it belongs to, and leads with the **trial**, which is what
+  the scrubber is on; the candidate id is a five-digit key that means nothing
+  alone. (b) A clean **check** rendered one grey sentence and a second click
+  rendered the identical sentence, so the button read as inert; it now leads
+  with a coloured verdict and the check's ordinal. That rewrite exposed a
+  worse bug: the headline tested for severity `"error"`, which is not in the
+  checker's vocabulary at all (`refusal`/`warning`/`note`), so a **refusal**
+  -- the form cannot be composed -- was reported in the same words as a
+  costing note. (c) A delegated run was visible only in the editor's own
+  reply, written once at the click, four panes from where runs are. The run
+  pane now carries a polled activity line with a tick-driven spinner, which
+  advances only while something is in flight, so a stopped spinner means
+  stopped rather than unimplemented.
 - *A delegated run's first trial pays a compile.* A new document means new
   term hashes, so the JIT cache misses: ~20 s for a two-term form, against
   <2 s for the five trials after it. Small delegations are mostly compile,
