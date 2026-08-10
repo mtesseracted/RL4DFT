@@ -84,10 +84,24 @@ prescribes what it optimizes over and what it evaluates over, separately.
 ## Running it
 
 ```bash
-uv sync --extra dev --extra plots    # or: pip install -e ".[dev,plots]"
-                                     # add --extra cmaes for the CMA-ES optimizer
+uv sync --extra dev --extra plots --extra viz --extra cmaes
+# or: pip install -e ".[dev,plots,viz,cmaes]"
 .venv/bin/python -m xcsearch.run_stage2
 ```
+
+| extra | brings | needed for |
+| --- | --- | --- |
+| `dev` | pytest | the test suite |
+| `plots` | matplotlib | `worlds/exp1d/plots.py` figures |
+| `viz` | dash | the dashboard, and therefore `--human` |
+| `cmaes` | cma | the D16 optimizer, and its entry in the delegate dropdown |
+| `dmrg` | physics-tenpy | the N > 2 reference adapter — **dataset-build time only** |
+
+None are needed for a plain search run: `python -m xcsearch.run_stage2` over a
+cached dataset imports no web framework, no plotting and no reference solver.
+Each extra is confined to one module, and an absent one degrades in the open
+rather than crashing — an uninstalled `cmaes` still appears in the dashboard's
+optimizer dropdown, disabled, with its install line in the label.
 
 The first run builds the reference dataset (expensive; see the note below),
 caches it, and every later run reuses that cache.
