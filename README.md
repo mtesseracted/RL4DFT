@@ -192,13 +192,25 @@ No trial count: a fixed budget is the wrong shape for a person. The search
 runs one trial per submission, for as long as you keep submitting, and the
 session ends when you stop it. (`--trials` is accepted and ignored here.)
 
-Two ways to propose, both in the functional panel:
+The functional panel reads top to bottom in the order the work happens:
+**build the form** (structural editor) → **read what it became** (the rendered
+parts) → **set its numbers** (the coefficient boxes) → **start a new run**.
+The middle two follow the editor: add a term and both the formula and the
+coefficient boxes change with it, because a coefficient is a coefficient *of*
+a particular form. `clear` empties the editor and hands the panel back to
+whichever trial is selected on the left.
 
-- **coefficients** — one bounded box per slot, grouped by the part the slot
-  belongs to. Submit queues a θ for the driver. A person is an optimizer here
-  in the literal sense — the same port, the same driver, the same records — so
-  a human session is just a run whose optimizer is called `human`, and its
-  candidates are indistinguishable in shape from TPE's in the store.
+Two ways to propose:
+
+- **coefficients** — one bounded box per slot of the working form, grouped by
+  the part the slot belongs to. Submit queues a θ for the driver, and the
+  submission carries the form it is a θ *of*: propose for a form the run is
+  not already on and the session **adopts** it — a new run opens under a
+  protocol row naming that form, and your submissions from then on are
+  proposals for it. A person is an optimizer here in the literal sense — the
+  same port, the same driver, the same records — so a human session is just a
+  run whose optimizer is called `human`, and its candidates are
+  indistinguishable in shape from TPE's in the store.
 - **structure** — a palette-and-list editor, never a formula parser. Pick a
   term from the palette, set its exponent in the two boxes (they are the
   numerator and denominator of an exact rational — powers are *structure*, so
@@ -217,11 +229,9 @@ Two ways to propose, both in the functional panel:
   listed, with the install command in its label, and is never what the
   dropdown starts on.
 
-Note the two paths act on different objects: the coefficient boxes propose a
-θ for the form the run was started with, while the editor proposes a *form*.
-Rebuilding the run's own ansatz in the editor and pressing optimize therefore
-gains nothing — the editor is for building a form that differs from the one
-you started with.
+The difference between the two buttons is who holds the seat. **submit**
+keeps you in it with a form of your own; **optimize** lends it to a machine
+optimizer for a set number of trials and gives it back.
 
 Selecting a candidate and a system also enables a live self-consistent solve,
 rebuilt from the stored document. Those numbers are display-only and are never

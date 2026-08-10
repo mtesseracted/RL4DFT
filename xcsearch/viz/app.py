@@ -107,8 +107,14 @@ _RUN_HINT = (
 )
 
 _FUNCTIONAL_HINT = (
-    "The selected trial's functional, in the parts the form itself declares. "
-    "Each box is one named part of the stored form document, with the "
+    "One form, top to bottom: build it, read it, set its numbers, submit.\n\n"
+    "The formula shown is the *working form* -- what the structural editor "
+    "holds if you have added a term, and otherwise the selected trial's. "
+    "Adding a term changes both the formula and the coefficient boxes below "
+    "it, because a coefficient is a coefficient of a particular form; "
+    "'clear' empties the editor and hands the panel back to the selection on "
+    "the left.\n\n"
+    "Each box is one named part of the form document, with the "
     "coefficients that belong to it and the box each one was searched "
     "inside.\n\n"
     "For the seeded form that is exchange -- LDA exchange scaled by one "
@@ -195,17 +201,22 @@ _SYSTEM_HINT = (
 )
 
 _PROPOSAL_HINT = (
-    "The boxes under exchange hand-place a functional in the same search the "
+    "The coefficient boxes hand-place a functional in the same search the "
     "optimizer is running against, bounded by the same box it proposes "
     "inside; submitting queues one theta, which the search picks up as its "
     "next trial and records like any other, so it lands in the history strip "
     "beside the machine's.\n\n"
-    "They are yours to set and do not follow the trial selected on the left: "
-    "the formula above is the selected trial's, the numbers in the boxes are "
-    "your next proposal. Type into a box, or step it with the buttons either "
-    "side -- one click is a two-hundredth of that coefficient's range. A "
-    "number outside the box is clipped into it rather than refused, and an "
-    "empty box stops the submission rather than guessing at one.\n\n"
+    "There is one box per slot of the *working form*, so they follow the "
+    "structural editor. Submitting a theta for a form the run is not already "
+    "on adopts that form: a new run opens under a protocol row naming it, and "
+    "your submissions from then on are proposals for it. That is the "
+    "difference between the two buttons -- 'submit' keeps you in the seat "
+    "with a form of your own, 'optimize' lends the seat to a machine "
+    "optimizer for a set number of trials and gives it back.\n\n"
+    "Type into a box, or step it with the buttons either side -- one click is "
+    "a two-hundredth of that coefficient's range. A number outside the box is "
+    "clipped into it rather than refused, and an empty box stops the "
+    "submission rather than guessing at one.\n\n"
     "A session has no trial count. One submission is one trial and it runs "
     "until you stop it -- a budget is what an optimizer needs because "
     "something has to decide when it has had enough, and here you are that "
@@ -299,6 +310,35 @@ def formula_parts(record: dict, form: dict | None) -> list:
         ))
         del index
     return boxes
+
+
+def working_form_boxes(parts_latex: dict, note: str) -> list:
+    """One labelled box per part of the form currently being edited.
+
+    The same shape as :func:`formula_parts`, minus the read-only coefficient
+    lines: those numbers are the editable boxes immediately below, and
+    printing them twice invites the two to disagree on screen.
+    """
+    boxes = []
+    for part in sorted(parts_latex):
+        if part == "__all__":
+            continue
+        rendered = parts_latex[part]
+        boxes.append(_subbox(
+            part,
+            dcc.Markdown(f"$${rendered}$$" if rendered else "", mathjax=True),
+        ))
+    if not boxes:
+        return [_subbox("form", dcc.Markdown("*no terms yet*"))]
+    boxes.append(html.Div(note, style={"fontSize": "11px", "color": "#9aa1a9",
+                                       "marginTop": "2px"}))
+    return boxes
+
+
+def _session_slots(session) -> list:
+    """The session's opening form, in the shape a working form is in."""
+    return [{"part": entry.get("part"), "bounds": list(entry["bounds"])}
+            for entry in session.coefficients]
 
 
 def _coefficient_line(position: int, entry: dict, theta: list) -> html.Div:
@@ -450,7 +490,14 @@ def _disabled_note(session, capability: str) -> html.Div:
 
 
 def propose_box(session) -> html.Div:
-    """The manual-coefficient path: boxes, a submit button, a new-run button.
+    """The manual-coefficient path: boxes for the *working form*, and submit.
+
+    The boxes used to be the run's form's, laid out once at startup and never
+    again -- which was fine while there was one form and wrong the moment the
+    structural editor could build another. They are a callback output now
+    (``_working_form``), so building a term above changes the coefficients
+    below and "edit this form's numbers by hand" means *this* form rather
+    than the one the session happened to start with.
 
     Always rendered, whatever the session can do. Without ``submit`` the
     inputs are disabled and the reason is stated -- which is the whole of the
@@ -458,7 +505,6 @@ def propose_box(session) -> html.Div:
     rather than a branch the layout takes.
     """
     can_submit = session.can("submit")
-    parts = [entry.get("part") for entry in session.coefficients]
     if can_submit and not session.coefficients:
         raise ValueError(
             "this session can submit but declares no coefficient boxes: the "
@@ -466,27 +512,52 @@ def propose_box(session) -> html.Div:
             "builds both from the run's form -- see "
             "`run_stage2.coefficient_layout`."
         )
-    bounds = [tuple(entry["bounds"]) for entry in session.coefficients]
-    children = [html.Div("propose", style={"fontSize": "11px", "color": "#7a828c",
-                                           "marginBottom": "2px"})]
+    children = [html.Div("coefficients", style={"fontSize": "11px",
+                                                "color": "#7a828c",
+                                                "marginBottom": "2px"})]
     if not can_submit:
         children.append(_disabled_note(session, "submit"))
-    children += coefficient_rows(bounds, parts, disabled=not can_submit)
     children += [
+        # Which form these boxes belong to, published so the step buttons clip
+        # against *its* bounds rather than the session's opening ones.
+        dcc.Store(id="working-form"),
+        html.Div(id="coefficient-boxes",
+                 children=initial_coefficient_rows(session)),
         html.Button("submit", id="submit", n_clicks=0, disabled=not can_submit,
                     style={"marginTop": "8px"}),
         # What was last submitted, so the line under the button can be
         # recomputed on the tick instead of frozen at the click.
         dcc.Store(id="last-submission"),
         html.Div(id="submitted", style={"fontSize": "13px", "marginTop": "6px"}),
-        html.Hr(style={"border": "none", "borderTop": "1px solid #eceef1",
-                       "margin": "12px 0 10px"}),
+    ]
+    return _subbox("edit coefficients by hand", *children)
+
+
+def initial_coefficient_rows(session) -> list:
+    """The boxes the page is served with, before any callback has run.
+
+    The session's opening form: a page that arrived showing nothing and
+    filled in on the first poll would flicker, and a store-only viewer -- who
+    gets no poll worth the name -- would see an empty panel instead of a
+    disabled one with a reason.
+    """
+    return coefficient_rows(
+        [tuple(entry["bounds"]) for entry in session.coefficients],
+        [entry.get("part") for entry in session.coefficients],
+        disabled=not session.can("submit"),
+    )
+
+
+def new_run_box(session) -> html.Div:
+    """Its own pane, at the bottom: it is about the *run*, not the form."""
+    return _subbox(
+        "run",
         html.Button("start a new run", id="new-run", n_clicks=0,
                     disabled=not session.can("new_run")),
+        *([] if session.can("new_run") else [_disabled_note(session, "new_run")]),
         html.Div(id="new-run-status",
                  style={"fontSize": "13px", "marginTop": "6px", "color": "#4a525c"}),
-    ]
-    return _subbox("propose", *children)
+    )
 
 
 def _dropdown_options(catalogue) -> list[dict]:
@@ -668,12 +739,17 @@ def functional_card(session) -> html.Div:
     """
     return _card(
         "functional",
-        # One container, filled per selection. Which parts a form has is a
+        # Top to bottom is the order the work happens in: build the form,
+        # read what it became, set its numbers, then decide about the run.
+        # The middle two follow the first -- `_working_form` writes both from
+        # whatever the editor holds, falling back to the selected candidate.
+        editor_box(session),
+        # One container, filled per working form. Which parts a form has is a
         # property of the form, so it cannot be a property of the layout.
         html.Div(id="formula-parts"),
         html.Div(id="theta"),
         propose_box(session),
-        editor_box(session),
+        new_run_box(session),
         hint=f"{_FUNCTIONAL_HINT}\n\n{_PROPOSAL_HINT}",
     )
 
@@ -1181,6 +1257,66 @@ def create_app(store_path: str, session=None) -> Dash:
 
     @app.callback(
         Output("formula-parts", "children"),
+        Output("coefficient-boxes", "children"),
+        Output("working-form", "data"),
+        Input("editor-document", "data"),
+        Input("selected", "data"),
+    )
+    def _working_form(document, selected):
+        """The form being worked on, rendered and made editable.
+
+        One callback for both panes because they are two views of one fact,
+        and two callbacks would race: the boxes could be a form ahead of the
+        latex above them, which is exactly the state in which someone submits
+        the wrong theta.
+
+        Precedence is the editor, then the selected candidate, then the
+        session's opening form. That makes **clear** a way back to the
+        candidate view rather than a dead end, and it means a store-only
+        viewer -- which has neither editor nor submit -- reads exactly as it
+        did before.
+        """
+        editing = bool(document and document.get("parts"))
+        if editing and session.canonicalize is not None:
+            try:
+                summary = session.canonicalize(document)
+            except Exception as failure:  # noqa: BLE001 - shown, never a traceback
+                return (html.Div(f"{type(failure).__name__}: {failure}",
+                                 style={"color": "#b3261e", "fontSize": "12px"}),
+                        no_update, no_update)
+            slots = summary.get("slots") or []
+            return (
+                working_form_boxes(summary.get("parts") or {}, "from the editor"),
+                coefficient_rows(
+                    [tuple(s["bounds"]) for s in slots],
+                    [s.get("part") for s in slots],
+                    disabled=not session.can("submit"),
+                ),
+                {"document": document, "slots": slots, "source": "editor"},
+            )
+        if selected:
+            candidate_id = selected["candidate_id"]
+            record = data.candidate(store_path, candidate_id) or {}
+            form = data.form_for(store_path, candidate_id)
+            slots = (form or {}).get("slots") or []
+            return (
+                formula_parts(record, form),
+                coefficient_rows(
+                    [tuple(s["bounds"]) for s in slots],
+                    [s.get("part") for s in slots],
+                    disabled=not session.can("submit"),
+                ) if slots else initial_coefficient_rows(session),
+                {"document": None,
+                 "slots": slots or _session_slots(session),
+                 "source": "candidate"},
+            )
+        return (
+            dcc.Markdown("*no candidate selected*"),
+            initial_coefficient_rows(session),
+            {"document": None, "slots": _session_slots(session), "source": "session"},
+        )
+
+    @app.callback(
         Output("theta", "children"),
         Output("heatmap", "figure"),
         Output("conditions", "figure"),
@@ -1193,17 +1329,13 @@ def create_app(store_path: str, session=None) -> Dash:
     )
     def _candidate(selected, baseline_id, scale, _tick):
         if not selected or baseline_id is None:
-            return (dcc.Markdown("*no candidate selected*"), "",
-                    figures.heatmap([]),
+            return ("", figures.heatmap([]),
                     figures.condition_bars([]), "", "")
         candidate_id = selected["candidate_id"]
 
         record = data.candidate(store_path, candidate_id) or {}
         exact = baseline_id == data.EXACT
         baseline = {} if exact else (data.candidate(store_path, baseline_id) or {})
-        # The parts the form publishes, and the slot boxes it declares --
-        # both straight out of the stored document (D25). No surgery.
-        form = data.form_for(store_path, candidate_id)
         theta = ", ".join(f"{c:.4f}" for c in record.get("theta", []))
         candidate_label = f"candidate {candidate_id}"
         baseline_label = ("exact reference" if exact else
@@ -1213,7 +1345,6 @@ def create_app(store_path: str, session=None) -> Dash:
         per_system, conditions = data.split_conditions(
             data.heatmap(store_path, candidate_id, baseline_id))
         return (
-            formula_parts(record, form),
             html.Div(
                 [
                     html.Span(f"candidate {candidate_id}", style={"fontWeight": 600}),
@@ -1325,23 +1456,28 @@ def create_app(store_path: str, session=None) -> Dash:
         Input({"type": "theta-down", "index": match}, "n_clicks"),
         Input({"type": "theta-up", "index": match}, "n_clicks"),
         State({"type": "theta", "index": match}, "value"),
+        State("working-form", "data"),
         prevent_initial_call=True,
     )
-    def _step(_down, _up, value):
+    def _step(_down, _up, value, working):
         """Move one coefficient by one step, in the direction clicked.
 
         The one place here that asks dash which input fired, and the one place
         it is the honest answer: the two buttons differ in nothing but
         direction, and unlike the submit line there is no previously published
-        state to read the difference out of. The bounds come from the
-        session's declared coefficient boxes rather than from the component's
+        state to read the difference out of.
+
+        The bounds come from the *working form* rather than the component's
         own min/max, so the box a value is clipped into is the form's and not
-        whatever the browser sent back.
+        whatever the browser sent back. It used to read the session's opening
+        coefficients, which was the same thing only while there was one form
+        -- with the editor able to build another, that would clip a new
+        form's coefficient into the old form's box.
         """
         fired = context.triggered_id
         if fired is None:
             return no_update
-        boxes = session.coefficients
+        boxes = (working or {}).get("slots") or _session_slots(session)
         if fired["index"] >= len(boxes):
             return no_update
         low, high = boxes[fired["index"]]["bounds"]
@@ -1354,9 +1490,10 @@ def create_app(store_path: str, session=None) -> Dash:
         Input("tick", "n_intervals"),
         State({"type": "theta", "index": dash_all()}, "value"),
         State("last-submission", "data"),
+        State("working-form", "data"),
         prevent_initial_call=True,
     )
-    def _submit(n_clicks, _tick, theta, last):
+    def _submit(n_clicks, _tick, theta, last, working):
         """Queue a proposal on a click, and keep its line true after.
 
         The line is recomputed on the tick rather than written once at the
@@ -1381,7 +1518,11 @@ def create_app(store_path: str, session=None) -> Dash:
                 # every tick after, and it would resubmit.
                 return (f"nothing submitted: {', '.join(empty)} empty",
                         {"clicks": n_clicks})
-            accepted = session.submit(theta)
+            # The document goes with the theta. A coefficient means nothing
+            # without the form it is a coefficient *of*, and the boxes now
+            # follow the editor -- so submitting the numbers alone would
+            # silently apply a new form's theta to the run's old form.
+            accepted = session.submit(theta, (working or {}).get("document"))
             last = {"clicks": n_clicks,
                     "theta": [float(c) for c in accepted],
                     # Where this proposal's result will land, so its outcome

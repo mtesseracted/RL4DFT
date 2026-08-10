@@ -438,6 +438,11 @@ def forms_capabilities(supplies: dict) -> dict:
         return {
             "hash": doc.form_hash(parsed),
             "latex": rendered["__all__"],
+            # Per part as well as whole, because the functional panel renders
+            # one box per part and it should not have to split a string to
+            # find them.
+            "parts": {part: line for part, line in rendered.items()
+                      if part != "__all__"},
             "slots": [
                 {"part": part, "bounds": list(slot.bounds)}
                 for part, slot in zip(doc.slot_parts(parsed), doc.slots(parsed))
@@ -493,7 +498,7 @@ def policy_for(objective: str):
 def serve_human_session(driver: SearchDriver, human, args, open_run,
                         coefficients=None, session_extras=None,
                         delegate=None, between_trials=None,
-                        opened_at=None) -> None:
+                        opened_at=None, submit=None) -> None:
     """Run the loop in the background and serve the dashboard in front of it.
 
     The driver blocks on ``HumanOptimizer.ask()`` until the submit button puts
@@ -575,7 +580,12 @@ def serve_human_session(driver: SearchDriver, human, args, open_run,
 
     extras = dict(session_extras or {})
     session = Session(
-        submit=human.submit,
+        # `human.submit` queues a theta for the form the driver currently
+        # holds. A caller that can also *change* that form -- the editor's
+        # coefficients follow whatever document is being built -- passes a
+        # coordinator that adopts the form first. Defaulting to the plain
+        # method keeps every other caller, and every test, unchanged.
+        submit=submit or human.submit,
         submissions=lambda: {
             "pending": human.pending_submissions,
             "scores": [score for _, score in getattr(human, "history", ())],
@@ -879,9 +889,96 @@ def main() -> None:
             """What the delegated run is doing. A reading, not an action."""
             return dict(progress)
 
+        # -- proposing coefficients for a hand-built form ------------------
+        # A theta means nothing without the form it is a theta *of*, so a
+        # submission carries its document and the worker adopts it. Deferred
+        # to the worker for the usual reason: adoption opens a run and
+        # registers a protocol, and every write in this process belongs to
+        # the thread that owns the store.
+        proposals: "queue.Queue" = queue.Queue()
+        working = {"hash": form.hash}
+
+        def submit_theta(theta, document: dict | None = None):
+            """Queue a proposal, clipped into the *submitted form's* box.
+
+            Clipped here rather than only in ``HumanOptimizer.submit`` because
+            the reply is what the page echoes back, and by the time the worker
+            has adopted the form the click is long answered. Reading the
+            bounds costs a parse and no compile -- ``doc.slots`` is stdlib --
+            which is what keeps this off the dashboard's thread budget.
+            """
+            theta = [float(c) for c in theta]
+            if document:
+                slots = doc_module.slots(
+                    doc_module.canonicalize(doc_module.from_json(document))
+                )
+                bounds = [slot.bounds for slot in slots]
+            else:
+                bounds = coefficients.bounds
+            if len(theta) != len(bounds):
+                raise ValueError(
+                    f"submitted {len(theta)} coefficients, this form takes "
+                    f"{len(bounds)}"
+                )
+            clipped = [min(max(c, lo), hi) for c, (lo, hi) in zip(theta, bounds)]
+            proposals.put((document, clipped))
+            return clipped
+
+        def take_proposals() -> None:
+            """Adopt whatever form was submitted, then feed the human queue.
+
+            Adoption swaps the *form* and leaves the ``HumanOptimizer``
+            itself in place -- its bounds are a plain attribute, and keeping
+            one object keeps the session's `submit` and `submissions`
+            closures pointing at something live. Safe here because
+            ``between_trials`` runs between steps, where D11's strict
+            alternation guarantees nothing is outstanding.
+            """
+            while True:
+                try:
+                    document, theta = proposals.get_nowait()
+                except queue.Empty:
+                    return
+                if document:
+                    adopt(document)
+                coefficients.submit(theta)
+
+        def adopt(document: dict) -> None:
+            adopted = DocumentForm(
+                doc_module.from_json(document), primitives=primitive_constants()
+            )
+            if adopted.hash == working["hash"]:
+                return
+            refuse_unsupported(adopted.document, supplies)
+            adopted_protocol = store.register_protocol(
+                protocol_payload(
+                    world=world_protocol(), evaluators=evaluators,
+                    extra={
+                        "ranking_policy": type(driver.policy).__name__,
+                        "optimizer": "human", "seed": args.seed,
+                        "adopted_by": "human", "form": adopted.describe(),
+                    },
+                )
+            )
+            driver.optimizer = FixedFormOptimizer(adopted, coefficients)
+            coefficients.bounds = [(float(lo), float(hi))
+                                   for lo, hi in adopted.bounds()]
+            driver.run_id = store.begin_run(
+                "human", notes=f"form={adopted.hash[:12]}",
+                protocol_id=adopted_protocol, population_id=population_id,
+                prescription=prescription.to_json(),
+            )
+            opened_at[0] = driver.n_trials
+            working["hash"] = adopted.hash
+
+        def between_trials() -> None:
+            take_proposals()
+            take_delegation()
+
         capabilities = forms_capabilities(supplies)
         serve_human_session(
             driver, coefficients, args, open_run, coefficient_layout(form),
+            submit=submit_theta,
             opened_at=opened_at,
             session_extras={
                 "optimizers": optimizer_catalogue(),
@@ -898,7 +995,7 @@ def main() -> None:
                 "palette": capabilities["palette"],
             },
             delegate=delegate,
-            between_trials=take_delegation,
+            between_trials=between_trials,
         )
         return
 
