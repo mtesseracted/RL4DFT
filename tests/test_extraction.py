@@ -349,8 +349,8 @@ def test_escalation_touches_exactly_the_top_k(run, systems):
     rung3_protocol = store.register_protocol({"rung": 3, "stack": "scf"})
     evaluator = SelfConsistentEvaluator(
         systems,
-        hartree=lambda density: apply_interaction_dense(
-            density, systems[0].x, systems[0].w
+        hartree=lambda record, density: apply_interaction_dense(
+            density, record.x, record.w
         ),
     )
     escalated = escalate(store, run_id, rung3_protocol, [evaluator],
@@ -375,8 +375,8 @@ def test_escalated_rows_carry_their_own_protocol(run, systems):
     rung3_protocol = store.register_protocol({"rung": 3, "stack": "scf"})
     evaluator = SelfConsistentEvaluator(
         systems,
-        hartree=lambda density: apply_interaction_dense(
-            density, systems[0].x, systems[0].w
+        hartree=lambda record, density: apply_interaction_dense(
+            density, record.x, record.w
         ),
     )
     escalated = escalate(store, run_id, rung3_protocol, [evaluator],
@@ -397,8 +397,8 @@ def test_per_protocol_row_set_identity_holds_across_a_mixed_rung_store(
     rung3_protocol = store.register_protocol({"rung": 3, "stack": "scf"})
     evaluator = SelfConsistentEvaluator(
         systems,
-        hartree=lambda density: apply_interaction_dense(
-            density, systems[0].x, systems[0].w
+        hartree=lambda record, density: apply_interaction_dense(
+            density, record.x, record.w
         ),
     )
     escalated = escalate(store, run_id, rung3_protocol, [evaluator],
@@ -420,8 +420,8 @@ def test_the_told_score_is_never_rewritten_by_an_escalation(run, systems):
     rung3_protocol = store.register_protocol({"rung": 3, "stack": "scf"})
     evaluator = SelfConsistentEvaluator(
         systems,
-        hartree=lambda density: apply_interaction_dense(
-            density, systems[0].x, systems[0].w
+        hartree=lambda record, density: apply_interaction_dense(
+            density, record.x, record.w
         ),
     )
     escalate(store, run_id, rung3_protocol, [evaluator], _rebuild(store),
@@ -466,8 +466,8 @@ def test_the_rung_three_evaluator_records_non_convergence_as_data(systems):
     """Endemic here, so it is a row rather than an exception."""
     evaluator = SelfConsistentEvaluator(
         systems,
-        hartree=lambda density: apply_interaction_dense(
-            density, systems[0].x, systems[0].w
+        hartree=lambda record, density: apply_interaction_dense(
+            density, record.x, record.w
         ),
     )
     records = evaluator.evaluate(form().build(LDA_THETA))

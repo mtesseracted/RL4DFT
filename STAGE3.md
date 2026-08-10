@@ -1235,6 +1235,54 @@ of `plots.py` privates (no allowlist change), overlay curves on
   pane now carries a polled activity line with a tick-driven spinner, which
   advances only while something is in flight, so a stopped spinner means
   stopped rather than unimplemented.
+- *The live solve was composed against one system's grid, and against the
+  wrong density.* Reported as a broadcast error naming two shapes and no
+  nouns — `(501,) (536,)` — which is exactly the diagnosis the crash denies
+  you. Three defects in three lines of the composition root, and the first
+  one hid the other two:
+  1. `hartree` was closed over `systems[0].x, systems[0].w`. **Every system
+     here has its own grid**: the box grows with the molecule, so the 63-system
+     cache spans 54 node counts from 501 (the atoms) to 1126 (`chain6_x5.00`).
+     The live solve therefore worked on the four atoms and raised on the other
+     fifty-nine.
+  2. `populate` ignored the density it was handed and returned the rung-1
+     evaluator's input, built at `n_ref`. A v_xc evaluated at the reference
+     density is a *constant*, so the "self-consistent" solve was a
+     fixed-potential solve settling on a confidently wrong answer — worse than
+     the crash, because it produced a number.
+  3. that same input carried `key`, the per-term cache key (D21), whose
+     identity rule is "same system, same theta, same value". True at the
+     reference density, which is fixed; false at an iterate, which is the
+     thing that moves. Every iteration after the first would have been a
+     cache hit.
+  The repair is a port change, not a patch: **both injected world callables
+  take the record** — `hartree(record, n)` alongside the existing
+  `populate(record, density, required)` — so a closed-over grid is
+  unstateable rather than merely tested against. `required` is threaded
+  because `solve_candidate` is the only holder of `functional.requires()`,
+  which also lets it honour the refusal its own docstring already promised (a
+  form naming an ingredient, solved with no populate, used to reach the trace
+  as `None`). `FrozenDensityEvaluator.populate` grew the optional density and
+  leaves the input **unnamed** when given one; the recorded rung-1 path is
+  byte-identical. `_on_grid` wraps each world call so a grid mistake that
+  survives all of that names the system, the callable and both lengths — it
+  wraps the *call*, not the return, because the mismatch raises inside the
+  callee.
+  The reason no test caught it: every fixture put every system on the same
+  grid, so the whole suite passed against a service that could only solve the
+  first one. `solved_record(name, z, half_width)` makes the grid a parameter,
+  and the regression test solves two systems of different sizes through one
+  service. Measured live over HTTP: `atom_Z1` (501), `chain2_x2.20` (536) and
+  `chain6_x5.00` (1126) all reach the panel — the last as `converged = False`
+  at residual 0.66, which is 3.5's non-convergence-is-data path doing its job
+  on a maximally stretched chain, not a regression.
+
+  What the frozen density was costing, on the four systems where the button
+  did work: `atom_Z1` reported E = -0.768833 against an exact -0.738150, and
+  the self-consistent solve reports -0.729631 — the displayed number moved in
+  the *second decimal* and moved from 3.1e-2 below the reference to 8.5e-3
+  above it. The correct solve costs 2.1 s against 1.5 s (110 iterations
+  against 70), so nothing was bought by the defect either.
 - *A delegated run's first trial pays a compile.* A new document means new
   term hashes, so the JIT cache misses: ~20 s for a two-term form, against
   <2 s for the five trials after it. Small delegations are mostly compile,

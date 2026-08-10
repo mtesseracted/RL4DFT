@@ -63,25 +63,33 @@ def coefficients():
     ]
 
 
+def solved_record(name, z, half_width=12.0):
+    """One real solved system on its own grid.
+
+    ``half_width`` is a parameter and not a constant because *the grid is a
+    property of the system*: the box grows with the molecule, so a real cache
+    holds 54 different node counts. A fixture that gave every system the same
+    grid could not see a callable closed over the wrong one.
+    """
+    grid = Grid.uniform(-half_width, half_width, 0.2)
+    world_system = System([(z, 0.0)], n_elec=2, name=name)
+    energy, n = solve_2e_singlet(grid, world_system.v_ext(grid))
+    v_ext = world_system.v_ext(grid)
+    v_h = v_hartree(n, grid)
+    return SystemRecord(
+        name=name, x=grid.x, w=grid.w, n_ref=n, e_exact=energy,
+        e_xc_exact=extract_exc(energy, n, grid, world_system),
+        regime="atom", split="train", world="exp1d",
+        wells=((z, 0.0),), n_elec=2, npz_path=None,
+        laplacian=grid.laplacian(), v_ext=v_ext, v_hartree=v_h,
+        vxc_ref=invert_vxc(n, grid, v_ext, v_h), content_hash=f"h{name}",
+    )
+
+
 @pytest.fixture(scope="module")
 def systems():
     """Two real solved systems, so a live solve has something to solve."""
-    out = []
-    for z, name in ((1.0, "atom_Z1"), (2.0, "atom_Z2")):
-        grid = Grid.uniform(-12.0, 12.0, 0.2)
-        world_system = System([(z, 0.0)], n_elec=2, name=name)
-        energy, n = solve_2e_singlet(grid, world_system.v_ext(grid))
-        v_ext = world_system.v_ext(grid)
-        v_h = v_hartree(n, grid)
-        out.append(SystemRecord(
-            name=name, x=grid.x, w=grid.w, n_ref=n, e_exact=energy,
-            e_xc_exact=extract_exc(energy, n, grid, world_system),
-            regime="atom", split="train", world="exp1d",
-            wells=((z, 0.0),), n_elec=2, npz_path=None,
-            laplacian=grid.laplacian(), v_ext=v_ext, v_hartree=v_h,
-            vxc_ref=invert_vxc(n, grid, v_ext, v_h), content_hash=f"h{name}",
-        ))
-    return out
+    return [solved_record("atom_Z1", 1.0), solved_record("atom_Z2", 2.0)]
 
 
 @pytest.fixture
@@ -258,8 +266,8 @@ def _service(systems, store_path):
     return CandidateSCF(
         build=build,
         systems={s.name: s for s in systems},
-        hartree=lambda density: apply_interaction_dense(
-            density, systems[0].x, systems[0].w
+        hartree=lambda record, density: apply_interaction_dense(
+            density, record.x, record.w
         ),
     ), store
 
@@ -300,13 +308,124 @@ def test_non_convergence_comes_back_as_data(systems):
     wild = FORM.build(np.array([0.0, -1.0, 1.0, -1.0, 1.0]))
     result = solve_candidate_robust(
         systems[0], wild,
-        lambda density: apply_interaction_dense(density, systems[0].x, systems[0].w),
+        lambda record, density: apply_interaction_dense(density, record.x, record.w),
         max_iter=25,
     )
     assert isinstance(result.converged, bool)
     assert np.isfinite(result.residual)
     row = result.as_row()
     assert set(row) >= {"converged", "scf_residual", "e_total"}
+
+
+# -- the grid is the record's, and so is the density -----------------------
+# Four tests over one composition mistake and its two neighbours. The live
+# solve was composed with a Hartree application closed over `systems[0]`'s
+# grid and a populate that ignored the density it was handed, so it crashed
+# on any system whose box was a different size and quietly solved a
+# fixed-potential problem on the ones where it did not.
+
+
+def test_a_live_solve_works_on_a_system_whose_grid_is_not_the_first_ones():
+    """The reported crash, as a test: two systems, two grid sizes, one service.
+
+    Every fixture in this file used to put every system on the same grid, so
+    the whole suite passed against a service that could only solve the first
+    one. The assertion is the second solve happening at all -- before the
+    repair it raised ``operands could not be broadcast together``, naming two
+    shapes and neither system.
+    """
+    narrow = solved_record("atom_narrow", 1.0, half_width=8.0)
+    wide = solved_record("atom_wide", 1.0, half_width=14.0)
+    assert narrow.w.shape != wide.w.shape, "the fixture must span two grids"
+
+    lda = FORM.build(LDA_THETA)
+    service = CandidateSCF(
+        build=lambda key: lda,
+        systems={s.name: s for s in (narrow, wide)},
+        hartree=lambda record, density: apply_interaction_dense(
+            density, record.x, record.w
+        ),
+    )
+    for system in (narrow, wide):
+        result = service.solve_now("c", system.name)
+        assert result.n.shape == system.w.shape
+        assert np.isfinite(result.e_total)
+
+
+def test_a_world_callable_on_the_wrong_grid_is_refused_by_name():
+    """The guard behind the repair: shapes are not a diagnosis.
+
+    A composition root can still close over the wrong grid -- this is the
+    line that makes the consequence a sentence naming the system and the
+    callable rather than a numpy broadcast error naming two integers.
+    """
+    narrow = solved_record("atom_narrow", 1.0, half_width=8.0)
+    wide = solved_record("atom_wide", 1.0, half_width=14.0)
+    with pytest.raises(ValueError, match="atom_wide: hartree raised"):
+        solve_candidate_robust(
+            wide, FORM.build(LDA_THETA),
+            # Closed over the *other* system's grid: the original defect.
+            lambda record, density: apply_interaction_dense(
+                density, narrow.x, narrow.w
+            ),
+            max_iter=2,
+        )
+
+
+def test_the_solve_populates_at_the_iterate_and_never_names_it(systems):
+    """A populate handed the reference density is not a self-consistent solve.
+
+    The live face reused the rung-1 evaluator's ``populate``, which builds its
+    input at ``n_ref`` and stamps it with the system's identity. Both are
+    right where they came from and wrong here: the density is the thing the
+    iteration moves, and the identity is the per-term cache key (D21), so an
+    SCF under it would have evaluated v_xc once and then reused it.
+    """
+    system = systems[0]
+    evaluator = FrozenDensityEvaluator([system], supplies=SUPPLIES)
+    seen = []
+
+    def populate(record, density, required):
+        seen.append(evaluator.populate(record, required, density))
+        return seen[-1]
+
+    result = solve_candidate_robust(
+        system, FORM.build(LDA_THETA),
+        lambda record, density: apply_interaction_dense(
+            density, record.x, record.w
+        ),
+        populate, max_iter=6,
+    )
+    assert len(seen) > 2, "populate is called once per iterate"
+    assert not np.allclose(seen[-1].n, system.n_ref), (
+        "the last input was the reference density: the iterate was ignored"
+    )
+    assert all(x.key is None for x in seen), (
+        "an input at an iterate must not be cached: the cache key says 'same "
+        "system, same theta, same value' and the density is what moved"
+    )
+    # The reference face is untouched: same evaluator, no density, cached.
+    assert evaluator.populate(system, set()).key == f"{system.name}:hatom_Z1"
+    assert np.isfinite(result.e_total)
+
+
+def test_a_solve_with_no_populate_refuses_a_form_that_needs_one(systems):
+    """What ``solve_candidate``'s docstring already promised.
+
+    Without a populate the candidate gets n and w, which is every Stage 2
+    form and not a form that named an ingredient. That used to arrive as
+    ``None`` inside the compiled trace.
+    """
+    needs_x = FORM.build(LDA_THETA)
+    needs_x.requires = lambda: {"x"}
+    with pytest.raises(ValueError, match="requires \\['x'\\]"):
+        solve_candidate_robust(
+            systems[0], needs_x,
+            lambda record, density: apply_interaction_dense(
+                density, record.x, record.w
+            ),
+            max_iter=2,
+        )
 
 
 def test_the_service_caches_per_candidate_and_system(store_with_run, systems):
@@ -1035,7 +1154,7 @@ def test_a_session_without_the_reading_says_nothing_rather_than_guessing():
 def test_the_service_distinguishes_idle_queued_done_and_failed(systems):
     """The reading itself, over the real service."""
     scf = CandidateSCF(build=lambda key: None, systems={s.name: s for s in systems},
-                       hartree=lambda density: density)
+                       hartree=lambda record, density: density)
     name = systems[0].name
     assert scf.state(1, name) == "idle"
     scf.results[(1, name)] = "a result"

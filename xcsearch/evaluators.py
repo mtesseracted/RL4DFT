@@ -104,7 +104,8 @@ class FrozenDensityEvaluator(Evaluator):
             "supplies": sorted(self.supplies),
         }
 
-    def populate(self, system: SystemRecord, required: set[str]) -> XCInput:
+    def populate(self, system: SystemRecord, required: set[str],
+                 density=None) -> XCInput:
         """The candidate's ``XCInput``: exactly what it declared, no more (D27).
 
         The D10 rule, made operational -- *populate only what you can vouch
@@ -116,6 +117,14 @@ class FrozenDensityEvaluator(Evaluator):
         at run start and refuses the pairing with the missing names (checker
         check 1). This is the second line of the same defence, and the reason
         it is worth having is that a *proposer* can invent a form mid-run.
+
+        ``density`` is how the *self-consistent* face reuses this method. Rung
+        1 evaluates at the reference density and leaves it None; an SCF passes
+        its current iterate, because a v_xc evaluated at the reference density
+        is a constant and a solve against a constant potential settles on a
+        confidently wrong answer. Nothing else about the input changes: every
+        supply row's ``populate`` is a function of the *system*, so an operator
+        descriptor is the same at any density.
         """
         missing = sorted(required - set(self.supplies))
         if missing:
@@ -142,9 +151,19 @@ class FrozenDensityEvaluator(Evaluator):
         # only (D21). A candidate never reads it -- it is not an ingredient,
         # it is how the compiled form knows that the term it evaluated last
         # trial was evaluated on this same system.
+        #
+        # An input at some *other* density is deliberately unnamed. The cache
+        # is keyed by (term, theta, key) and the identity rule it encodes is
+        # "same system, same theta, same value" -- true at the reference
+        # density, which is fixed, and false at an SCF iterate, which is the
+        # thing that moves. Naming one would hand iteration k+1 the value
+        # computed at iteration k and the solve would converge instantly to
+        # nothing. An unnamed input is simply not cached (`records.XCInput`).
+        at_reference = density is None
         return XCInput(
-            n=system.n_ref, w=system.w,
-            key=f"{system.name}:{system.content_hash}",
+            n=system.n_ref if at_reference else np.asarray(density, dtype=float),
+            w=system.w,
+            key=f"{system.name}:{system.content_hash}" if at_reference else None,
             **extra,
         )
 

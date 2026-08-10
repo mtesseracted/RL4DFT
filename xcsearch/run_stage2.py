@@ -782,15 +782,23 @@ def main() -> None:
         # second objection to a live rebuild ("today's form class may not be
         # the form that produced that theta") died with the forms room, and
         # the protocol leg stands alone and suffices.
+        #
+        # Both world callables read the *record*. Every system here has its
+        # own grid -- the box grows with the molecule, 501 nodes for an atom
+        # and 1126 for the longest chain -- so a Hartree application closed
+        # over `systems[0]` is correct for the four atoms and a broadcast
+        # error for every other system. And the XCInput is built at the iterate,
+        # unnamed, which is what makes the solve self-consistent rather than a
+        # fixed-potential solve wearing the name (see the two docstrings).
+        live_inputs = FrozenDensityEvaluator(systems, supplies=supplies)
         scf = CandidateSCF(
             build=lambda key: rebuild_candidate(store, key),
             systems={s.name: s for s in systems},
-            hartree=lambda density: apply_interaction_dense(
-                density, systems[0].x, systems[0].w
+            hartree=lambda record, density: apply_interaction_dense(
+                density, record.x, record.w
             ),
-            populate=lambda record, density: FrozenDensityEvaluator(
-                [record], supplies=supplies
-            ).populate(record, set()),
+            populate=lambda record, density, required:
+                live_inputs.populate(record, required, density),
         )
 
         # The delegate path (D35): the human proposes the form, the machine
