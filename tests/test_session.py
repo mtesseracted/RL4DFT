@@ -126,7 +126,9 @@ def _sessions():
         "solve": lambda candidate, system: "queued",
         "collect": lambda candidate, system: None,
         "check": lambda document: [],
-        "propose": lambda document, objective: "handed over",
+        "propose": lambda document, objective, optimizer=None, trials=None: (
+            "handed over"
+        ),
         "canonicalize": lambda document: {"latex": "", "terms": []},
         "term": lambda choice, power: {},
     }
@@ -526,8 +528,10 @@ def test_the_delegate_button_refuses_without_the_capability(store_with_run):
     app = create_app(path, store_only())
     # The check button fired with no checker attached: a named refusal, on a
     # normal return path, from a callback that exists whatever the session is.
+    # Arguments: check clicks, optimize clicks, document, objective, optimizer,
+    # trials -- the last two are the bounded delegated run's knobs.
     assert "cannot check" in invoke(app, "editor-findings.children",
-                                    1, 0, None, None)
+                                    1, 0, None, None, None, 100)
 
 
 # --------------------------------------------------------------------------
@@ -626,3 +630,164 @@ def test_the_objective_dropdown_defaults_to_the_delegate_paths_own_fallback():
 
     assert _dropdown_options(OBJECTIVES)[0]["value"] == "dataset_error"
     assert list(OBJECTIVES)[0] == "dataset_error"
+
+
+# --------------------------------------------------------------------------
+# The delegated run is bounded, and it hands the session back
+# --------------------------------------------------------------------------
+class _Counting:
+    """A coefficient optimizer that records how many times it was asked."""
+
+    def __init__(self, bounds):
+        self.bounds = list(bounds)
+        self.asks = 0
+
+    def ask(self):
+        self.asks += 1
+        return np.array([0.5 * (lo + hi) for lo, hi in self.bounds])
+
+    def tell(self, theta, score):
+        pass
+
+
+def _delegation_driver(tmp_path, systems):
+    from xcsearch.store import SQLiteRecordStore
+
+    store = SQLiteRecordStore(str(tmp_path / "records.sqlite"))
+    population = store.open_population(systems)
+    evaluators = [FrozenDensityEvaluator(systems, supplies=SUPPLIES)]
+    human = _Counting(FORM.bounds())
+    driver = SearchDriver(
+        optimizer=FixedFormOptimizer(FORM, human),
+        evaluators=evaluators, policy=MeanSquaredError(), store=store,
+        run_id=store.begin_run("human", population_id=population),
+    )
+    return store, population, driver, human
+
+
+def test_a_delegated_run_stops_at_the_trial_count_it_was_given(tmp_path, systems):
+    """The whole point of the bound: an unbounded delegation ran at ~450
+    ms/trial until the process was killed."""
+    from xcsearch.run_stage2 import run_delegated
+
+    store, population, driver, human = _delegation_driver(tmp_path, systems)
+    machine = _Counting(FORM.bounds())
+    progress = {}
+    run_delegated(
+        driver, optimizer=FixedFormOptimizer(FORM, machine),
+        policy=MeanSquaredError(),
+        run_id=store.begin_run("delegated", population_id=population),
+        trials=4,
+        restore_run=lambda: store.begin_run("human", population_id=population),
+        progress=progress, label="optuna_tpe",
+    )
+    assert machine.asks == 4
+    assert progress == {"run": progress["run"], "optimizer": "optuna_tpe",
+                        "done": 4, "trials": 4, "state": "finished"}
+    store.close()
+
+
+def test_a_delegated_run_hands_the_session_back(tmp_path, systems):
+    """The human's optimizer, policy and a run of their own return -- the old
+    path detached the human permanently and every later submission queued up
+    behind an optimizer nobody called."""
+    from xcsearch.run_stage2 import run_delegated
+
+    store, population, driver, human = _delegation_driver(tmp_path, systems)
+    before = (driver.optimizer, driver.policy, driver.run_id)
+    machine = _Counting(FORM.bounds())
+    # A distinct policy object of the same kind: the harness has no
+    # ConditionsEvaluator, so a conditions policy would (rightly) refuse to
+    # score, and what is under test here is that the borrowed one comes back.
+    run_delegated(
+        driver, optimizer=FixedFormOptimizer(FORM, machine),
+        policy=MeanSquaredError(),
+        run_id=store.begin_run("delegated", population_id=population),
+        trials=2,
+        restore_run=lambda: store.begin_run("human", population_id=population),
+    )
+    assert driver.optimizer is before[0] and driver.policy is before[1]
+    assert driver.run_id != before[2], "a new run, not the one behind the delegation"
+
+    # And the human is genuinely back in the loop, not merely reattached.
+    driver.step()
+    assert human.asks == 1
+    store.close()
+
+
+def test_a_failed_delegation_still_hands_the_session_back(tmp_path, systems):
+    """A delegation that raises must not cost the person their session."""
+    from xcsearch.run_stage2 import run_delegated
+
+    store, population, driver, human = _delegation_driver(tmp_path, systems)
+    before = driver.optimizer
+
+    class _Exploding(_Counting):
+        def ask(self):
+            raise RuntimeError("boom")
+
+    progress = {}
+    with pytest.raises(RuntimeError, match="boom"):
+        run_delegated(
+            driver, optimizer=FixedFormOptimizer(FORM, _Exploding(FORM.bounds())),
+            policy=MeanSquaredError(),
+            run_id=store.begin_run("delegated", population_id=population),
+            trials=5,
+            restore_run=lambda: store.begin_run("human", population_id=population),
+            progress=progress, label="cmaes",
+        )
+    assert driver.optimizer is before
+    assert progress["state"].startswith("failed: RuntimeError")
+    assert progress["done"] == 0
+    store.close()
+
+
+# --------------------------------------------------------------------------
+# The optimizer dropdown
+# --------------------------------------------------------------------------
+def test_the_optimizer_catalogue_states_availability_rather_than_hiding_it():
+    from xcsearch.run_stage2 import COEFFICIENT_OPTIMIZERS, optimizer_catalogue
+
+    catalogue = optimizer_catalogue()
+    assert set(catalogue) == set(COEFFICIENT_OPTIMIZERS)
+    assert catalogue["optuna_tpe"]["available"] is True
+    entry = catalogue["cmaes"]
+    if not entry["available"]:
+        # An absent extra is offered *with its install line*, never hidden:
+        # hiding makes the extra undiscoverable, and offering it silently
+        # makes the button raise ImportError inside the worker thread.
+        assert "pip install" in entry["label"]
+
+
+def test_the_dropdown_never_starts_on_an_optimizer_that_cannot_run():
+    from xcsearch.viz.app import _first_available
+
+    options = [{"value": "cmaes", "disabled": True},
+               {"value": "optuna_tpe", "disabled": False}]
+    assert _first_available(options) == "optuna_tpe"
+    assert _first_available([{"value": "only", "disabled": True}]) == "only"
+    assert _first_available([]) is None
+
+
+def test_both_optimizers_are_constructible_through_the_one_helper():
+    from xcsearch.run_stage2 import _optimizer_available, coefficient_optimizer
+
+    bounds = [(0.0, 1.0), (-1.0, 1.0)]
+    assert coefficient_optimizer(bounds, 0, "optuna_tpe").__class__.__name__ == "OptunaTPE"
+    if _optimizer_available("cmaes")[0]:
+        assert coefficient_optimizer(bounds, 0, "cmaes").__class__.__name__ == "CMAES"
+    with pytest.raises(ValueError, match="unknown coefficient optimizer"):
+        coefficient_optimizer(bounds, 0, "annealing")
+
+
+def test_the_progress_line_says_running_finished_or_why_not():
+    from xcsearch.viz.app import delegation_line
+
+    assert delegation_line(None) == "" and delegation_line({}) == ""
+    running = {"run": 7, "optimizer": "cmaes", "done": 3, "trials": 50,
+               "state": "running"}
+    assert "trial 3/50" in delegation_line(running)
+    done = dict(running, done=50, state="finished")
+    assert "sliders are yours again" in delegation_line(done)
+    bad = dict(running, state="failed: RuntimeError: boom")
+    assert "RuntimeError" in delegation_line(bad)

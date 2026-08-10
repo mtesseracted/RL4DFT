@@ -542,6 +542,11 @@ def editor_box(session) -> html.Div:
     can_edit = session.can("edit")
     palette = _dropdown_options(session.palette)
     objectives = _dropdown_options(session.objectives)
+    optimizers = [
+        dict(option, disabled=not (session.optimizers or {})
+             .get(option["value"], {}).get("available", True))
+        for option in _dropdown_options(session.optimizers)
+    ]
     children = [
         dcc.Store(id="editor-document"),
         html.Div("build a form", style={"fontSize": "11px", "color": "#7a828c",
@@ -582,6 +587,28 @@ def editor_box(session) -> html.Div:
                              disabled=not session.can("propose"), clearable=False,
                              style={"flex": "1 1 180px", "marginLeft": "6px",
                                     "fontSize": "12px"}),
+            ],
+            style={"display": "flex", "alignItems": "center", "marginTop": "6px",
+                   "flexWrap": "wrap"},
+        ),
+        # The delegated run's own two knobs. Both are the person's: a run
+        # nobody bounded ran at ~450 ms/trial until the process was killed,
+        # and "which optimizer" was a decision buried in the composition root
+        # that only the person watching the scores can make well.
+        html.Div(
+            [
+                dcc.Dropdown(id="editor-optimizer", options=optimizers,
+                             value=_first_available(optimizers),
+                             disabled=not session.can("propose"),
+                             clearable=False,
+                             style={"flex": "1 1 200px", "fontSize": "12px"}),
+                html.Span("trials", style={"margin": "0 4px 0 8px",
+                                           "fontSize": "12px",
+                                           "color": "#7a828c"}),
+                dcc.Input(id="editor-trials", type="number",
+                          value=session.default_trials, min=1, step=10,
+                          disabled=not session.can("propose"),
+                          style={"width": "78px"}),
                 html.Button("optimize", id="editor-optimize", n_clicks=0,
                             disabled=not session.can("propose"),
                             style={"marginLeft": "6px"}),
@@ -589,11 +616,46 @@ def editor_box(session) -> html.Div:
             style={"display": "flex", "alignItems": "center", "marginTop": "6px",
                    "flexWrap": "wrap"},
         ),
+        # Polled, not pushed: the click returns "handed over" and this line
+        # is what says how far it got. Without it a bounded run looks
+        # identical to a hung one.
+        html.Div(id="delegate-progress",
+                 style={"fontSize": "12px", "color": "#4a525c",
+                        "marginTop": "6px"}),
         html.Div(id="editor-findings",
                  style={"fontSize": "11.5px", "color": "#4a525c",
                         "whiteSpace": "pre-wrap", "marginTop": "6px"}),
     ]
     return _subbox("structural editor", *children)
+
+
+def _first_available(options: list[dict]) -> str | None:
+    """The first option that can actually run, else the first one.
+
+    An unavailable optimizer is still *offered* -- with its reason in the
+    label, so the extra is discoverable -- but it must never be what the
+    dropdown starts on, or the obvious click fails for a reason the person
+    did not choose.
+    """
+    for option in options:
+        if not option.get("disabled"):
+            return option["value"]
+    return options[0]["value"] if options else None
+
+
+def delegation_line(state: dict | None) -> str:
+    """The delegated run's progress, as one sentence."""
+    if not state:
+        return ""
+    done, trials = state.get("done", 0), state.get("trials", 0)
+    where = f"run {state.get('run')}, {state.get('optimizer', '?')}"
+    status = state.get("state", "")
+    if status == "running":
+        return f"{where}: trial {done}/{trials}"
+    if status == "finished":
+        return (f"{where}: finished {done}/{trials} trials -- the sliders are "
+                "yours again")
+    return f"{where}: {status} at trial {done}/{trials}"
 
 
 def functional_card(session) -> html.Div:
@@ -1394,9 +1456,12 @@ def create_app(store_path: str, session=None) -> Dash:
         Input("editor-optimize", "n_clicks"),
         State("editor-document", "data"),
         State("editor-objective", "value"),
+        State("editor-optimizer", "value"),
+        State("editor-trials", "value"),
         prevent_initial_call=True,
     )
-    def _check_or_optimize(check_clicks, optimize_clicks, document, objective):
+    def _check_or_optimize(check_clicks, optimize_clicks, document, objective,
+                           optimizer, trials):
         """The check button and the delegate path, side by side.
 
         The check button calls the session's ``check`` -- which is
@@ -1416,7 +1481,9 @@ def create_app(store_path: str, session=None) -> Dash:
                 return session.refuse("propose")
             if not document:
                 return "nothing to optimize: the editor has no terms yet"
-            return session.propose(document, objective)
+            if not trials or int(trials) < 1:
+                return "a delegated run needs at least one trial"
+            return session.propose(document, objective, optimizer, int(trials))
         if not check_clicks:
             return no_update
         if not session.can("check"):
@@ -1431,6 +1498,17 @@ def create_app(store_path: str, session=None) -> Dash:
             f"{f.get('why', '')}\n    remedy: {f.get('remedy', '')}"
             for f in findings
         )
+
+    @app.callback(
+        Output("delegate-progress", "children"),
+        Input("tick", "n_intervals"),
+    )
+    def _delegate_progress(_tick):
+        """How far the delegated run has got. Polled, like every other
+        reading -- the click that started it returned long before."""
+        if session.delegation is None:
+            return ""
+        return delegation_line(session.delegation())
 
     # -- the live face of the SCF service (D34) ---------------------------
     @app.callback(

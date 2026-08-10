@@ -185,14 +185,29 @@ Two ways to propose, both in the functional panel:
   in the literal sense — the same port, the same driver, the same records — so
   a human session is just a run whose optimizer is called `human`, and its
   candidates are indistinguishable in shape from TPE's in the store.
-- **structure** — a palette-and-list editor, never a formula parser. Add terms
-  from the palette, set exact rational powers (powers are structure; the
-  coefficient optimizer never sees them), and the preview is rendered from the
-  *canonical* document rather than from what you typed. **check** runs the
-  form checker — the same function that refuses a machine proposer's output.
-  **optimize** hands the whole form to the optimizer, which fits its
-  coefficients under a protocol row of its own: the human proposes the form,
-  the machine fits the numbers.
+- **structure** — a palette-and-list editor, never a formula parser. Pick a
+  term from the palette, set its exponent in the two boxes (they are the
+  numerator and denominator of an exact rational — powers are *structure*, so
+  they go into the form's identity and the coefficient optimizer never sees
+  them; only the two `^p` entries read them), and **add**. Each add
+  re-canonicalizes: the term list and the LaTeX preview are rendered from the
+  *document*, not from what you typed. **check** runs the form checker — the
+  same function that refuses a machine proposer's output.
+
+  **optimize** delegates: the worker builds your form, opens a run of its
+  own under its own protocol row, and fits the coefficients — the human
+  proposes the form, the machine fits the numbers. You choose the optimizer
+  (TPE or CMA-ES) and the trial count, and when those trials are done the
+  session hands the sliders back to you and opens a fresh human run. A
+  progress line tracks it. An optimizer whose extra is not installed is still
+  listed, with the install command in its label, and is never what the
+  dropdown starts on.
+
+Note the two paths act on different objects: the coefficient boxes propose a
+θ for the form the run was started with, while the editor proposes a *form*.
+Rebuilding the run's own ansatz in the editor and pressing optimize therefore
+gains nothing — the editor is for building a form that differs from the one
+you started with.
 
 Selecting a candidate and a system also enables a live self-consistent solve,
 rebuilt from the stored document. Those numbers are display-only and are never
