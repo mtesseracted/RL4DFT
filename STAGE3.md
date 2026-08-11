@@ -1338,6 +1338,33 @@ of `plots.py` privates (no allowlist change), overlay curves on
   curve arrives ~2 s after selection with no click, and on `chain2_x2.20` the
   LDA candidate bottoms at -0.414 against the reference's -0.674 — the
   underestimate `vxc_l2_error` scores, now visible as a shape.
+- *A control's position is a claim about what it affects, and the editor box
+  was making a false one.* Asked as "what is the drop-down next to the check
+  button for?" — and the honest answer was *nothing to do with check*. It is
+  the delegated run's **objective**, sharing a flex row with `check` while its
+  two siblings (optimizer, trials) and the button that reads all three sat in
+  the row below. Check reads exactly one thing, `editor-document`; the
+  objective, optimizer and trials dropdowns are not even inputs to its
+  callback. Nothing was broken and the layout was still lying.
+
+  The box is now three labelled groups — *build a form* / *check this form
+  against the world* / *or hand it to an optimizer* — each with its controls
+  and **its own output directly beneath**. That last part forced a second
+  change: the two buttons shared one `editor-findings` div, so once the groups
+  were labelled an optimize reply would have landed under the check heading —
+  the same error the regrouping was fixing. So `_check_or_optimize` grew a
+  second output, `delegate-reply`, and each button writes only to its own.
+
+  A test-harness note worth keeping: `invoke` calls the registered function
+  directly, which is enough until a callback branches on `ctx.triggered_id`.
+  Dash's wrapper **rebuilds the context from the request body**, so a direct
+  call sees no trigger and silently exercises whichever branch the fallthrough
+  reaches — the delegate branch had never been driven through the callback at
+  all. `fire()` posts through Flask's in-process test client, so the
+  dispatcher assembles the context and both branches are reachable; no server,
+  no port, no browser. And an output left at `no_update` is *absent* from the
+  response, which is the assertion that a button did not write to the other
+  group's div.
 - *A delegated run's first trial pays a compile.* A new document means new
   term hashes, so the JIT cache misses: ~20 s for a two-term form, against
   <2 s for the five trials after it. Small delegations are mostly compile,

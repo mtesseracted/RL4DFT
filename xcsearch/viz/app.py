@@ -704,30 +704,45 @@ def editor_box(session) -> html.Div:
                  style={"fontSize": "11.5px", "fontFamily": "monospace",
                         "color": "#4a525c", "margin": "6px 0"}),
         dcc.Markdown(id="editor-preview", mathjax=True),
+        # -- check: reads the document and nothing else ---------------------
+        # The button sits alone, with its findings directly beneath it. It
+        # used to share a row with the objective dropdown, which put a control
+        # the check callback never reads inside arm's reach of the check
+        # button -- and a control's position is a claim about what it affects.
+        _editor_label("check this form against the world"),
         html.Div(
             [
                 html.Button("check", id="editor-check", n_clicks=0,
                             disabled=not session.can("check")),
+                *([] if session.can("check")
+                  else [_disabled_note(session, "check")]),
+            ],
+            style={"display": "flex", "alignItems": "center",
+                   "flexWrap": "wrap"},
+        ),
+        html.Div(id="editor-findings",
+                 style={"fontSize": "11.5px", "color": "#4a525c",
+                        "whiteSpace": "pre-wrap", "margin": "6px 0 10px"}),
+        # -- delegate: the three knobs and the button that reads them -------
+        # All of the delegated run's inputs in one row with its button, so the
+        # grouping states what the callback does. Each is the person's: a run
+        # nobody bounded ran at ~450 ms/trial until the process was killed,
+        # "which optimizer" was a decision buried in the composition root that
+        # only the person watching the scores can make well, and the objective
+        # decides what "better" means for every trial it runs.
+        _editor_label("or hand it to an optimizer, which fits the coefficients"),
+        html.Div(
+            [
                 dcc.Dropdown(id="editor-objective", options=objectives,
                              value=objectives[0]["value"] if objectives else None,
                              disabled=not session.can("propose"), clearable=False,
-                             style={"flex": "1 1 180px", "marginLeft": "6px",
-                                    "fontSize": "12px"}),
-            ],
-            style={"display": "flex", "alignItems": "center", "marginTop": "6px",
-                   "flexWrap": "wrap"},
-        ),
-        # The delegated run's own two knobs. Both are the person's: a run
-        # nobody bounded ran at ~450 ms/trial until the process was killed,
-        # and "which optimizer" was a decision buried in the composition root
-        # that only the person watching the scores can make well.
-        html.Div(
-            [
+                             style={"flex": "1 1 180px", "fontSize": "12px"}),
                 dcc.Dropdown(id="editor-optimizer", options=optimizers,
                              value=_first_available(optimizers),
                              disabled=not session.can("propose"),
                              clearable=False,
-                             style={"flex": "1 1 200px", "fontSize": "12px"}),
+                             style={"flex": "1 1 200px", "marginLeft": "6px",
+                                    "fontSize": "12px"}),
                 html.Span("trials", style={"margin": "0 4px 0 8px",
                                            "fontSize": "12px",
                                            "color": "#7a828c"}),
@@ -742,17 +757,30 @@ def editor_box(session) -> html.Div:
             style={"display": "flex", "alignItems": "center", "marginTop": "6px",
                    "flexWrap": "wrap"},
         ),
+        # The click's own reply -- written once, at the click, and true only
+        # then ("handed to cmaes for 20 trials").
+        html.Div(id="delegate-reply",
+                 style={"fontSize": "11.5px", "color": "#4a525c",
+                        "whiteSpace": "pre-wrap", "marginTop": "6px"}),
         # Polled, not pushed: the click returns "handed over" and this line
         # is what says how far it got. Without it a bounded run looks
         # identical to a hung one.
         html.Div(id="delegate-progress",
                  style={"fontSize": "12px", "color": "#4a525c",
                         "marginTop": "6px"}),
-        html.Div(id="editor-findings",
-                 style={"fontSize": "11.5px", "color": "#4a525c",
-                        "whiteSpace": "pre-wrap", "marginTop": "6px"}),
     ]
     return _subbox("structural editor", *children)
+
+
+def _editor_label(text: str) -> html.Div:
+    """A section heading inside the editor box.
+
+    Three groups of controls in one box read as one group of controls unless
+    something says otherwise, and what a person infers from adjacency is
+    what the layout has told them -- correctly or not.
+    """
+    return html.Div(text, style={"fontSize": "11px", "color": "#7a828c",
+                                 "margin": "10px 0 4px"})
 
 
 def _first_available(options: list[dict]) -> str | None:
@@ -1806,6 +1834,7 @@ def create_app(store_path: str, session=None) -> Dash:
 
     @app.callback(
         Output("editor-findings", "children"),
+        Output("delegate-reply", "children"),
         Input("editor-check", "n_clicks"),
         Input("editor-optimize", "n_clicks"),
         State("editor-document", "data"),
@@ -1817,6 +1846,14 @@ def create_app(store_path: str, session=None) -> Dash:
     def _check_or_optimize(check_clicks, optimize_clicks, document, objective,
                            optimizer, trials):
         """The check button and the delegate path, side by side.
+
+        One callback because the two buttons share their guards, but **two
+        outputs**, one under each button. They shared a single div while they
+        also shared a row, and the row was the mistake: the objective
+        dropdown sat beside `check`, which reads no objective, and a control's
+        position is a claim about what it affects. With the box grouped by
+        what reads what, a reply landing in the other group would say the same
+        wrong thing again.
 
         The check button calls the session's ``check`` -- which is
         ``forms.checker.check``, wired, not reimplemented: one function for
@@ -1830,21 +1867,22 @@ def create_app(store_path: str, session=None) -> Dash:
         fired = context.triggered_id
         if fired == "editor-optimize":
             if not optimize_clicks:
-                return no_update
+                return no_update, no_update
             if not session.can("propose"):
-                return session.refuse("propose")
+                return no_update, session.refuse("propose")
             if not document:
-                return "nothing to optimize: the editor has no terms yet"
+                return no_update, "nothing to optimize: the editor has no terms yet"
             if not trials or int(trials) < 1:
-                return "a delegated run needs at least one trial"
-            return session.propose(document, objective, optimizer, int(trials))
+                return no_update, "a delegated run needs at least one trial"
+            return no_update, session.propose(document, objective, optimizer,
+                                              int(trials))
         if not check_clicks:
-            return no_update
+            return no_update, no_update
         if not session.can("check"):
-            return session.refuse("check")
+            return session.refuse("check"), no_update
         if not document:
-            return "nothing to check: the editor has no terms yet"
-        return findings_report(session.check(document), check_clicks)
+            return "nothing to check: the editor has no terms yet", no_update
+        return findings_report(session.check(document), check_clicks), no_update
 
     @app.callback(
         Output("delegate-progress", "children"),
