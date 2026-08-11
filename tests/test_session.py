@@ -236,7 +236,11 @@ def invoke(app, key: str, *args):
     # Dash hands back the serialized response its dispatcher would send, so
     # the values are read out of that rather than off a return tuple.
     payload = json.loads(raw)["response"]
-    values = [payload[spec["id"]][spec["property"]] for spec in outputs]
+    # An output the callback returned `no_update` for is *absent* from the
+    # response -- that is how Dash spells "leave this one alone", so the
+    # absence is the reading rather than a lookup to be guarded against.
+    values = [payload.get(spec["id"], {}).get(spec["property"], dash.no_update)
+              for spec in outputs]
     return values if len(values) > 1 else values[0]
 
 
@@ -742,12 +746,32 @@ def test_a_delegated_run_is_indistinguishable_from_a_script_composed_one(
 def test_the_delegate_button_refuses_without_the_capability(store_with_run):
     path, _ = store_with_run
     app = create_app(path, store_only())
-    # The check button fired with no checker attached: a named refusal, on a
-    # normal return path, from a callback that exists whatever the session is.
-    # Arguments: check clicks, optimize clicks, document, objective, optimizer,
-    # trials -- the last two are the bounded delegated run's knobs.
-    assert "cannot check" in invoke(app, "editor-findings.children",
-                                    1, 0, None, None, None, 100)
+    outputs = [{"id": "editor-findings", "property": "children"},
+               {"id": "delegate-reply", "property": "children"}]
+    state = [{"id": "editor-document", "property": "data", "value": None},
+             {"id": "editor-objective", "property": "value", "value": None},
+             {"id": "editor-optimizer", "property": "value", "value": None},
+             {"id": "editor-trials", "property": "value", "value": 100}]
+
+    def press(button, check_clicks, optimize_clicks):
+        return fire(app, f"{button}.n_clicks", [
+            {"id": "editor-check", "property": "n_clicks", "value": check_clicks},
+            {"id": "editor-optimize", "property": "n_clicks",
+             "value": optimize_clicks},
+        ], state, outputs)
+
+    # The check button with no checker attached: a named refusal, on a normal
+    # return path, from a callback that exists whatever the session is.
+    replies = press("editor-check", 1, 0)
+    assert "cannot check" in replies["editor-findings"]["children"]
+    assert "delegate-reply" not in replies, "a check must not write under optimize"
+
+    # ...and the other button's refusal lands under the other button. The two
+    # shared one div while they shared a row, and the row was the bug: the
+    # objective dropdown sat beside `check`, which reads no objective.
+    replies = press("editor-optimize", 0, 1)
+    assert "cannot propose" in replies["delegate-reply"]["children"]
+    assert "editor-findings" not in replies, "an optimize must not write under check"
 
 
 # --------------------------------------------------------------------------
@@ -1029,14 +1053,47 @@ def _walk_ids(component):
     return out
 
 
-def working_form_key(app) -> str:
-    """The working-form callback's key, found rather than spelled out.
+def fire(app, triggered: str, inputs: list, state: list, outputs: list) -> dict:
+    """Post a callback the way a browser does, in process.
 
-    Its key is the list of its outputs, so every output added to it renames
-    it -- and a test that hardcodes the name fails for a reason that has
-    nothing to do with what it is testing.
+    `invoke` calls the registered function, which is enough until a callback
+    branches on ``ctx.triggered_id``: Dash's wrapper *rebuilds* the context
+    from the request body, so a direct call sees no trigger and silently
+    exercises one branch whichever button the test meant to press. Going
+    through Flask's test client means the dispatcher assembles the context, so
+    both branches are reachable and neither is a rearrangement of the code
+    under test. No server, no port, no browser.
+
+    Returns the response dict, keyed by component id. An output the callback
+    left alone is *absent* -- that is how Dash spells ``no_update``.
     """
-    return next(k for k in app.callback_map if "working-form.data" in k)
+    body = {
+        # Found from the callback map rather than spelled out, for the reason
+        # in `callback_key`: a key is its output list, so it moves.
+        "output": next(k for k in app.callback_map
+                       if all(f"{o['id']}.{o['property']}" in k for o in outputs)),
+        "outputs": outputs if len(outputs) > 1 else outputs[0],
+        "inputs": inputs,
+        "changedPropIds": [triggered],
+        "state": state,
+    }
+    response = app.server.test_client().post("/_dash-update-component", json=body)
+    assert response.status_code == 200, response.data[:400]
+    return json.loads(response.data)["response"]
+
+
+def callback_key(app, output: str) -> str:
+    """A callback's key, found by one of its outputs rather than spelled out.
+
+    A key is the list of its outputs, so every output added to a callback
+    renames it -- and a test that hardcodes the name then fails for a reason
+    that has nothing to do with what it is testing.
+    """
+    return next(k for k in app.callback_map if output in k)
+
+
+def working_form_key(app) -> str:
+    return callback_key(app, "working-form.data")
 
 
 def _theta_indices(payload):
