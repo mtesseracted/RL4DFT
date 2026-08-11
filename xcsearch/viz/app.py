@@ -335,6 +335,47 @@ def working_form_boxes(parts_latex: dict, note: str) -> list:
     return boxes
 
 
+def identity_line(editing: bool, candidate_id=None, trial=None, score=None,
+                  theta=None, form_hash=None, n_slots=0) -> html.Div:
+    """Whose form and whose numbers the panel is currently showing.
+
+    This line used to be written by the candidate callback, so it always
+    named the selected candidate -- including while the latex directly above
+    it was the *editor's* form and the boxes below it were the editor's
+    slots. Two of the three panes had moved on and this one had not, which
+    made a correct candidate id read as a wrong one.
+
+    It also leads with the **trial**, because that is the number the scrubber
+    is on and the one a person is tracking; the candidate id is a store key
+    that runs to five digits and means nothing on its own.
+    """
+    if editing:
+        return html.Div(
+            [
+                html.Span("editing", style={"fontWeight": 600, "color": "#8a5a00"}),
+                html.Span(f"  {n_slots} coefficient{'' if n_slots == 1 else 's'}"
+                          "  -- not yet proposed",
+                          style={"color": "#4a525c"}),
+                html.Span(f"  form {(form_hash or '')[:12]}",
+                          style={"color": "#9aa1a9"}),
+            ],
+            style={"fontSize": "13px", "fontFamily": "monospace"},
+        )
+    numbers = ", ".join(f"{c:.4f}" for c in (theta or []))
+    shown = [html.Span(f"trial {trial}" if trial is not None
+                       else f"candidate {candidate_id}",
+                       style={"fontWeight": 600})]
+    if trial is not None:
+        shown.append(html.Span(f" (candidate {candidate_id})",
+                               style={"color": "#9aa1a9"}))
+    shown.append(html.Span(f"  theta = [{numbers}]", style={"color": "#4a525c"}))
+    if score is not None:
+        # The stored score: the number the optimizer was told (D20), not a
+        # re-derivation of it.
+        shown.append(html.Span(f"  score = {score:.4e}", style={"color": "#4a525c"}))
+    return html.Div(shown, style={"fontSize": "13px", "fontFamily": "monospace"})
+
+
 def _session_slots(session) -> list:
     """The session's opening form, in the shape a working form is in."""
     return [{"part": entry.get("part"), "bounds": list(entry["bounds"])}
@@ -718,6 +759,110 @@ def _first_available(options: list[dict]) -> str | None:
     return options[0]["value"] if options else None
 
 
+# A tick-driven spinner. Text rather than CSS because the page ships no
+# stylesheet and an animation that needs one would be a new dependency for a
+# progress glyph; the interval callback is already running, so the frame is
+# free. It advances only while something is *actually* in flight, which is
+# what makes a stopped spinner mean "stopped" rather than "not implemented".
+_SPINNER = "|/-\\"
+
+
+def spinner(tick) -> str:
+    return _SPINNER[int(tick or 0) % len(_SPINNER)]
+
+
+def run_activity(session, tick):
+    """One line in the run pane: what the worker is doing, right now.
+
+    Three things can be true, and only one of them was visible anywhere: a
+    delegated run is grinding through its trials, one has just finished, or
+    the session is idle waiting for a submission. The delegate button's reply
+    said "handed to cmaes for 6 trials" once, at the click, in the editor --
+    which is neither where runs are nor a claim that stays true.
+    """
+    state = session.delegation() if session.delegation is not None else None
+    if state:
+        done, total = state.get("done", 0), state.get("trials", 0)
+        where = f"run {state.get('run')} ({state.get('optimizer', '?')})"
+        status = state.get("state", "")
+        if status == "running":
+            return html.Span(
+                f"{spinner(tick)} {where}: trial {done}/{total}",
+                style={"color": "#8a5a00"},
+            )
+        if status == "finished":
+            return html.Span(f"done -- {where} finished {done}/{total} trials; "
+                             "the coefficient boxes are yours again",
+                             style={"color": "#1e7a34"})
+        return html.Span(f"{where}: {status}", style={"color": "#b3261e"})
+    if session.submissions is not None:
+        pending = (session.submissions() or {}).get("pending", 0)
+        if pending:
+            return html.Span(f"{spinner(tick)} evaluating {pending} submitted "
+                             f"candidate{'s' if pending > 1 else ''}",
+                             style={"color": "#8a5a00"})
+        return html.Span("idle -- waiting for a submission",
+                         style={"color": "#7a828c"})
+    return ""
+
+
+# The checker's vocabulary, ranked (`forms.checker`: REFUSAL/WARNING/NOTE).
+# Spelled out because the headline said "error is the worst" against a set
+# that contains no such severity -- so `refusal`, the one that means the form
+# *cannot be composed*, was reported in the same words as a costing note.
+_SEVERITY_RANK = {"note": 1, "warning": 2, "refusal": 3}
+_SEVERITY_COLOUR = {"note": "#4a525c", "warning": "#8a5a00", "refusal": "#b3261e"}
+_HEADLINE = {
+    "note": "PASS with notes",
+    "warning": "PASS with warnings -- this form will run",
+    "refusal": "REFUSED -- this form cannot be composed against this world",
+}
+
+
+def findings_report(findings: list, run_number: int) -> html.Div:
+    """What the check button produced, as something that visibly *happened*.
+
+    A clean check used to render one grey sentence, and clicking again
+    rendered the identical grey sentence -- so the honest reading of the
+    button was "nothing happens". Two changes, both about that: a green or
+    red headline that differs from the surrounding text, and the check's
+    ordinal, so a second click on an unchanged form is still visibly a second
+    click. Findings themselves are unchanged; they were already the useful
+    part.
+    """
+    ordinal = f"check #{run_number}"
+    if not findings:
+        return html.Div(
+            [
+                html.Div(f"PASS -- no findings ({ordinal})",
+                         style={"color": "#1e7a34", "fontWeight": 600}),
+                html.Div("this form composes against this world: every "
+                         "ingredient is supplied, the units balance, and no "
+                         "term is undefined on the declared domain.",
+                         style={"color": "#4a525c", "marginTop": "2px"}),
+            ],
+            style={"fontSize": "11.5px"},
+        )
+    worst = max((f.get("severity") for f in findings),
+                key=lambda s: _SEVERITY_RANK.get(s, 0))
+    lines = [html.Div(
+        f"{_HEADLINE[worst]} -- {len(findings)} "
+        f"finding{'' if len(findings) == 1 else 's'} ({ordinal})",
+        style={"color": _SEVERITY_COLOUR[worst], "fontWeight": 600},
+    )]
+    for f in findings:
+        lines.append(html.Div(
+            [
+                html.Div(f"{f.get('severity', '?')}: {f.get('what', '')}",
+                         style={"fontWeight": 600}),
+                html.Div(f"why: {f.get('why', '')}", style={"color": "#4a525c"}),
+                html.Div(f"remedy: {f.get('remedy', '')}", style={"color": "#4a525c"}),
+            ],
+            style={"marginTop": "4px"},
+        ))
+    return html.Div(lines, style={"fontSize": "11.5px"})
+
+
 def solve_line(session, candidate, system):
     """What the live-solve line says about one (candidate, system).
 
@@ -1016,6 +1161,13 @@ def build_layout(store_path: str, session=None) -> html.Div:
                 ),
                 html.Div(id="selection", style={"fontSize": "12px", "color": "#4a525c",
                                                 "marginTop": "2px"}),
+                # What the worker is doing *right now*, in the pane about
+                # runs. The delegate button's own reply sits at the bottom of
+                # the editor, four panes away and written once at the click;
+                # a run in progress should be visible where runs are.
+                html.Div(id="run-activity",
+                         style={"fontSize": "12px", "marginTop": "6px",
+                                "fontFamily": "monospace"}),
                 hint=_RUN_HINT,
             ),
             functional_card(session),
@@ -1298,6 +1450,7 @@ def create_app(store_path: str, session=None) -> Dash:
         Output("formula-parts", "children"),
         Output("coefficient-boxes", "children"),
         Output("working-form", "data"),
+        Output("theta", "children"),
         Input("editor-document", "data"),
         Input("selected", "data"),
     )
@@ -1322,7 +1475,7 @@ def create_app(store_path: str, session=None) -> Dash:
             except Exception as failure:  # noqa: BLE001 - shown, never a traceback
                 return (html.Div(f"{type(failure).__name__}: {failure}",
                                  style={"color": "#b3261e", "fontSize": "12px"}),
-                        no_update, no_update)
+                        no_update, no_update, no_update)
             slots = summary.get("slots") or []
             return (
                 working_form_boxes(summary.get("parts") or {}, "from the editor"),
@@ -1332,6 +1485,8 @@ def create_app(store_path: str, session=None) -> Dash:
                     disabled=not session.can("submit"),
                 ),
                 {"document": document, "slots": slots, "source": "editor"},
+                identity_line(editing=True, form_hash=summary.get("hash"),
+                              n_slots=len(slots)),
             )
         if selected:
             candidate_id = selected["candidate_id"]
@@ -1348,15 +1503,19 @@ def create_app(store_path: str, session=None) -> Dash:
                 {"document": None,
                  "slots": slots or _session_slots(session),
                  "source": "candidate"},
+                identity_line(editing=False, candidate_id=candidate_id,
+                              trial=selected.get("trial"),
+                              score=selected.get("score"),
+                              theta=record.get("theta") or []),
             )
         return (
             dcc.Markdown("*no candidate selected*"),
             initial_coefficient_rows(session),
             {"document": None, "slots": _session_slots(session), "source": "session"},
+            "",
         )
 
     @app.callback(
-        Output("theta", "children"),
         Output("heatmap", "figure"),
         Output("conditions", "figure"),
         Output("conditions-note", "children"),
@@ -1367,15 +1526,16 @@ def create_app(store_path: str, session=None) -> Dash:
         Input("tick", "n_intervals"),
     )
     def _candidate(selected, baseline_id, scale, _tick):
+        """The comparison figures. The identity line above them belongs to
+        `_working_form`, which is what decides *which form* the panel is
+        about -- printing it here left it describing the selected candidate
+        while the latex directly above it showed the editor's form."""
         if not selected or baseline_id is None:
-            return ("", figures.heatmap([]),
-                    figures.condition_bars([]), "", "")
+            return (figures.heatmap([]), figures.condition_bars([]), "", "")
         candidate_id = selected["candidate_id"]
 
-        record = data.candidate(store_path, candidate_id) or {}
         exact = baseline_id == data.EXACT
         baseline = {} if exact else (data.candidate(store_path, baseline_id) or {})
-        theta = ", ".join(f"{c:.4f}" for c in record.get("theta", []))
         candidate_label = f"candidate {candidate_id}"
         baseline_label = ("exact reference" if exact else
                           baseline.get("label") or f"candidate {baseline_id}")
@@ -1384,17 +1544,6 @@ def create_app(store_path: str, session=None) -> Dash:
         per_system, conditions = data.split_conditions(
             data.heatmap(store_path, candidate_id, baseline_id))
         return (
-            html.Div(
-                [
-                    html.Span(f"candidate {candidate_id}", style={"fontWeight": 600}),
-                    html.Span(f"  theta = [{theta}]", style={"color": "#4a525c"}),
-                    # The stored score: the number the optimizer was told
-                    # (D20), not a re-derivation of it.
-                    html.Span(f"  score = {selected['score']:.4e}",
-                              style={"color": "#4a525c"}),
-                ],
-                style={"fontSize": "13px", "fontFamily": "monospace"},
-            ),
             figures.heatmap(
                 per_system,
                 candidate_label=candidate_label, baseline_label=baseline_label,
@@ -1670,14 +1819,7 @@ def create_app(store_path: str, session=None) -> Dash:
             return session.refuse("check")
         if not document:
             return "nothing to check: the editor has no terms yet"
-        findings = session.check(document)
-        if not findings:
-            return "no findings -- this form composes against this world"
-        return "\n".join(
-            f"{f.get('severity', '?')}: {f.get('what', '')}\n    why: "
-            f"{f.get('why', '')}\n    remedy: {f.get('remedy', '')}"
-            for f in findings
-        )
+        return findings_report(session.check(document), check_clicks)
 
     @app.callback(
         Output("delegate-progress", "children"),
@@ -1689,6 +1831,20 @@ def create_app(store_path: str, session=None) -> Dash:
         if session.delegation is None:
             return ""
         return delegation_line(session.delegation())
+
+    @app.callback(
+        Output("run-activity", "children"),
+        Input("tick", "n_intervals"),
+    )
+    def _run_activity(tick):
+        """Is anything running? Answered in the pane about runs.
+
+        The delegate button's reply is written once, at the click, at the
+        bottom of the editor -- neither where a person looks for a run nor a
+        claim that stays true. This is polled, and the spinner advances only
+        while something is actually in flight.
+        """
+        return run_activity(session, tick)
 
     # -- the live face of the SCF service (D34) ---------------------------
     @app.callback(

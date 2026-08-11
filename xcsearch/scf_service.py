@@ -121,11 +121,22 @@ def solve_candidate(
 ) -> SCFResult:
     """Solve the KS equations for one candidate on one system.
 
-    ``hartree(n)`` is the world's Hartree application -- injected, because the
-    interaction is the one thing about this problem that is a world's
-    business. ``populate(record, density)`` builds the ``XCInput`` the
-    candidate declared it needs at the *current* density; without one, the
-    density and the weights are all it gets, which is right for a local form
+    **Both injected world callables take the record**, and that is not
+    decoration. ``hartree(record, n)`` is the world's Hartree application --
+    injected, because the interaction is the one thing about this problem that
+    is a world's business -- and the grid it integrates over is the *record's*.
+    A composition root that closed over one system's grid instead produced a
+    Hartree potential of the wrong length for every other system, which
+    surfaces as a numpy broadcast error naming two grid sizes and nothing else.
+    Taking the record makes that unstateable rather than merely tested for.
+
+    ``populate(record, density, required)`` builds the ``XCInput`` the
+    candidate declared it needs *at the current density*. The third argument is
+    the functional's requirement set, which only this function is holding, and
+    the second is the iterate rather than the reference: a populate that
+    ignored it would freeze v_xc at the reference density and the solve would
+    settle, confidently, on the wrong answer. Without a populate the density
+    and the weights are all the candidate gets, which is right for a local form
     and a named refusal for anything else.
     """
     if record.laplacian is None or record.v_ext is None:
@@ -135,15 +146,25 @@ def solve_candidate(
         )
     laplacian, v_ext, w = record.laplacian, record.v_ext, record.w
     n_elec = int(record.n_elec)
+    required = set(functional.requires())
+    if populate is None and required:
+        raise ValueError(
+            f"{record.name}: this candidate requires {sorted(required)} and "
+            "the solve was given no `populate`, so those ingredients would "
+            "reach it as None. Pass the world's populate, or solve a form that "
+            "reads only n and w."
+        )
 
     def inputs(density) -> XCInput:
         if populate is None:
             return XCInput(n=density, w=w)
-        return populate(record, density)
+        return populate(record, density, required)
 
     def step(density):
-        v_h = np.asarray(hartree(density))
-        v_ks = v_ext + v_h + np.asarray(functional.vxc(inputs(density)))
+        v_h = _on_grid("hartree", record, lambda: hartree(record, density))
+        v_ks = v_ext + v_h + _on_grid(
+            "the candidate's vxc", record, lambda: functional.vxc(inputs(density))
+        )
         out, kinetic, eps = density_and_kinetic(laplacian, v_ks, w, n_elec)
         return _renormalize(out, w, n_elec), kinetic, eps
 
@@ -189,7 +210,10 @@ def solve_candidate(
     if not converged:
         residual, density, eps, kinetic = best
 
-    e_hartree = 0.5 * float(np.sum(w * density * np.asarray(hartree(density))))
+    e_hartree = 0.5 * float(np.sum(
+        w * density * _on_grid("hartree", record,
+                               lambda: hartree(record, density))
+    ))
     e_total = (
         kinetic
         + float(np.sum(w * v_ext * density))
@@ -215,6 +239,43 @@ def solve_candidate_robust(record, functional, hartree, populate=None,
             best = result
     assert best is not None
     return best
+
+
+def _on_grid(what: str, record, call):
+    """``call()``, on this record's grid, with a sentence when it is not.
+
+    Every system here has its own grid -- the box grows with the molecule, so
+    a real cache holds dozens of node counts -- and an injected callable built
+    against some *other* system's grid is the one mistake this composition
+    invites. Left alone it surfaces two ways, both illegible: numpy raises
+    inside the callable ("operands could not be broadcast together with shapes
+    (501,) (536,)", naming neither the system nor the callable), or the
+    callable returns an array of the wrong length and the caller's next
+    addition raises the same thing one frame further away.
+
+    So both are caught here and re-raised with the nouns attached. The
+    original is chained, not swallowed: a genuine failure inside a world's
+    interaction still shows its own traceback underneath.
+    """
+    try:
+        values = np.asarray(call())
+    except Exception as failure:
+        raise ValueError(
+            f"{record.name}: {what} raised on this system, whose grid has "
+            f"{np.size(record.w)} points -- {type(failure).__name__}: "
+            f"{failure}. If that is a shape complaint, something was built on "
+            "a different system's grid: an injected world callable takes the "
+            "record precisely so it can read this system's own x and w."
+        ) from failure
+    if values.shape != np.shape(record.w):
+        raise ValueError(
+            f"{record.name}: {what} returned an array of shape {values.shape} "
+            f"but this system's grid has shape {np.shape(record.w)}. Something "
+            "was built on a different system's grid -- an injected world "
+            "callable takes the record precisely so it can read this system's "
+            "own x and w."
+        )
+    return values
 
 
 def _renormalize(density, w, n_elec: int):
@@ -275,7 +336,10 @@ class CandidateSCF:
 
     build: object          # candidate key -> Functional
     systems: dict          # system name -> SystemRecord
-    hartree: object        # density -> v_H, the world's interaction
+    # (record, density) -> v_H, the world's interaction. It takes the record
+    # because the grid is the record's: see `solve_candidate`.
+    hartree: object
+    # (record, density, required) -> XCInput, at that density.
     populate: object = None
     results: dict = field(default_factory=dict)
     errors: dict = field(default_factory=dict)
@@ -409,6 +473,10 @@ class SelfConsistentEvaluator:
     """
 
     def __init__(self, systems, hartree, populate=None) -> None:
+        # `hartree` and `populate` are `solve_candidate`'s, unchanged and
+        # passed straight through -- both take the record, because a rung-3
+        # sweep spans systems on different grids and one closed-over grid
+        # would be wrong for all but the first.
         if not systems:
             raise ValueError("SelfConsistentEvaluator needs at least one system")
         self.systems = list(systems)
