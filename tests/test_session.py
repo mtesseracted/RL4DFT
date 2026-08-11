@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 
 import numpy as np
 import pytest
@@ -426,6 +427,102 @@ def test_a_solve_with_no_populate_refuses_a_form_that_needs_one(systems):
             ),
             max_iter=2,
         )
+
+
+def test_the_solve_carries_the_potential_it_converged_with(systems):
+    """The panel draws v_xc, so the result has to carry one -- at the right n.
+
+    On a run that did not converge the returned density is `best`, not the one
+    the last step was taken at, so the potential is evaluated after that swap.
+    A v_xc belonging to a different density than the n beside it is exactly
+    the quiet mismatch the detail plot exists to expose.
+    """
+    system = systems[0]
+    result = solve_candidate_robust(
+        system, FORM.build(LDA_THETA),
+        lambda record, density: apply_interaction_dense(
+            density, record.x, record.w
+        ),
+    )
+    assert result.vxc is not None
+    assert result.vxc.shape == result.n.shape
+    assert np.all(np.isfinite(result.vxc))
+    # It is the potential *at this result's density*, not at the reference.
+    evaluator = FrozenDensityEvaluator([system], supplies=SUPPLIES)
+    lda = FORM.build(LDA_THETA)
+    at_reference = np.asarray(lda.vxc(evaluator.populate(system, set())))
+    at_result = np.asarray(lda.vxc(evaluator.populate(system, set(), result.n)))
+    assert np.allclose(result.vxc, at_result)
+    assert not np.allclose(result.vxc, at_reference)
+    # And the recorded face still emits scalars only (D18 rows carry no arrays).
+    assert all(np.isscalar(v) or isinstance(v, (str, bool))
+               for v in result.as_row().values())
+
+
+def test_the_reference_potential_needs_no_solve_and_arrives_on_a_later_tick(
+    systems,
+):
+    """Ask-and-read, off the request thread.
+
+    The first evaluation of a new form pays the JIT compile (~20 s measured),
+    which is nothing on the worker and a hung page on the tick callback. So
+    the first call enqueues and answers None, and a later poll gets the array
+    -- without anyone having clicked solve.
+    """
+    system = systems[0]
+    lda = FORM.build(LDA_THETA)
+    service = CandidateSCF(
+        build=lambda key: lda,
+        systems={s.name: s for s in systems},
+        hartree=lambda record, density: apply_interaction_dense(
+            density, record.x, record.w
+        ),
+        populate=lambda record, density, required:
+            FrozenDensityEvaluator([record], supplies=SUPPLIES).populate(
+                record, required, density
+            ),
+    )
+    assert service.request_reference("c", system.name) is None
+    for _ in range(200):
+        vxc = service.request_reference("c", system.name)
+        if vxc is not None:
+            break
+        time.sleep(0.05)
+
+    assert vxc is not None, "the reference v_xc never arrived"
+    assert vxc.shape == system.n_ref.shape
+    # It is v_xc at n_ref -- the pointwise version of the recorded metric.
+    expected = FrozenDensityEvaluator([system], supplies=SUPPLIES).populate(
+        system, set()
+    )
+    assert np.allclose(vxc, np.asarray(lda.vxc(expected)))
+    # No solve was asked for, and none happened.
+    assert service.state("c", system.name) == "idle"
+    assert service.collect("c", system.name) is None
+
+
+def test_a_reference_potential_that_cannot_be_computed_stops_asking(systems):
+    """B10's rule for the cheap job: cache the failure, keep the reason."""
+    system = systems[0]
+
+    def explode(key):
+        raise ValueError("this form cannot be evaluated here")
+
+    service = CandidateSCF(
+        build=explode, systems={s.name: s for s in systems},
+        hartree=lambda record, density: density,
+    )
+    for _ in range(200):
+        if service.reference_failure("c", system.name):
+            break
+        service.request_reference("c", system.name)
+        time.sleep(0.05)
+
+    assert "cannot be evaluated here" in service.reference_failure("c", system.name)
+    # Cached as a failure, so a tick that keeps polling never re-enqueues.
+    assert service.request_reference("c", system.name) is None
+    assert ("c", system.name) in service.reference
+    assert not service._reference_pending
 
 
 def test_the_service_caches_per_candidate_and_system(store_with_run, systems):

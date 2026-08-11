@@ -19,12 +19,34 @@ from .data import CONDITIONS
 CANDIDATE = "#d95926"
 BASELINE = "#3987e5"
 REFERENCE = "#222222"
+# The live diagnostic colour, matching the `live (not stored)` line's amber in
+# `app.py`. A fourth role rather than a reuse of CANDIDATE: "this candidate"
+# and "this number is not in any record" are different claims, and a plot that
+# spelled them the same colour would be making the first while hiding the
+# second (D34).
+LIVE = "#b8860b"
+# The same role at a second density. Lighter and dotted rather than a new hue,
+# because it is not a new kind of thing -- it is the same live quantity
+# evaluated somewhere else, and a distinct colour would suggest otherwise.
+LIVE_FAINT = "#d9ad4a"
 
 _LAYOUT = dict(
     margin=dict(l=60, r=20, t=40, b=45),
     template="plotly_white",
     hovermode="closest",
 )
+
+
+def _live_label(what: str, live: dict) -> str:
+    """A live trace's legend entry: what it is, whose, and that it is not stored.
+
+    The candidate id is in the label because the plot repaints on the tick and
+    the solve is cached per candidate: without it, scrubbing to another
+    candidate would leave a curve on screen that belongs to the one before.
+    """
+    candidate = live.get("candidate")
+    whose = f", candidate {candidate}" if candidate is not None else ""
+    return f"{what}{whose} -- live, not stored"
 
 
 def _empty(message: str) -> go.Figure:
@@ -333,8 +355,21 @@ def _arrows(differences, z, bins, metrics, low: float, top: float) -> list[dict]
     return out
 
 
-def density_figure(arrays: dict | None, wells: list[list[float]], name: str):
-    """n(x) for one system, with its wells marked on the axis."""
+def density_figure(arrays: dict | None, wells: list[list[float]], name: str,
+                   live: dict | None = None):
+    """n(x) for one system, with its wells marked on the axis.
+
+    ``live`` is the self-consistent density from a live solve (D34), or None
+    when nobody has asked for one. It is drawn dashed, in the live colour, and
+    labelled *not stored* in the legend -- the amended D13's third option is
+    "explicitly marked as a live diagnostic", and on a plot the marking has to
+    be the line itself rather than a sentence somewhere else on the page.
+
+    The physics is not computed here. The array arrives through the session,
+    which got it from the SCF service's worker thread; `figures` imports
+    nothing it could compute a density with, and `test_import_audit` is what
+    keeps that true.
+    """
     if arrays is None:
         return _empty("the .npz cache for this system is not reachable from here")
 
@@ -343,6 +378,12 @@ def density_figure(arrays: dict | None, wells: list[list[float]], name: str):
         x=arrays["x"], y=arrays["n_ref"], mode="lines", name="n_ref",
         line=dict(color=REFERENCE, width=2),
     )
+    if live is not None and live.get("n") is not None:
+        figure.add_scatter(
+            x=live["x"], y=live["n"], mode="lines",
+            name=_live_label("n [self-consistent]", live),
+            line=dict(color=LIVE, width=2, dash="dash"),
+        )
     peak = float(np.max(arrays["n_ref"]))
     for charge, position in wells:
         figure.add_scatter(
@@ -363,12 +404,31 @@ def density_figure(arrays: dict | None, wells: list[list[float]], name: str):
     return figure
 
 
-def potential_figure(arrays: dict | None, name: str):
-    """The reference XC potential for one system, when 2.4's fields are cached.
+def potential_figure(arrays: dict | None, name: str, live: dict | None = None):
+    """The reference XC potential for one system, and the candidate's beside it.
 
-    The candidate's own v_xc is deliberately absent: computing it here would be
-    physics, and the dashboard does none. What the search measured about it --
-    ``vxc_l2_error`` -- is a record, and the heatmap shows that.
+    The candidate's v_xc used to be absent here, on the grounds that computing
+    it would be physics and the dashboard does none. That was a Stage 2
+    answer (STAGE2B.md's detail-panel question) and **D34 retired it**: the
+    amended D13 keeps the import half -- this module still imports nothing it
+    could compute a potential with -- and adds a third option to the other
+    half, *explicitly marked as a live diagnostic*. Both curves below are
+    injected arrays, marked.
+
+    Two of them, because they answer different questions:
+
+    ``v_xc[n_ref]``
+        the candidate's potential on the *reference* density. Directly
+        comparable to ``vxc_ref``: same density, same gauge (``_vxc_l2_error``
+        compares them absolutely, with no shift), and it is the pointwise
+        version of the ``vxc_l2_error`` cell already on the heatmap. Needs no
+        solve, so it is the one that appears first.
+    ``v_xc[n_scf]``
+        the potential the self-consistent solve converged with. It appears
+        after a solve, dotted rather than dashed, and it is *not* an
+        apples-to-apples comparison with ``vxc_ref`` -- the gap includes the
+        density difference. The legend says which density each is on rather
+        than leaving that to be inferred.
     """
     if arrays is None or arrays.get("vxc_ref") is None:
         return _empty("no reference potential cached for this system (pre-2.4 build)")
@@ -378,6 +438,25 @@ def potential_figure(arrays: dict | None, name: str):
         x=arrays["x"], y=arrays["vxc_ref"], mode="lines", name="vxc_ref",
         line=dict(color=REFERENCE, width=2),
     )
+    live = live or {}
+    if live.get("vxc_at_reference") is not None:
+        figure.add_scatter(
+            x=live["x"], y=live["vxc_at_reference"], mode="lines",
+            name=_live_label("v_xc [at n_ref]", live),
+            line=dict(color=LIVE, width=2, dash="dash"),
+        )
+    if live.get("vxc_self_consistent") is not None:
+        figure.add_scatter(
+            x=live["x"], y=live["vxc_self_consistent"], mode="lines",
+            name=_live_label("v_xc [at n_scf]", live),
+            line=dict(color=LIVE_FAINT, width=2, dash="dot"),
+        )
+    if live.get("reference_failure"):
+        figure.add_annotation(
+            text=f"no candidate v_xc: {live['reference_failure']}",
+            showarrow=False, x=0.5, y=1.0, xref="paper", yref="paper",
+            font=dict(size=10, color="#b3261e"),
+        )
     n_ref = arrays["n_ref"]
     visible = n_ref > 1e-6 * float(np.max(n_ref))
     if visible.any():

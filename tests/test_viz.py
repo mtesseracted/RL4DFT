@@ -323,6 +323,87 @@ def test_the_detail_panel_reads_the_density_through_the_store_pointer(finished_r
     assert figures.potential_figure(arrays, "chain2_x1.00").data
 
 
+def test_a_live_density_is_drawn_dashed_and_says_it_is_not_stored(finished_run):
+    """D34's third option, on a plot.
+
+    A live number's marking has to be the line itself: a curve beside n_ref
+    with nothing to distinguish it is exactly the "quietly computed quantity
+    presented beside measured ones" the rule is written against. So it is
+    dashed, in the live colour rather than the candidate one, and it names
+    the candidate it belongs to -- the plot repaints on the tick and the
+    solve is cached per candidate, so an unlabelled curve could outlive the
+    selection that produced it.
+    """
+    path, _, _ = finished_run
+    arrays = data.density(path, "chain2_x1.00")
+    wells = next(s["wells"] for s in data.systems(path) if s["name"] == "chain2_x1.00")
+
+    plain = figures.density_figure(arrays, wells, "chain2_x1.00")
+    live = figures.density_figure(
+        arrays, wells, "chain2_x1.00",
+        {"x": arrays["x"], "n": arrays["n_ref"] * 1.05, "candidate": 7},
+    )
+    assert len(live.data) == len(plain.data) + 1
+
+    trace = next(t for t in live.data if t.name and "not stored" in t.name)
+    assert trace.line.dash == "dash"
+    assert trace.line.color == figures.LIVE != figures.REFERENCE
+    assert "candidate 7" in trace.name
+
+
+def test_the_potential_plot_draws_both_candidate_potentials_and_says_which(
+    finished_run,
+):
+    """D34 retiring a Stage 2 absence, and the two densities kept apart.
+
+    ``v_xc[n_ref]`` is comparable to ``vxc_ref`` -- same density, and it is
+    the curve behind the recorded ``vxc_l2_error``. ``v_xc[n_scf]`` is not,
+    because the gap includes the density difference. So the legend names the
+    density each is on rather than leaving a reader to assume they match.
+    """
+    path, _, _ = finished_run
+    arrays = data.density(path, "chain2_x1.00")
+    live = {
+        "x": arrays["x"],
+        "vxc_at_reference": arrays["vxc_ref"] * 0.9,
+        "vxc_self_consistent": arrays["vxc_ref"] * 0.8,
+        "candidate": 3,
+    }
+    figure = figures.potential_figure(arrays, "chain2_x1.00", live)
+
+    names = [t.name for t in figure.data]
+    assert names[0] == "vxc_ref"
+    assert any("at n_ref" in n and "not stored" in n for n in names[1:])
+    assert any("at n_scf" in n and "not stored" in n for n in names[1:])
+    dashes = {t.name: t.line.dash for t in figure.data if t.name != "vxc_ref"}
+    assert set(dashes.values()) == {"dash", "dot"}, "the two densities differ"
+
+    # Nothing but the reference when there is no candidate reading.
+    assert len(figures.potential_figure(arrays, "chain2_x1.00").data) == 1
+
+
+def test_a_reference_potential_that_failed_says_so_on_the_plot(finished_run):
+    """A trace that is simply missing is the quiet failure B10 names."""
+    path, _, _ = finished_run
+    arrays = data.density(path, "chain2_x1.00")
+    figure = figures.potential_figure(
+        arrays, "chain2_x1.00",
+        {"x": arrays["x"], "vxc_at_reference": None, "candidate": 3,
+         "reference_failure": "ValueError: no"},
+    )
+    assert len(figure.data) == 1
+    assert "no candidate v_xc" in figure.layout.annotations[0].text
+
+
+def test_no_live_solve_means_no_extra_trace(finished_run):
+    """The absence is the common case and must cost nothing."""
+    path, _, _ = finished_run
+    arrays = data.density(path, "chain2_x1.00")
+    for live in (None, {}, {"x": arrays["x"], "n": None}):
+        figure = figures.density_figure(arrays, [], "chain2_x1.00", live)
+        assert not any(t.name and "not stored" in t.name for t in figure.data)
+
+
 def test_a_missing_npz_says_so_instead_of_failing(finished_run, tmp_path):
     path, _, _ = finished_run
     os.remove(tmp_path / "atom_Z1.npz")

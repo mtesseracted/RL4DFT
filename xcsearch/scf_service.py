@@ -61,6 +61,12 @@ class SCFResult:
     converged: bool
     iterations: int
     residual: float
+    # The candidate's v_xc *at the density this result carries* -- the last
+    # thing the converged loop evaluated, kept rather than recomputed. It is
+    # optional because a caller that only wants energies should not have to
+    # care, and because `as_row` (the recorded face) never emits arrays: a
+    # rung-3 row is scalars, and this field is for a panel to draw.
+    vxc: np.ndarray | None = None
 
     def as_row(self) -> dict:
         """The scalars a record or a panel wants -- no arrays."""
@@ -220,9 +226,17 @@ def solve_candidate(
         + e_hartree
         + float(functional.exc(inputs(density)))
     )
+    # Evaluated *here* rather than kept from the loop: on a run that did not
+    # converge the density above is `best`, which is not the one the last step
+    # was taken at, and a potential that belonged to a different density than
+    # the one beside it is the kind of quiet mismatch this panel exists to
+    # avoid. It costs one reverse pass, once, against the tens to hundreds the
+    # loop above already took.
+    vxc = _on_grid("the candidate's vxc", record,
+                   lambda: functional.vxc(inputs(density)))
     return SCFResult(
         system=record.name, n=density, e_total=e_total, e_orbital=eps,
-        converged=converged, iterations=iteration, residual=residual,
+        converged=converged, iterations=iteration, residual=residual, vxc=vxc,
     )
 
 
@@ -339,12 +353,20 @@ class CandidateSCF:
     # (record, density) -> v_H, the world's interaction. It takes the record
     # because the grid is the record's: see `solve_candidate`.
     hartree: object
-    # (record, density, required) -> XCInput, at that density.
+    # (record, density, required) -> XCInput at that density; ``None`` for the
+    # density means the record's own reference, which is the only density a
+    # caller can name without having solved for one.
     populate: object = None
     results: dict = field(default_factory=dict)
     errors: dict = field(default_factory=dict)
+    # The candidate's v_xc on the *reference* density, per (candidate,
+    # system). A second cache rather than a field on `results`, because it is
+    # answerable without a solve and the whole point is that it arrives first.
+    reference: dict = field(default_factory=dict)
+    reference_errors: dict = field(default_factory=dict)
     _requests: "queue.Queue" = field(default_factory=queue.Queue, init=False)
     _pending: set = field(default_factory=set, init=False)
+    _reference_pending: set = field(default_factory=set, init=False)
     _lock: object = field(default_factory=threading.Lock, init=False)
     _worker: object = field(default=None, init=False)
 
@@ -373,8 +395,48 @@ class CandidateSCF:
                 return "queued"
             self._pending.add(key)
         self.start()
-        self._requests.put(key)
+        self._requests.put(("scf", candidate_key, system))
         return "queued"
+
+    def request_reference(self, candidate_key, system: str):
+        """The candidate's v_xc on the *reference* density, or None for now.
+
+        Ask-and-read in one call, unlike the solve's `request`/`collect` pair,
+        because there is no button: the panel wants this the moment a
+        candidate is selected, so the first call enqueues and returns None and
+        a later tick gets the array. Idempotent -- a poll that arrives while
+        the job is in flight neither blocks nor re-enqueues.
+
+        On the worker for one reason: **the first evaluation of a new form
+        pays the JIT compile**, measured at ~20 s. That is nothing on a
+        background thread and a hung page on the request thread, and this is
+        polled from a tick callback.
+
+        Why this quantity is worth a job of its own: it is what
+        ``vxc_l2_error`` reduces to a single number, and that number is
+        already a record on the heatmap. The curve is the pointwise version of
+        a measurement the search made -- and it is comparable to ``vxc_ref``
+        in a way that a potential at a *solved* density is not, because both
+        are evaluated on the same density (which is also the density
+        ``_vxc_l2_error`` weights by).
+        """
+        if system not in self.systems:
+            return None
+        key = (candidate_key, system)
+        with self._lock:
+            if key in self.reference:
+                return self.reference[key]
+            if key in self._reference_pending:
+                return None
+            self._reference_pending.add(key)
+        self.start()
+        self._requests.put(("reference", candidate_key, system))
+        return None
+
+    def reference_failure(self, candidate_key, system: str):
+        """Why there is no reference v_xc, when there is a reason."""
+        with self._lock:
+            return self.reference_errors.get((candidate_key, system))
 
     def collect(self, candidate_key, system: str):
         """The result if it is ready, else ``None``. Called on the tick."""
@@ -420,26 +482,70 @@ class CandidateSCF:
             self.results[(candidate_key, system)] = result
         return result
 
+    def reference_vxc_now(self, candidate_key, system: str) -> np.ndarray:
+        """The candidate's v_xc on the reference density, on this thread.
+
+        No SCF: one evaluation of the form at ``n_ref``, which is the density
+        every rung-1 record was measured at. ``None`` for the density is how
+        the populate port spells "the record's own reference".
+        """
+        record = self.systems[system]
+        functional = self.build(candidate_key)
+        if self.populate is None:
+            inputs = XCInput(n=record.n_ref, w=record.w)
+        else:
+            inputs = self.populate(record, None, set(functional.requires()))
+        return _on_grid("the candidate's vxc", record,
+                        lambda: functional.vxc(inputs))
+
     def _run(self) -> None:
         while True:
-            key = self._requests.get()
-            candidate_key, system = key
-            try:
-                result = solve_candidate_robust(
-                    self.systems[system], self.build(candidate_key),
-                    self.hartree, self.populate,
-                )
-            except BaseException as failure:  # noqa: BLE001 - shown, not lost
-                # A worker that dies quietly is B10's failure mode. The
-                # dashboard renders this string beside the system instead of
-                # spinning on "queued" forever.
-                with self._lock:
-                    self.errors[key] = f"{type(failure).__name__}: {failure}"
-                    self._pending.discard(key)
-                continue
+            kind, candidate_key, system = self._requests.get()
+            if kind == "reference":
+                self._reference_job(candidate_key, system)
+            else:
+                self._solve_job(candidate_key, system)
+
+    def _solve_job(self, candidate_key, system: str) -> None:
+        key = (candidate_key, system)
+        try:
+            result = solve_candidate_robust(
+                self.systems[system], self.build(candidate_key),
+                self.hartree, self.populate,
+            )
+        except BaseException as failure:  # noqa: BLE001 - shown, not lost
+            # A worker that dies quietly is B10's failure mode. The
+            # dashboard renders this string beside the system instead of
+            # spinning on "queued" forever.
             with self._lock:
-                self.results[key] = result
+                self.errors[key] = f"{type(failure).__name__}: {failure}"
                 self._pending.discard(key)
+            return
+        with self._lock:
+            self.results[key] = result
+            self._pending.discard(key)
+
+    def _reference_job(self, candidate_key, system: str) -> None:
+        """B10's rule again, for the cheaper job.
+
+        A failure caches as ``None`` so the panel stops asking -- an
+        unanswerable evaluation stays unanswerable, and a tick that re-enqueued
+        it would spin a worker thread forever behind a plot nobody can see.
+        The reason is kept beside it, because a trace that is simply missing is
+        the quiet failure this codebase keeps refusing to ship.
+        """
+        key = (candidate_key, system)
+        try:
+            vxc = self.reference_vxc_now(candidate_key, system)
+        except BaseException as failure:  # noqa: BLE001 - shown, not lost
+            with self._lock:
+                self.reference[key] = None
+                self.reference_errors[key] = f"{type(failure).__name__}: {failure}"
+                self._reference_pending.discard(key)
+            return
+        with self._lock:
+            self.reference[key] = vxc
+            self._reference_pending.discard(key)
 
 
 # Metric names for the rung-3 rows. Part of the record contract, like the
