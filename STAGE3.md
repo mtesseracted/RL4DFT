@@ -1296,8 +1296,22 @@ of `plots.py` privates (no allowlist change), overlay curves on
   worth naming as its own failure mode: the prose was load-bearing, and it
   was wrong.
 
-  Three live curves, dashed/dotted and labelled `-- live, not stored` in the
-  legend, because on a plot the D34 marking has to be the line itself. The
+  Three live curves, dashed/dotted and labelled `· live, not stored` in the
+  legend, because on a plot the D34 marking has to be the line itself.
+
+  The legend goes **inside the axes**, top-left, translucent. Plotly's default
+  puts it beside the plot and sizes the plot area around the longest entry, so
+  the density and the potential — stacked, and read as sharing an x axis —
+  got different plotting areas the moment their labels differed in length.
+  Inside, both keep margins `l=60, r=20` and neither sets `xaxis.domain`, so
+  the axes line up whatever the legend says. Top-left is the empty corner in
+  both: a density is a bump that decays at the edges and this world's v_xc is
+  a well. `history_strip` and `condition_bars` already solved the same problem
+  their own way (horizontal, above the axes) — a strip chart is too short to
+  overlay — so the file now has two placements for two shapes rather than one
+  default nobody chose. The labels shortened to suit (`v_xc [n_ref] #1 ·
+  live, not stored`); `not stored` stays whole, being the part that is not
+  decoration. The
   import half is untouched: `figures` still imports only `{records, numpy,
   plotly, data}` and `session` still imports nothing, so `test_import_audit`
   is unchanged — again the strongest evidence the ports hold.

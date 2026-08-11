@@ -348,7 +348,7 @@ def test_a_live_density_is_drawn_dashed_and_says_it_is_not_stored(finished_run):
     trace = next(t for t in live.data if t.name and "not stored" in t.name)
     assert trace.line.dash == "dash"
     assert trace.line.color == figures.LIVE != figures.REFERENCE
-    assert "candidate 7" in trace.name
+    assert "#7" in trace.name
 
 
 def test_the_potential_plot_draws_both_candidate_potentials_and_says_which(
@@ -373,8 +373,8 @@ def test_the_potential_plot_draws_both_candidate_potentials_and_says_which(
 
     names = [t.name for t in figure.data]
     assert names[0] == "vxc_ref"
-    assert any("at n_ref" in n and "not stored" in n for n in names[1:])
-    assert any("at n_scf" in n and "not stored" in n for n in names[1:])
+    assert any("[n_ref]" in n and "not stored" in n for n in names[1:])
+    assert any("[n_scf]" in n and "not stored" in n for n in names[1:])
     dashes = {t.name: t.line.dash for t in figure.data if t.name != "vxc_ref"}
     assert set(dashes.values()) == {"dash", "dot"}, "the two densities differ"
 
@@ -393,6 +393,31 @@ def test_a_reference_potential_that_failed_says_so_on_the_plot(finished_run):
     )
     assert len(figure.data) == 1
     assert "no candidate v_xc" in figure.layout.annotations[0].text
+
+
+def test_the_detail_legends_sit_inside_the_axes(finished_run):
+    """Alignment, which is what a legend beside the plot costs.
+
+    Plotly's default legend sits outside on the right and takes its width from
+    the longest entry, so the density and the potential -- stacked, sharing an
+    x axis by eye -- ended up with different plotting areas the moment their
+    labels differed in length. Inside, the axes are the same width whatever
+    the legend says.
+    """
+    path, _, _ = finished_run
+    arrays = data.density(path, "chain2_x1.00")
+    live = {"x": arrays["x"], "n": arrays["n_ref"],
+            "vxc_at_reference": arrays["vxc_ref"], "candidate": 1}
+    for figure in (figures.density_figure(arrays, [], "chain2_x1.00", live),
+                   figures.potential_figure(arrays, "chain2_x1.00", live)):
+        legend = figure.layout.legend
+        assert legend.x < 1.0 and legend.y <= 1.0, "still outside the axes"
+        assert legend.xanchor == "left" and legend.yanchor == "top"
+        # Translucent, because "inside" means it can land on a curve.
+        assert "rgba" in legend.bgcolor
+    # Both keep the shared margins, which is the other half of lining up.
+    assert (figures.density_figure(arrays, [], "x").layout.margin
+            == figures.potential_figure(arrays, "x").layout.margin)
 
 
 def test_no_live_solve_means_no_extra_trace(finished_run):

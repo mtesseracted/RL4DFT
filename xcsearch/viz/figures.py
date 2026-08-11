@@ -36,17 +36,34 @@ _LAYOUT = dict(
     hovermode="closest",
 )
 
+# An overlaid legend, top-left inside the axes. Plotly's default sits *beside*
+# the plot and takes its width from the longest entry, so two stacked figures
+# with different labels get different plotting areas and their x axes stop
+# lining up -- which is the whole point of stacking them. Inside, the axes are
+# the same width whatever the legend says.
+#
+# Top-left because it is the empty corner in both figures that use this: a
+# density is a bump that decays to zero at the edges, and this world's v_xc is
+# a well, so both leave the upper left clear. The translucent backing is for
+# the case where they do not.
+_LEGEND_INSIDE = dict(
+    x=0.01, y=0.99, xanchor="left", yanchor="top",
+    bgcolor="rgba(255,255,255,0.78)", bordercolor="#e2e2e2", borderwidth=1,
+    font=dict(size=10),
+)
+
 
 def _live_label(what: str, live: dict) -> str:
     """A live trace's legend entry: what it is, whose, and that it is not stored.
 
-    The candidate id is in the label because the plot repaints on the tick and
-    the solve is cached per candidate: without it, scrubbing to another
-    candidate would leave a curve on screen that belongs to the one before.
+    Terse, because the legend sits *inside* the axes (`_LEGEND_INSIDE`) and
+    every character is plot area. `not stored` stays whole -- it is the D34
+    marking and the one part that is not decoration -- and the candidate
+    shortens to `#n`, which is how the history strip already spells it.
     """
     candidate = live.get("candidate")
-    whose = f", candidate {candidate}" if candidate is not None else ""
-    return f"{what}{whose} -- live, not stored"
+    whose = f" #{candidate}" if candidate is not None else ""
+    return f"{what}{whose} · live, not stored"
 
 
 def _empty(message: str) -> go.Figure:
@@ -381,7 +398,7 @@ def density_figure(arrays: dict | None, wells: list[list[float]], name: str,
     if live is not None and live.get("n") is not None:
         figure.add_scatter(
             x=live["x"], y=live["n"], mode="lines",
-            name=_live_label("n [self-consistent]", live),
+            name=_live_label("n [scf]", live),
             line=dict(color=LIVE, width=2, dash="dash"),
         )
     peak = float(np.max(arrays["n_ref"]))
@@ -400,7 +417,10 @@ def density_figure(arrays: dict | None, wells: list[list[float]], name: str,
             range=[float(arrays["x"][visible].min()) - margin,
                    float(arrays["x"][visible].max()) + margin]
         )
-    figure.update_layout(**_LAYOUT, title=name, xaxis_title="x (a.u.)", yaxis_title="n(x)")
+    figure.update_layout(
+        **_LAYOUT, title=name, xaxis_title="x (a.u.)", yaxis_title="n(x)",
+        legend=_LEGEND_INSIDE,
+    )
     return figure
 
 
@@ -442,13 +462,13 @@ def potential_figure(arrays: dict | None, name: str, live: dict | None = None):
     if live.get("vxc_at_reference") is not None:
         figure.add_scatter(
             x=live["x"], y=live["vxc_at_reference"], mode="lines",
-            name=_live_label("v_xc [at n_ref]", live),
+            name=_live_label("v_xc [n_ref]", live),
             line=dict(color=LIVE, width=2, dash="dash"),
         )
     if live.get("vxc_self_consistent") is not None:
         figure.add_scatter(
             x=live["x"], y=live["vxc_self_consistent"], mode="lines",
-            name=_live_label("v_xc [at n_scf]", live),
+            name=_live_label("v_xc [n_scf]", live),
             line=dict(color=LIVE_FAINT, width=2, dash="dot"),
         )
     if live.get("reference_failure"):
@@ -464,7 +484,8 @@ def potential_figure(arrays: dict | None, name: str, live: dict | None = None):
             range=[float(arrays["x"][visible].min()), float(arrays["x"][visible].max())]
         )
     figure.update_layout(
-        **_LAYOUT, title=f"{name}: reference XC potential",
+        **_LAYOUT, title=f"{name}: XC potential",
         xaxis_title="x (a.u.)", yaxis_title="v_xc(x)",
+        legend=_LEGEND_INSIDE,
     )
     return figure
