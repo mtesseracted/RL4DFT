@@ -189,15 +189,25 @@ _SYSTEM_HINT = (
     "One system of the run's population, and what the selected candidate "
     "scored on it -- the stored per-system records behind one column of the "
     "heatmap above.\n\n"
-    "The curves are cached reference data: the exact density n(x) with the "
-    "wells marked on the axis, and the reference XC potential where the build "
-    "cached one. They are a property of the system, so they do not change as "
-    "you move the slider -- only the metric line does.\n\n"
-    "The candidate's own density is deliberately not drawn. Producing it "
-    "means an SCF solve, and the dashboard does no physics; it renders "
-    "records. For reference-vs-LDA-vs-candidate density curves, run "
-    "`python -m xcsearch.worlds.exp1d.plots` from the repo root, which solves "
-    "each system self-consistently and writes them under data/plots/."
+    "The solid curves are cached reference data: the exact density n(x) with "
+    "the wells marked on the axis, and the reference XC potential where the "
+    "build cached one. They are a property of the system, so they do not "
+    "change as you move the slider -- only the metric line does.\n\n"
+    "The dashed and dotted curves are the selected candidate's, and they are "
+    "LIVE DIAGNOSTICS: computed on request, never written to the store, and "
+    "labelled so in the legend. There are three, and they are not "
+    "interchangeable:\n"
+    "  v_xc [at n_ref] -- the candidate's potential on the reference "
+    "density. It needs no solve, so it appears as soon as you pick a "
+    "candidate (a moment later for a form it has never compiled). This is "
+    "the curve behind the heatmap's vxc_l2_error cell, and the honest "
+    "comparison against vxc_ref: same density, same gauge.\n"
+    "  n [self-consistent] and v_xc [at n_scf] -- what the SCF actually "
+    "converged to, after you press the button. Comparing v_xc [at n_scf] "
+    "against vxc_ref is NOT apples-to-apples: the gap includes the density "
+    "difference as well as the functional's error.\n\n"
+    "For the same curves offline, rendered per system, run "
+    "`python -m xcsearch.worlds.exp1d.plots` from the repo root."
 )
 
 _PROPOSAL_HINT = (
@@ -1585,16 +1595,31 @@ def create_app(store_path: str, session=None) -> Dash:
         arrays = data.density(store_path, system)
 
         metrics_text = ""
+        live = None
         if selected:
             metrics = data.system_metrics(
                 store_path, selected["candidate_id"], system
             )
             metrics_text = "   ".join(f"{k} = {v:.4e}" for k, v in sorted(metrics.items()))
+            # The live solve's own arrays, if one has finished for *this*
+            # (candidate, system). None the rest of the time, which is what
+            # keeps a curve from outliving the selection that produced it: the
+            # service's cache is keyed by the pair, so scrubbing to a
+            # candidate nobody has solved simply drops the trace.
+            # One dict for both plots: the density figure reads `n`, the
+            # potential figure reads the two `vxc_*` keys, and neither has to
+            # know which reading supplied what. `reference_vxc` needs no solve
+            # and so is asked for unconditionally; `solve_arrays` answers only
+            # once somebody has clicked.
+            for reading in (session.reference_vxc, session.solve_arrays):
+                if reading is not None:
+                    live = {**(live or {}),
+                            **(reading(selected["candidate_id"], system) or {})}
 
         return (
             html.Span(metrics_text, style={"fontFamily": "monospace"}),
-            figures.density_figure(arrays, wells, system),
-            figures.potential_figure(arrays, system),
+            figures.density_figure(arrays, wells, system, live),
+            figures.potential_figure(arrays, system, live),
         )
 
     @app.callback(

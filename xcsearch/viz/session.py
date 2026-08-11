@@ -99,6 +99,19 @@ class Session:
     # for and hid the ones that raised.
     solve_state: object = None
     solve_failure: object = None
+    # (candidate key, system name) -> ``{"x", "n", "candidate"}`` for the
+    # finished solve, or None. A *third* reading beside `collect`, and
+    # deliberately not a widening of it: `collect` returns the scalar row a
+    # text line wants, and putting grid-sized arrays in it would make every
+    # tick of every panel that reads a number carry two densities. The plot
+    # asks for arrays; the line asks for scalars.
+    solve_arrays: object = None
+    # (candidate key, system name) -> ``{"x", "vxc_at_reference", "candidate"}``
+    # for the candidate's potential on the reference density, or None until it
+    # is ready. Ask-and-read in one call, and *not* gated on a solve: it needs
+    # none, and it is the curve behind the recorded `vxc_l2_error`. A session
+    # without it simply draws no candidate potential.
+    reference_vxc: object = None
     # A form document (as plain JSON) -> a list of finding dicts.
     check: object = None
     # (document json, objective, optimizer, trials) -> a sentence about the

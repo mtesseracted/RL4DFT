@@ -791,9 +791,10 @@ def main() -> None:
         # unnamed, which is what makes the solve self-consistent rather than a
         # fixed-potential solve wearing the name (see the two docstrings).
         live_inputs = FrozenDensityEvaluator(systems, supplies=supplies)
+        systems_by_name = {s.name: s for s in systems}
         scf = CandidateSCF(
             build=lambda key: rebuild_candidate(store, key),
-            systems={s.name: s for s in systems},
+            systems=systems_by_name,
             hartree=lambda record, density: apply_interaction_dense(
                 density, record.x, record.w
             ),
@@ -999,6 +1000,24 @@ def main() -> None:
                 ),
                 "solve_state": scf.state,
                 "solve_failure": scf.failure,
+                # The arrays behind that row, for the detail plots (D34). The
+                # grid comes off the *record*, not the result, for the same
+                # reason `hartree` takes one: it is the system's, and reading
+                # it anywhere else is how the two get out of step.
+                "solve_arrays": lambda key, system: (
+                    {"x": systems_by_name[system].x, "n": result.n,
+                     "vxc_self_consistent": result.vxc, "candidate": key}
+                    if (result := scf.collect(key, system)) else None
+                ),
+                # No solve behind this one: the candidate's potential on the
+                # reference density is one evaluation, and it is the curve the
+                # heatmap's `vxc_l2_error` cell reduces to a number.
+                "reference_vxc": lambda key, system: {
+                    "x": systems_by_name[system].x,
+                    "vxc_at_reference": scf.request_reference(key, system),
+                    "reference_failure": scf.reference_failure(key, system),
+                    "candidate": key,
+                } if system in systems_by_name else None,
                 "check": capabilities["check"],
                 "canonicalize": capabilities["canonicalize"],
                 "term": capabilities["term"],

@@ -1283,6 +1283,47 @@ of `plots.py` privates (no allowlist change), overlay curves on
   the *second decimal* and moved from 3.1e-2 below the reference to 8.5e-3
   above it. The correct solve costs 2.1 s against 1.5 s (110 iterations
   against 70), so nothing was bought by the defect either.
+- *The detail plots draw the candidate now, and D34 is why.* Asked as a
+  question — "does solve SCF plot the density and v_xc, or only print the
+  summary?" — and the answer was *only the summary*, on the strength of a
+  `potential_figure` docstring reading "computing it here would be physics,
+  and the dashboard does none". That sentence is inherited from
+  `STAGE2B.md`'s detail-panel answer and **it was already superseded twice**:
+  by STAGE2B's own R2 analysis ("which half of D13 actually breaks — only one
+  of them"; the *import* half does not) and then by D34, which added the
+  third option — *explicitly marked as a live diagnostic* — precisely so this
+  could be drawn. A stale docstring outliving the decision that retired it is
+  worth naming as its own failure mode: the prose was load-bearing, and it
+  was wrong.
+
+  Three live curves, dashed/dotted and labelled `-- live, not stored` in the
+  legend, because on a plot the D34 marking has to be the line itself. The
+  import half is untouched: `figures` still imports only `{records, numpy,
+  plotly, data}` and `session` still imports nothing, so `test_import_audit`
+  is unchanged — again the strongest evidence the ports hold.
+  - `n [self-consistent]` and `v_xc [at n_scf]`, from the solve. `SCFResult`
+    gains a `vxc` field, evaluated **after** the non-converged branch swaps in
+    `best`, so the potential always belongs to the density beside it. One
+    reverse pass against the loop's tens-to-hundreds. `as_row` still emits
+    scalars only: a rung-3 row carries no arrays.
+  - `v_xc [at n_ref]`, which needs **no solve** and is the more useful of the
+    two. It is the pointwise version of `vxc_l2_error`, already a record on
+    the heatmap, and the only one honestly comparable to `vxc_ref` — same
+    density, and `_vxc_l2_error` compares the two absolutely with no gauge
+    shift. `v_xc[n_scf]` against `vxc_ref` folds the density difference into
+    what looks like functional error, so the legend names the density each
+    curve is on rather than leaving it to be inferred.
+
+  `request_reference` is ask-and-read in one call rather than the solve's
+  request/collect pair, because there is no button: the panel wants it the
+  moment a candidate is selected. It runs **on the worker** for one measured
+  reason — a new form's first evaluation pays the ~20 s JIT compile, which is
+  nothing on a background thread and a hung page on a tick callback. A
+  failure caches as `None` with its reason kept, so a poll neither re-enqueues
+  forever nor leaves the absence unexplained. Measured live: the reference
+  curve arrives ~2 s after selection with no click, and on `chain2_x2.20` the
+  LDA candidate bottoms at -0.414 against the reference's -0.674 — the
+  underestimate `vxc_l2_error` scores, now visible as a shape.
 - *A delegated run's first trial pays a compile.* A new document means new
   term hashes, so the JIT cache misses: ~20 s for a two-term form, against
   <2 s for the five trials after it. Small delegations are mostly compile,
