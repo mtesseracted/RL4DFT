@@ -17,31 +17,11 @@ test set. However, SyFES restricted its search to the **semi-local** part of
 the functional: the enhancement factors inside a fixed B97-style scaffold,
 with all nonlocal ingredients (exact exchange, VV10 dispersion) frozen.
 
-The end goal of this repo is functional search over the **full XC
-functional**, with a search space that is *not* constrained to be local or
+The end goal of this repo is a harness covering the **full XC
+functional**, with a space that is *not* constrained to be local or
 semi-local. The central hypothesis this project is based on is that **the
 best functional will be nonlocal**: the few functionals known exactly for toy
 systems, and the best-performing functionals in practice, are nonlocal.
-
-## The cost problem, and ML-guided search
-
-Admitting nonlocality and more complex forms makes the search space (and each
-candidate evaluation) exponentially more expensive — prohibitively so for
-brute-force evolutionary search. The central idea this repo will explore is
-using ML frameworks to speed up discovery:
-
-- **Actor–critic**: actor agents propose functionals; critic agents are
-  incentivized to find, as fast as possible, systems for which a proposed
-  functional performs poorly.
-- **AlphaGo-style self-play**: agents play a game with a defense (their
-  functional) and an attack (test systems they propose), with scoring rules
-  that determine when a game ends and who wins.
-
-In either scheme, the agents proposing functionals need context on the
-performance history of past attempts — otherwise they will circle through
-similar candidates. One idea is a locality-sensitive-hash database of
-attempted functionals, annotated with the regimes in which each attempt was
-accurate or inaccurate.
 
 ## Approach
 
